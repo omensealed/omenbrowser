@@ -7247,6 +7247,43 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(
+        feature = "omenchat-announcement-rooms",
+        feature = "omenchat-slow-mode",
+        feature = "omenchat-room-media-policy",
+        feature = "omenchat-moderation-audit"
+    ))]
+    fn canonical_server_acceptance_covers_authoritative_capability_vocabulary() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: crate::protocol::KNOWN_SESSION_CAPABILITIES
+                    .iter()
+                    .map(|capability| (*capability).into())
+                    .collect(),
+                client_instance_id: Some(crate::protocol::ClientInstanceId::new([13; 16])),
+            },
+        )
+        .expect("canonical capability request");
+
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 2, None, request))
+            .expect("session open");
+        let accepted = crate::protocol::parse_session_accept_negotiation(&response[0].body)
+            .expect("valid acceptance")
+            .expect("explicit acceptance")
+            .accepted_capabilities
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = crate::protocol::KNOWN_SESSION_CAPABILITIES
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(accepted, expected);
+    }
+
+    #[test]
     fn message_revisions_capability_requires_explicit_durable_request() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let request = crate::protocol::with_session_open_negotiation(

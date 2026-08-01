@@ -60,6 +60,10 @@ impl DesktopApp {
                 self.update_toggle_reduced_motion();
                 Ok(iced::Task::none())
             }
+            Message::Theme(ThemeMessage::ToggleLowPower) => {
+                self.update_toggle_low_power();
+                Ok(iced::Task::none())
+            }
             _ => Err(message),
         }
     }
@@ -75,6 +79,10 @@ impl DesktopApp {
 
     pub(super) fn update_toggle_reduced_motion(&mut self) {
         self.app.toggle_settings_reduced_motion();
+    }
+
+    pub(super) fn update_toggle_low_power(&mut self) {
+        self.app.toggle_settings_low_power_mode();
     }
 }
 

@@ -2488,6 +2488,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pre_cancelled_nomadnet_request_dispatches_neither_packet_nor_resource() {
+        for request_resource in [false, true] {
+            let (prepared, resource_frame, mut channel, _event_rx) =
+                active_nomadnet_request_fixture().await;
+            let direct_frame =
+                NativeLinkRequestFrame::build("/", &BTreeMap::new(), 2.0).expect("direct frame");
+            let frame = if request_resource {
+                resource_frame
+            } else {
+                direct_frame
+            };
+            assert_eq!(frame.requires_request_resource(), request_resource);
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+
+            let error = Reticulum09LinkRequestAdapter
+                .send_request(&prepared, &frame, Duration::from_secs(1), cancel)
+                .await
+                .expect_err("pre-cancelled request");
+            assert!(format!("{error}").contains("cancelled"));
+            assert!(channel.tx_channel.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn cancelled_nomadnet_request_releases_outbound_resource_and_reports_direction() {
         let (prepared, frame, mut channel, mut event_rx) = active_nomadnet_request_fixture().await;
         let cancel = CancellationToken::new();
@@ -2545,6 +2570,7 @@ mod tests {
             lifecycle.reason.as_deref(),
             Some("browser request cancelled")
         );
+        assert_no_request_primitive_replay(&mut channel).await;
     }
 
     #[tokio::test]
@@ -2605,6 +2631,32 @@ mod tests {
             lifecycle.reason.as_deref(),
             Some("NomadNet response timeout")
         );
+        assert_no_request_primitive_replay(&mut channel).await;
+    }
+
+    async fn assert_no_request_primitive_replay(
+        channel: &mut rns_transport::iface::InterfaceChannel,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let remaining = deadline - now;
+            let Ok(Some(delivery)) =
+                tokio::time::timeout(remaining, channel.tx_channel.recv()).await
+            else {
+                break;
+            };
+            assert!(
+                !matches!(
+                    delivery.packet.context,
+                    PacketContext::Request | PacketContext::ResourceAdvrtisement
+                ),
+                "terminal request cleanup must not replay through another request primitive"
+            );
+        }
     }
 
     #[tokio::test]

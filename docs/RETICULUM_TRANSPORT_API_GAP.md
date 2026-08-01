@@ -231,14 +231,15 @@ adds current-current Resource evidence without changing the context-zero wire
 path; pinned-Python OMENchat transport and interactive native-window soak remain
 pending.
 
-Maintainer release disposition (2026-07-19): the separate known-red
-two-process UDP Resource gate reflects the published Reticulum/LXMF 0.9.5
-implementation and remains visible as an upstream parity limitation. It blocks
-claims that maximum UDP Resource transfer works, but does not block the
-version-aligned OMEN v0.9.5-1 release. No fallback, local patch, fork, test
-weakening, or upstream coordination is introduced. The passing OMENchat,
-NomadNet, pinned/current Python, and mixed-version Resource cases remain scoped
-to their tested interfaces and primitives.
+Maintainer release disposition (reverified 2026-07-31): the separate known-red
+two-process UDP Resource gate reflects the exact locked crates.io
+`reticulum-rs-transport = 0.9.6` implementation and remains visible as an
+upstream parity limitation. It blocks claims that maximum UDP Resource
+transfer works, but does not block the version-aligned OMEN release. No
+fallback, local patch, fork, test weakening, or upstream coordination is
+introduced. The passing OMENchat, NomadNet, pinned/current Python, and
+mixed-version Resource cases remain scoped to their tested interfaces and
+primitives.
 
 Reticulum 0.9.6 requalification (2026-07-21): the same deterministic sentinel
 still fails with a 456-byte upstream UDP buffer and a 483-byte maximum type-one

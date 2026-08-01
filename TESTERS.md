@@ -11,6 +11,18 @@ Maintainers collecting repeatable Linux idle measurements can run
 isolated app root and records raw evidence under the requested results directory;
 set `HEADLESS=1` for a disposable Xvfb/i3 session, and see `docs/TESTING.md` for
 the measurement and before/after comparison contract.
+For a controlled Low-power mode comparison, build one release binary and run:
+
+```bash
+OMENBROWSER_BINARY=target/release/omenbrowser_rs \
+  bash scripts/measure-low-power-desktop.sh /tmp/omen-low-power-results
+```
+
+The paired runner uses isolated normal and low-power roots, verifies the same
+binary hash for both cases, and records raw evidence. Repeat into a new output
+directory with `CASE_ORDER=low-power-first` to check ordering effects. Report
+native compositor/GPU observations separately; missing GPU tooling is not zero
+activity.
 Maintainers can also run `scripts/measure-pane-stress.sh` to restore and
 close/reopen a deterministic isolated 50-pane workspace across three native
 Linux cycles; this never uses the normal identity or message roots.

@@ -168,6 +168,50 @@ async fn async_main() -> anyhow::Result<()> {
             })
             .await
         }
+        #[cfg(feature = "chat-client")]
+        CliCommand::LxmfInvitationSmoke {
+            peer_hash,
+            server_destination,
+            wait_secs,
+            output,
+            stdout,
+            overrides,
+        } => {
+            run_lxmf_invitation_smoke_command(LxmfInvitationSmokeCommandInput {
+                peer_hash,
+                server_destination,
+                wait_secs,
+                output,
+                stdout,
+                overrides: *overrides,
+            })
+            .await
+        }
+        #[cfg(not(feature = "chat-client"))]
+        CliCommand::LxmfInvitationSmoke { .. } => {
+            anyhow::bail!("LXMF invitation smoke unavailable: build with feature chat-client")
+        }
+        CliCommand::LxmfInvitationCapabilityProbe {
+            peer_hash,
+            cancel_after_ms,
+            output,
+            stdout,
+            overrides,
+        } => {
+            run_lxmf_invitation_capability_probe_command(
+                peer_hash,
+                cancel_after_ms,
+                output,
+                stdout,
+                *overrides,
+            )
+            .await
+        }
+        CliCommand::LxmfTopicCapabilityProbe {
+            output,
+            stdout,
+            overrides,
+        } => run_lxmf_topic_capability_probe_command(output, stdout, *overrides).await,
         CliCommand::LxmfPropagationSync {
             lxmf_smoke_propagation_node,
             sync_limit,
@@ -363,6 +407,26 @@ enum CliCommand {
         bundle_report: Option<PathBuf>,
         overrides: Box<SmokeOverrides>,
     },
+    LxmfInvitationSmoke {
+        peer_hash: Option<String>,
+        server_destination: String,
+        wait_secs: u64,
+        output: Option<PathBuf>,
+        stdout: bool,
+        overrides: Box<SmokeOverrides>,
+    },
+    LxmfInvitationCapabilityProbe {
+        peer_hash: String,
+        cancel_after_ms: Option<u64>,
+        output: Option<PathBuf>,
+        stdout: bool,
+        overrides: Box<SmokeOverrides>,
+    },
+    LxmfTopicCapabilityProbe {
+        output: Option<PathBuf>,
+        stdout: bool,
+        overrides: Box<SmokeOverrides>,
+    },
     LxmfPropagationSync {
         lxmf_smoke_propagation_node: Option<String>,
         sync_limit: Option<u32>,
@@ -435,6 +499,16 @@ struct LxmfInteropCommandInput {
     stdout: bool,
     suggest_shell: bool,
     bundle_report: Option<PathBuf>,
+    overrides: SmokeOverrides,
+}
+
+#[cfg(feature = "chat-client")]
+struct LxmfInvitationSmokeCommandInput {
+    peer_hash: Option<String>,
+    server_destination: String,
+    wait_secs: u64,
+    output: Option<PathBuf>,
+    stdout: bool,
     overrides: SmokeOverrides,
 }
 
@@ -581,6 +655,10 @@ impl CliCommand {
             .filter(|value| !value.is_empty() && value != "PROPAGATION_NODE_ADDRESS");
         let mut lxmf_include_ticket = false;
         let mut lxmf_interop_wait_secs = None;
+        let mut lxmf_invitation_smoke_server = None;
+        let mut lxmf_invitation_capability_peer = None;
+        let mut lxmf_invitation_capability_cancel_after_ms = None;
+        let mut lxmf_topic_capability_probe = false;
         let mut lxmf_sync_propagation = false;
         let mut lxmf_sync_limit = None;
         let mut warmup = None;
@@ -782,6 +860,37 @@ impl CliCommand {
                 "--lxmf-interop" | "--lxmf-live-interop" => {
                     lxmf_interop_wait_secs = Some(10);
                 }
+                "--lxmf-invitation-smoke" => {
+                    lxmf_invitation_smoke_server = Some(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("{arg} requires an OMENchat server destination hash")
+                    })?);
+                    if lxmf_interop_wait_secs.is_none() {
+                        lxmf_interop_wait_secs = Some(30);
+                    }
+                }
+                "--lxmf-invitation-capability-probe" => {
+                    lxmf_invitation_capability_peer = Some(args.next().ok_or_else(|| {
+                        anyhow::anyhow!("{arg} requires an LXMF peer destination hash")
+                    })?);
+                }
+                "--lxmf-invitation-capability-cancel-after-ms" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("{arg} requires a millisecond value"))?;
+                    let delay = value.parse::<u64>().with_context(|| {
+                        format!("invalid LXMF invitation capability cancellation delay in {value}")
+                    })?;
+                    if delay > omenbrowser_rs::runtime::LXMF_INVITATION_CAPABILITY_PROBE_DEADLINE_MS
+                    {
+                        anyhow::bail!(
+                            "LXMF invitation capability cancellation delay exceeds the probe deadline"
+                        );
+                    }
+                    lxmf_invitation_capability_cancel_after_ms = Some(delay);
+                }
+                "--lxmf-topic-capability-probe" => {
+                    lxmf_topic_capability_probe = true;
+                }
                 "--lxmf-sync-propagation" | "--sync-lxmf-propagation" => {
                     lxmf_sync_propagation = true;
                 }
@@ -917,8 +1026,10 @@ impl CliCommand {
             + usize::from(omenchat_smoke_destination.is_some())
             + usize::from(generate_native_identity_label.is_some())
             + usize::from(lxmf_sync_propagation)
+            + usize::from(lxmf_invitation_smoke_server.is_some())
             + usize::from(
                 lxmf_interop_wait_secs.is_some()
+                    && lxmf_invitation_smoke_server.is_none()
                     && command.is_none()
                     && native_validate_destination.is_none()
                     && native_live_sequence_destination.is_none()
@@ -1115,6 +1226,36 @@ impl CliCommand {
                 bundle_report,
                 overrides: Box::new(overrides),
             })
+        } else if lxmf_topic_capability_probe {
+            Ok(Self::LxmfTopicCapabilityProbe {
+                output,
+                stdout,
+                overrides: Box::new(overrides),
+            })
+        } else if lxmf_invitation_capability_cancel_after_ms.is_some()
+            && lxmf_invitation_capability_peer.is_none()
+        {
+            Err(anyhow::anyhow!(
+                "--lxmf-invitation-capability-cancel-after-ms requires --lxmf-invitation-capability-probe"
+            ))
+        } else if let Some(peer_hash) = lxmf_invitation_capability_peer {
+            if peer_hash.len() != 32
+                || !peer_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(anyhow::anyhow!(
+                    "LXMF invitation capability peer must be 32 lowercase hexadecimal characters"
+                ));
+            }
+            overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
+            Ok(Self::LxmfInvitationCapabilityProbe {
+                peer_hash,
+                cancel_after_ms: lxmf_invitation_capability_cancel_after_ms,
+                output,
+                stdout,
+                overrides: Box::new(overrides),
+            })
         } else if lxmf_sync_propagation {
             overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
             Ok(Self::LxmfPropagationSync {
@@ -1124,6 +1265,32 @@ impl CliCommand {
                 stdout,
                 suggest_shell,
                 bundle_report,
+                overrides: Box::new(overrides),
+            })
+        } else if let Some(server_destination) = lxmf_invitation_smoke_server {
+            let wait_secs = lxmf_interop_wait_secs.unwrap_or(30);
+            if !(1..=300).contains(&wait_secs) {
+                return Err(anyhow::anyhow!(
+                    "--lxmf-wait for invitation smoke must be between 1 and 300 seconds"
+                ));
+            }
+            if !matches!(
+                lxmf_smoke_delivery_mode,
+                omenbrowser_rs::messaging::DeliveryMode::Direct
+            ) || lxmf_smoke_propagation_node.is_some()
+                || lxmf_include_ticket
+            {
+                return Err(anyhow::anyhow!(
+                    "LXMF invitation smoke currently supports direct tokenless delivery without ticket or propagation options"
+                ));
+            }
+            overrides.ensure_runtime_backend(RuntimeBackendSetting::Reticulum);
+            Ok(Self::LxmfInvitationSmoke {
+                peer_hash: lxmf_smoke_peer,
+                server_destination,
+                wait_secs,
+                output,
+                stdout,
                 overrides: Box::new(overrides),
             })
         } else if let Some(destination) = native_validate_destination {
@@ -1424,6 +1591,274 @@ async fn run_lxmf_interop_command(input: LxmfInteropCommandInput) -> anyhow::Res
     }
 
     Ok(())
+}
+
+#[cfg(feature = "chat-client")]
+async fn run_lxmf_invitation_smoke_command(
+    input: LxmfInvitationSmokeCommandInput,
+) -> anyhow::Result<()> {
+    let LxmfInvitationSmokeCommandInput {
+        peer_hash,
+        server_destination,
+        wait_secs,
+        output,
+        stdout,
+        overrides,
+    } = input;
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
+        .context("failed to load LXMF invitation smoke application configuration")?;
+    let interface_override = apply_smoke_overrides(&mut config, overrides);
+    let diagnostics_dir = config.paths.diagnostics_dir.clone();
+    let default_output = output.is_none() && !stdout;
+    let mut app = App::try_new(config).context("failed to initialize application services")?;
+    app.start_runtime_for_smoke_test_with_interfaces(interface_override)
+        .await
+        .context("failed to start configured runtime for LXMF invitation smoke")?;
+    let report = app
+        .native_lxmf_invitation_live_report(peer_hash, server_destination, wait_secs)
+        .await
+        .context("failed to collect native LXMF invitation smoke report")?;
+    let content = serde_json::to_string_pretty(&report)
+        .context("failed to render LXMF invitation smoke JSON")?;
+    if stdout {
+        println!("{content}");
+    }
+    if let Some(path) = output
+        .or_else(|| default_output.then(|| default_lxmf_invitation_report_path(&diagnostics_dir)))
+    {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(&path, content.as_bytes()).with_context(|| {
+            format!("failed to write LXMF invitation report {}", path.display())
+        })?;
+        if stdout {
+            eprintln!("{}", path.display());
+        } else {
+            println!("{}", path.display());
+        }
+    }
+    Ok(())
+}
+
+async fn run_lxmf_invitation_capability_probe_command(
+    peer_hash: String,
+    cancel_after_ms: Option<u64>,
+    output: Option<PathBuf>,
+    stdout: bool,
+    overrides: SmokeOverrides,
+) -> anyhow::Result<()> {
+    let mut config = load_config_for_smoke(overrides.app_root().cloned())
+        .context("failed to load LXMF invitation capability probe configuration")?;
+    let interface_override = apply_smoke_overrides(&mut config, overrides);
+    let diagnostics_dir = config.paths.diagnostics_dir.clone();
+    let default_output = output.is_none() && !stdout;
+    let mut app = App::try_new(config).context("failed to initialize application services")?;
+    app.start_runtime_for_smoke_test_with_interfaces(interface_override)
+        .await
+        .context("failed to start runtime for LXMF invitation capability probe")?;
+    let announced = app.runtime.announce_identity().await;
+    let cancel = omenbrowser_rs::runtime::CancellationToken::new();
+    let started = std::time::Instant::now();
+    let probe_future = app
+        .runtime
+        .probe_lxmf_invitation_capability(&peer_hash, cancel.clone());
+    tokio::pin!(probe_future);
+    let probe = if let Some(delay_ms) = cancel_after_ms {
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {
+                cancel.cancel();
+                probe_future.await
+            },
+            result = &mut probe_future => result,
+        }
+    } else {
+        probe_future.await
+    };
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let stop = app.runtime.stop_runtime().await;
+    let (outcome, supported, error_category) = match probe {
+        Ok(omenbrowser_rs::runtime::InvitationCapabilityProbeOutcome::Supported) => {
+            ("supported", true, None)
+        }
+        Ok(omenbrowser_rs::runtime::InvitationCapabilityProbeOutcome::Unsupported) => {
+            ("unsupported", false, None)
+        }
+        Ok(omenbrowser_rs::runtime::InvitationCapabilityProbeOutcome::Conflict) => {
+            ("conflict", false, None)
+        }
+        Ok(omenbrowser_rs::runtime::InvitationCapabilityProbeOutcome::Unknown) => {
+            ("unknown", false, None)
+        }
+        Err(error) => {
+            let category = if error.to_string().contains("timed out")
+                || error.to_string().contains("unavailable")
+            {
+                "unavailable_or_timeout"
+            } else if error.to_string().contains("cancel") {
+                "cancelled"
+            } else if error.to_string().contains("identity")
+                || error.to_string().contains("correlation")
+            {
+                "conflict"
+            } else {
+                "probe_failed"
+            };
+            ("unknown", false, Some(category))
+        }
+    };
+    let report = serde_json::json!({
+        "report": "native_lxmf_invitation_capability_probe",
+        "peer_destination_redacted": true,
+        "announce_attempted": true,
+        "announce_ok": announced.is_ok(),
+        "outcome": outcome,
+        "supported": supported,
+        "error_category": error_category,
+        "cancellation_requested": cancel_after_ms.is_some(),
+        "cancel_after_ms": cancel_after_ms,
+        "elapsed_ms": elapsed_ms,
+        "deadline_ms": omenbrowser_rs::runtime::LXMF_INVITATION_CAPABILITY_PROBE_DEADLINE_MS,
+        "automatic_retries": 0,
+        "invitation_sent": false,
+        "shutdown_ok": stop.is_ok(),
+    });
+    let content = serde_json::to_string_pretty(&report)
+        .context("failed to render LXMF invitation capability probe JSON")?;
+    if stdout {
+        println!("{content}");
+    }
+    if let Some(path) = output.or_else(|| {
+        default_output.then(|| {
+            diagnostics_dir.join(format!(
+                "native-lxmf-invitation-capability-{}.json",
+                current_epoch_millis()
+            ))
+        })
+    }) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory {}", parent.display())
+            })?;
+        }
+        std::fs::write(&path, content.as_bytes()).with_context(|| {
+            format!(
+                "failed to write LXMF invitation capability report {}",
+                path.display()
+            )
+        })?;
+        if stdout {
+            eprintln!("{}", path.display());
+        } else {
+            println!("{}", path.display());
+        }
+    }
+    Ok(())
+}
+
+async fn run_lxmf_topic_capability_probe_command(
+    output: Option<PathBuf>,
+    stdout: bool,
+    overrides: SmokeOverrides,
+) -> anyhow::Result<()> {
+    #[cfg(not(feature = "native-lxmf-sdk"))]
+    {
+        let _ = (output, stdout, overrides);
+        anyhow::bail!(
+            "LXMF topic capability probe unavailable: build with feature native-lxmf-sdk"
+        );
+    }
+
+    #[cfg(feature = "native-lxmf-sdk")]
+    {
+        let config = load_config_for_smoke(overrides.app_root().cloned())
+            .context("failed to load LXMF topic capability probe configuration")?;
+        let diagnostics_dir = config.paths.diagnostics_dir.clone();
+        let endpoint = config
+            .settings
+            .native_lxmf_sdk_rpc_endpoint
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LXMF topic capability probe requires a configured local SDK/RPC endpoint"
+                )
+            })?;
+        let sender =
+            omenbrowser_rs::runtime::native_lxmf::client::RpcNativeLxmfSdkSender::new(endpoint);
+        let started = std::time::Instant::now();
+        let probe = sender
+            .probe_topic_capabilities()
+            .await
+            .context("LXMF topic capability negotiation did not complete")?;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let readiness = match probe.capabilities.receive_readiness {
+            omenbrowser_rs::runtime::lxmf_topics::LxmfTopicReceiveReadiness::ProductAdapterMissing => "product_adapter_missing",
+            omenbrowser_rs::runtime::lxmf_topics::LxmfTopicReceiveReadiness::CapabilityAbsent => "capability_absent",
+            omenbrowser_rs::runtime::lxmf_topics::LxmfTopicReceiveReadiness::RecoveryUnproven => "recovery_unproven",
+            omenbrowser_rs::runtime::lxmf_topics::LxmfTopicReceiveReadiness::TopicEventContractUnproven => "topic_event_contract_unproven",
+            omenbrowser_rs::runtime::lxmf_topics::LxmfTopicReceiveReadiness::PublisherAuthenticationUnproven => "publisher_authentication_unproven",
+            omenbrowser_rs::runtime::lxmf_topics::LxmfTopicReceiveReadiness::EligibleForReceiveAdapter => "eligible_for_receive_adapter",
+        };
+        let report = serde_json::json!({
+            "report": "external_lxmf_topic_capability_probe",
+            "endpoint": probe.endpoint,
+            "endpoint_redacted": true,
+            "active_contract_version": probe.active_contract_version,
+            "topics": probe.capabilities.topics,
+            "subscriptions": probe.capabilities.subscriptions,
+            "fanout": probe.capabilities.fanout,
+            "cursor_replay": probe.capabilities.cursor_replay,
+            "async_events": probe.capabilities.async_events,
+            "topic_event_contract_proven": probe.capabilities.topic_event_contract_proven,
+            "authenticated_publisher_events": probe.capabilities.authenticated_publisher_events,
+            "cursor_gap_recovery_proven": probe.capabilities.cursor_gap_recovery_proven,
+            "receive_readiness": readiness,
+            "upstream_publish_capability": probe.capabilities.may_publish(),
+            "publish_adapter_active": false,
+            "receive_adapter_active": false,
+            "subscribe_calls": 0,
+            "publish_calls": 0,
+            "automatic_retries": 0,
+            "daemon_shutdown_requested": false,
+            "deadline_ms": omenbrowser_rs::runtime::native_lxmf::client::NATIVE_LXMF_TOPIC_CAPABILITY_PROBE_DEADLINE_MS,
+            "elapsed_ms": elapsed_ms,
+        });
+        let content = serde_json::to_string_pretty(&report)
+            .context("failed to render LXMF topic capability report JSON")?;
+        if stdout {
+            println!("{content}");
+        }
+        let default_output = output.is_none() && !stdout;
+        if let Some(path) = output.or_else(|| {
+            default_output.then(|| {
+                diagnostics_dir.join(format!(
+                    "external-lxmf-topic-capability-{}.json",
+                    current_epoch_millis()
+                ))
+            })
+        }) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create output directory {}", parent.display())
+                })?;
+            }
+            std::fs::write(&path, content.as_bytes()).with_context(|| {
+                format!(
+                    "failed to write LXMF topic capability report {}",
+                    path.display()
+                )
+            })?;
+            if stdout {
+                eprintln!("{}", path.display());
+            } else {
+                println!("{}", path.display());
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn run_lxmf_propagation_sync_command(
@@ -2343,6 +2778,14 @@ fn default_lxmf_interop_report_path(diagnostics_dir: &std::path::Path) -> PathBu
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
     diagnostics_dir.join(format!("native-lxmf-interop-{epoch}.json"))
+}
+
+#[cfg(feature = "chat-client")]
+fn default_lxmf_invitation_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
+    diagnostics_dir.join(format!(
+        "native-lxmf-invitation-{}.json",
+        current_epoch_millis()
+    ))
 }
 
 fn default_lxmf_propagation_sync_report_path(diagnostics_dir: &std::path::Path) -> PathBuf {
@@ -4640,6 +5083,117 @@ mod tests {
                 ),
             }
         );
+    }
+
+    #[test]
+    fn cli_parses_bounded_lxmf_invitation_sender_and_receiver_modes() {
+        let receiver = CliCommand::parse([
+            "--lxmf-invitation-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--lxmf-wait".to_string(),
+            "12".to_string(),
+            "--stdout".to_string(),
+        ])
+        .expect("receive-only parse");
+        assert_eq!(
+            receiver,
+            CliCommand::LxmfInvitationSmoke {
+                peer_hash: None,
+                server_destination: FIXTURE_DESTINATION_HASH.into(),
+                wait_secs: 12,
+                output: None,
+                stdout: true,
+                overrides: Box::new(
+                    SmokeOverrides::default()
+                        .with_runtime_backend(RuntimeBackendSetting::Reticulum),
+                ),
+            }
+        );
+
+        let sender = CliCommand::parse([
+            "--lxmf-invitation-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--send-lxmf-smoke".to_string(),
+            FIXTURE_LXMF_PEER_HASH.to_string(),
+        ])
+        .expect("sender parse");
+        assert!(matches!(
+            sender,
+            CliCommand::LxmfInvitationSmoke {
+                peer_hash: Some(peer),
+                wait_secs: 30,
+                ..
+            } if peer == FIXTURE_LXMF_PEER_HASH
+        ));
+
+        assert!(CliCommand::parse([
+            "--lxmf-invitation-smoke".to_string(),
+            FIXTURE_DESTINATION_HASH.to_string(),
+            "--lxmf-wait".to_string(),
+            "301".to_string(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_parses_redacted_lxmf_invitation_capability_probe() {
+        let parsed = CliCommand::parse([
+            "--lxmf-invitation-capability-probe".to_string(),
+            FIXTURE_LXMF_PEER_HASH.to_string(),
+            "--lxmf-invitation-capability-cancel-after-ms".to_string(),
+            "0".to_string(),
+            "--backend".to_string(),
+            "reticulum".to_string(),
+            "--stdout".to_string(),
+        ])
+        .expect("capability probe parse");
+
+        assert!(matches!(
+            parsed,
+            CliCommand::LxmfInvitationCapabilityProbe {
+                peer_hash,
+                cancel_after_ms: Some(0),
+                stdout: true,
+                ..
+            } if peer_hash == FIXTURE_LXMF_PEER_HASH
+        ));
+        assert!(CliCommand::parse([
+            "--lxmf-invitation-capability-probe".to_string(),
+            "ABCDEF".to_string(),
+        ])
+        .is_err());
+        assert!(CliCommand::parse([
+            "--lxmf-invitation-capability-probe".to_string(),
+            FIXTURE_LXMF_PEER_HASH.to_string(),
+            "--lxmf-invitation-capability-cancel-after-ms".to_string(),
+            "15001".to_string(),
+        ])
+        .is_err());
+        assert!(CliCommand::parse([
+            "--lxmf-invitation-capability-cancel-after-ms".to_string(),
+            "0".to_string(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn cli_parses_external_lxmf_topic_capability_probe() {
+        let parsed = CliCommand::parse([
+            "--lxmf-topic-capability-probe".to_string(),
+            "--app-root".to_string(),
+            "/tmp/isolated-topic-probe".to_string(),
+            "--stdout".to_string(),
+        ])
+        .expect("topic capability probe parse");
+
+        assert!(matches!(
+            parsed,
+            CliCommand::LxmfTopicCapabilityProbe {
+                stdout: true,
+                overrides,
+                ..
+            } if overrides.app_root().is_some_and(|path| path == std::path::Path::new("/tmp/isolated-topic-probe"))
+        ));
     }
 
     #[test]

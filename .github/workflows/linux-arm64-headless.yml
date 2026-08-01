@@ -1,0 +1,66 @@
+name: Linux ARM64 headless
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  arm64-headless:
+    name: Native Linux ARM64 omenchatd
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-07-11
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-targets: false
+          workspaces: |
+            src/server
+
+      - name: Verify native ARM64 host
+        shell: bash
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+          case "$(uname -m)" in aarch64|arm64) ;; *) exit 1 ;; esac
+
+      - name: Check and test shared OMENchat protocol
+        shell: bash
+        run: |
+          cargo check --locked --manifest-path src/server/crates/omenchat-protocol/Cargo.toml
+          cargo test --locked --manifest-path src/server/crates/omenchat-protocol/Cargo.toml
+          cargo clippy --locked --manifest-path src/server/crates/omenchat-protocol/Cargo.toml --all-targets -- -D warnings
+
+      - name: Check and test headless omenchatd
+        shell: bash
+        run: |
+          cargo check --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
+          cargo test --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless
+          cargo clippy --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-headless --all-targets -- -D warnings
+
+      - name: Build and smoke native ARM64 package
+        shell: bash
+        run: bash scripts/package-linux-arm64-omenchatd.sh dist
+
+      - name: Upload native ARM64 omenchatd package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omenchatd-linux-aarch64-artifacts
+          path: |
+            dist/omenchatd-*-linux-aarch64.tar.gz
+            dist/omenchatd-*-linux-aarch64.tar.gz.sha256
+          if-no-files-found: error

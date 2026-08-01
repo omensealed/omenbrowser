@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.6-5 compatibility boundary
+### v0.6.0-1 / v0.9.6-6 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.6-5 release retains protocol version `1`, protocol name
+The v0.9.6-6 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -187,13 +187,42 @@ complete; the client may correct the request and retry `SessionOpen` on that
 Link. Handshake completion requires an actual `SessionAccept`, not merely an
 inbound frame carrying the `SessionOpen` operation number.
 
-The shared contract also reserves operations 35–39 and the dependent
-`message-revisions-v1` capability for the reviewed correction/tombstone design.
-Its request, acknowledgement, event, and explicit-target snapshot codecs are
-bounded and byte-fixture tested, but the production client does not request the
-capability and omenchatd does not accept it. These known operation numbers are
-a dormant compatibility reservation, not available message-edit behavior.
-Ordinary protocol-v1 history and messages remain unchanged.
+### Authoritative production capability matrix
+
+This table describes the canonical `desktop-product` client and
+`server-headless`/`server-full` server at 0.9.6-6. Capability names come from
+`omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
+shared vocabulary, the client's request, and the canonical server's acceptance.
+Definition alone never activates a capability: each Link must request it and
+receive explicit acceptance.
+
+| Capability | Defined | Client requests | Server accepts | Handler live | Persisted | UI available | Mixed-version evidence | Status |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| `durable-mutations-v1` | yes | yes | yes | yes | replay result and outbound intent | uncertain/retry controls | v0.6 fixture and downgrade tests; prior-binary live lane separate | Production behavior |
+| `durable-room-notice-ack-v1` | yes | yes | with durable mutations | yes | bounded notice/intention state | recovery detail | downgrade tests; prior-binary live lane separate | Production behavior |
+| `reply-mentions-v1` | yes | yes | with durable mutations | yes | reply target and mention IDs | reply, counts, filtering | legacy event shape and downgrade tests; prior-binary live lane separate | Production behavior |
+| `reactions-v1` | yes | yes | with durable mutations | yes | bounded current state and audit | add/remove and snapshots | base-only peer isolation and downgrade tests; prior-binary live lane separate | Production behavior |
+| `message-revisions-v1` | yes | yes | with durable mutations | yes | bounded current revision and audit | correction/tombstone | base-only peer isolation and downgrade tests; prior-binary live lane separate | Production behavior |
+| `room-pins-v1` | yes | yes | with durable mutations | yes | bounded pins and audit | pin/unpin and jump target | base-only peer isolation and downgrade tests; prior-binary live lane separate | Production behavior |
+| `announcement-rooms-v1` | yes | product feature | product feature | yes | room policy and revision | read-only policy/action gating | exact legacy room fallback; prior-binary live lane separate | Production behavior |
+| `room-slow-mode-v1` | yes | product feature | product feature with durable mutations | yes | room interval and bounded admission | interval/retry evidence | legacy fallback/rejection tests; prior-binary live lane separate | Production behavior |
+| `room-media-policy-v1` | yes | product feature | with durable + announcement + slow mode | yes | nullable room ceiling | attachment admission/effective limit | process and adjacent-shape fallback; prior-binary live lane separate | Production behavior |
+| `moderation-audit-v1` | yes | product feature | product feature | authorized read only | bounded audit records | moderator/administrator panel | downgrade/authorization tests; prior-binary live lane separate | Production behavior |
+
+Persistence means authoritative server or client recovery state survives
+restart; it does not mean unlimited retention. Every store, snapshot, page,
+intent, and audit path keeps its documented item/byte/age bounds.
+“Mixed-version evidence” deliberately distinguishes deterministic downgrade
+coverage from an actual older-binary process lane.
+
+#### Historical design record
+
+Earlier revisions reserved operations 35–39 and staged
+`message-revisions-v1` without production acceptance. That statement is
+historical: the current canonical client requests it, omenchatd accepts it only
+beside durable mutations, and its handler, persistence, snapshots, fan-out, and
+UI are active. Peers that do not negotiate it retain ordinary protocol-v1
+history and message behavior.
 
 The shared contract also contains the production `room-media-policy-v1`
 vocabulary. It reserves no operation number. Canonical current clients and
@@ -271,33 +300,30 @@ capability, and absence of an in-process pending result. An unavailable retry
 shows the redacted reason and retains only the explicit stop-tracking action.
 Nothing is resent automatically.
 
-The dormant server store also has deterministic post-retention behavior. Before
+The production server store has deterministic post-retention behavior. Before
 pruning any durable result, it permanently retires that authenticated
 identity/client-instance pair. Any later operation under the retired instance
 returns `Expired` before mutation execution, even after server restart.
 Remembered active and retired instances are bounded (100,000 globally and
 1,024 per authenticated identity), and admission fails closed at capacity.
-The inactive intent store can rotate the owner-only instance file only while an
+The intent store can rotate the owner-only instance file only while an
 immediate SQLite transaction proves there are no prepared or uncertain intents.
 It never rewrites terminal historical intents. Protocol-v1 codes 1011 through
 1015 are reserved respectively for not-negotiated, malformed, conflict,
-result-expired, and store-busy durable outcomes. This is still not live
-protocol behavior: production does not invoke rotation, advertise the
-capability, emit these errors, or automatically retry uncertain work.
+result-expired, and store-busy durable outcomes. Production negotiates and
+emits these outcomes where applicable, but never automatically retries
+uncertain work.
 
-The dormant store additionally has an atomic room-event primitive: event
+The store additionally has an active atomic room-event primitive: event
 insertion and the exact encoded origin response are committed together. A new
-result carries the event for one-time future fan-out; an exact replay carries
+result carries the event for one-time fan-out; an exact replay carries
 only the retained response. Invalid response encoding rolls back the event.
-No live handler calls this primitive yet because authorization, membership,
-rate reservation, negotiated client-instance ownership, and broadcast timing
-must be composed and tested without double accounting or duplicate fan-out.
-The rate limiter now exposes an internal owned reservation for that future
-composition. Existing protocol-v1 handlers commit it immediately and behave as
-before. The durable store finisher runs only on a replay miss, returns the
-reservation with a successful first commit, and releases it automatically on
-rollback. This mechanism is inactive until the Link has negotiated and bound a
-client-instance identifier.
+Live durable handlers compose authorization, membership, rate reservation,
+negotiated client-instance ownership, and broadcast timing without double
+accounting or duplicate fan-out. The durable store finisher runs only on a
+replay miss, returns the reservation with a successful first commit, and
+releases it automatically on rollback. This mechanism remains inactive for a
+Link until it has negotiated and bound a client-instance identifier.
 
 The live server now stages session display/LXMF metadata until a real
 `SessionAccept` is produced, so malformed negotiation cannot mutate the

@@ -55,6 +55,50 @@ grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/ci.ym
   || fail "CI does not invoke native checks"
 grep -q 'uses: \./\.github/workflows/native-checks\.yml' .github/workflows/package.yml \
   || fail "packaging does not invoke native checks"
+
+arm64_workflow=.github/workflows/linux-arm64-headless.yml
+[[ -f "$arm64_workflow" ]] || fail "Linux ARM64 headless workflow is missing"
+grep -q '^  workflow_call:$' "$arm64_workflow" \
+  || fail "Linux ARM64 workflow is not reusable"
+grep -q '^  workflow_dispatch:$' "$arm64_workflow" \
+  || fail "Linux ARM64 workflow is not manually dispatchable"
+grep -Eq '^  (push|pull_request):' "$arm64_workflow" \
+  && fail "Linux ARM64 workflow must not run for ordinary pushes or pull requests"
+grep -q '^    runs-on: ubuntu-24\.04-arm$' "$arm64_workflow" \
+  || fail "Linux ARM64 workflow does not use the native ARM64 runner"
+for manifest in \
+  src/server/crates/omenchat-protocol/Cargo.toml \
+  src/server/Cargo.toml; do
+  grep -q -- "--manifest-path $manifest" "$arm64_workflow" \
+    || fail "Linux ARM64 workflow lacks manifest gate $manifest"
+done
+grep -q -- '--features server-headless --all-targets -- -D warnings' "$arm64_workflow" \
+  || fail "Linux ARM64 workflow lacks strict headless Clippy"
+grep -q 'bash scripts/package-linux-arm64-omenchatd.sh dist' "$arm64_workflow" \
+  || fail "Linux ARM64 workflow does not build the reviewed package"
+grep -q 'omenchatd-linux-aarch64-artifacts' "$arm64_workflow" \
+  || fail "Linux ARM64 workflow does not upload a bounded artifact"
+grep -q 'contents: write' "$arm64_workflow" \
+  && fail "Linux ARM64 workflow has contents: write"
+
+arm64_package_script=scripts/package-linux-arm64-omenchatd.sh
+[[ -f "$arm64_package_script" ]] || fail "Linux ARM64 package script is missing"
+grep -q 'bash -n scripts/package-linux-arm64-omenchatd.sh' scripts/release-check.sh \
+  || fail "Linux release checks do not syntax-check ARM64 packaging"
+grep -q 'aarch64-unknown-linux-gnu' "$arm64_package_script" \
+  || fail "Linux ARM64 package script does not fail closed on host target"
+grep -q 'physical_device_qualified: false' "$arm64_package_script" \
+  || fail "Linux ARM64 package metadata lacks the physical-device limitation"
+grep -q -- '--cross-emulated' "$arm64_package_script" \
+  || fail "Linux ARM64 package script lacks the local Podman/Cross gate"
+arm64_test_script=scripts/test-linux-arm64-headless.sh
+[[ -f "$arm64_test_script" ]] || fail "Linux ARM64 local gate is missing"
+grep -q 'bash -n scripts/test-linux-arm64-headless.sh' scripts/release-check.sh \
+  || fail "Linux release checks do not syntax-check the local ARM64 gate"
+grep -q 'cross test --locked' "$arm64_test_script" \
+  || fail "Linux ARM64 local gate does not execute target tests"
+grep -q 'scripts/package-linux-arm64-omenchatd.sh.*--cross-emulated' "$arm64_test_script" \
+  || fail "Linux ARM64 local gate does not package and smoke the target"
 grep -q 'package_scope:' .github/workflows/package.yml \
   || fail "manual packaging lacks a bounded artifact scope"
 grep -q 'cargo install --locked --version 0\.22\.2 cargo-audit' .github/workflows/ci.yml \

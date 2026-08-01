@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod event;
 pub mod event_worker;
 pub mod facade;
+pub mod lxmf_topics;
 #[cfg(feature = "native-reticulum")]
 pub mod native;
 #[cfg(feature = "native-lxmf")]
@@ -30,12 +31,13 @@ pub use facade::{
 #[allow(unused_imports)]
 pub use network::{
     AnnouncePayload, CancellationToken, DestinationId, DestinationInspection, DirectoryCandidate,
-    InterfaceStats, LxmfCancelOutcome, LxmfDeliveryEvidence, LxmfDeliveryEvidenceKind,
-    LxmfDeliveryProbeReport, LxmfDeliveryProbeStage, LxmfDeliveryProbeStep, LxmfHistoryPage,
-    LxmfHistoryRecord, LxmfHistoryRequest, LxmfSdkRpcProbeSnapshot, MockNetworkRuntime,
-    NetworkRuntime, NetworkSnapshot, NetworkStatus, OmenChatLinkClosed, OmenChatLinkData,
-    OmenChatLinkOpened, OmenChatResourceData, OutboundDeliveryState, OutboundStatus,
-    PageFetchProbeReport, PageFetchProbeStage, PageFetchProbeStep, PropagationDebugSnapshot,
-    PropagationMessageSnapshot, PropagationStatus, ResourceLifecycleEvent, ResourceLifecycleState,
-    ResourceProgressEvent, RuntimeBackendName, RuntimeEvent, RuntimeStatus,
+    InterfaceStats, InvitationCapabilityProbeOutcome, LxmfCancelOutcome, LxmfDeliveryEvidence,
+    LxmfDeliveryEvidenceKind, LxmfDeliveryProbeReport, LxmfDeliveryProbeStage,
+    LxmfDeliveryProbeStep, LxmfHistoryPage, LxmfHistoryRecord, LxmfHistoryRequest,
+    LxmfSdkRpcProbeSnapshot, MockNetworkRuntime, NetworkRuntime, NetworkSnapshot, NetworkStatus,
+    OmenChatLinkClosed, OmenChatLinkData, OmenChatLinkOpened, OmenChatResourceData,
+    OutboundDeliveryState, OutboundStatus, PageFetchProbeReport, PageFetchProbeStage,
+    PageFetchProbeStep, PropagationDebugSnapshot, PropagationMessageSnapshot, PropagationStatus,
+    ResourceLifecycleEvent, ResourceLifecycleState, ResourceProgressEvent, RuntimeBackendName,
+    RuntimeEvent, RuntimeStatus, LXMF_INVITATION_CAPABILITY_PROBE_DEADLINE_MS,
 };

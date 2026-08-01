@@ -1040,14 +1040,10 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         .client_instance_id
         .filter(|_| state.durable_mutation_owner_ready)
     {
-        let mut requested_capabilities = vec![
-            DURABLE_MUTATION_CAPABILITY.into(),
-            DURABLE_NOTICE_ACK_CAPABILITY.into(),
-            REPLY_MENTIONS_CAPABILITY.into(),
-            REACTIONS_CAPABILITY.into(),
-            super::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
-            super::protocol::ROOM_PINS_CAPABILITY.into(),
-        ];
+        let mut requested_capabilities = super::protocol::BASE_DURABLE_SESSION_CAPABILITIES
+            .iter()
+            .map(|capability| (*capability).into())
+            .collect::<Vec<String>>();
         if cfg!(feature = "omenchat-announcement-rooms") || room_media_policy_requested_for_test {
             requested_capabilities.push(ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }
@@ -6347,14 +6343,10 @@ mod tests {
             cfg!(feature = "omenchat-room-media-policy"),
             "only a room-media-policy-capable build may request room media policy"
         );
-        let mut expected_capabilities = vec![
-            DURABLE_MUTATION_CAPABILITY.into(),
-            DURABLE_NOTICE_ACK_CAPABILITY.into(),
-            REPLY_MENTIONS_CAPABILITY.into(),
-            REACTIONS_CAPABILITY.into(),
-            crate::chat::protocol::MESSAGE_REVISIONS_CAPABILITY.into(),
-            crate::chat::protocol::ROOM_PINS_CAPABILITY.into(),
-        ];
+        let mut expected_capabilities = crate::chat::protocol::BASE_DURABLE_SESSION_CAPABILITIES
+            .iter()
+            .map(|capability| (*capability).into())
+            .collect::<Vec<String>>();
         if cfg!(feature = "omenchat-announcement-rooms") {
             expected_capabilities.push(crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY.into());
         }

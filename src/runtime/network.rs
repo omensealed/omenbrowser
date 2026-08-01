@@ -494,6 +494,16 @@ pub struct PropagationStatus {
     pub transfer_state: String,
 }
 
+pub const LXMF_INVITATION_CAPABILITY_PROBE_DEADLINE_MS: u64 = 15_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationCapabilityProbeOutcome {
+    Supported,
+    Unsupported,
+    Unknown,
+    Conflict,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PropagationDebugSnapshot {
     pub selected_node: Option<String>,
@@ -717,6 +727,17 @@ pub trait NetworkRuntime: Send + Sync {
     async fn status(&self) -> NetworkStatus;
     async fn attach_identity(&self, identity: IdentityProfile) -> AppResult<()>;
     async fn announce_identity(&self) -> AppResult<bool>;
+
+    async fn probe_lxmf_invitation_capability(
+        &self,
+        peer_hash: &str,
+        cancel: CancellationToken,
+    ) -> AppResult<InvitationCapabilityProbeOutcome> {
+        let _ = (peer_hash, cancel);
+        Err(crate::error::AppError::Unsupported(
+            "LXMF invitation capability probing is unavailable for this backend".into(),
+        ))
+    }
 
     async fn set_identify_on_connect_destinations(
         &self,
@@ -1053,6 +1074,7 @@ impl NetworkRuntime for MockNetworkRuntime {
             RuntimeCapability::RpcBackend,
             RuntimeCapability::SharedInstance,
             RuntimeCapability::InterfaceMutation,
+            RuntimeCapability::AuthenticatedLxmfSourceEvidence,
         ]
         .into_iter()
         .map(|capability| RuntimeCapabilityRecord {

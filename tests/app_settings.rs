@@ -51,6 +51,7 @@ fn default_settings_match_phase_zero_expectations() {
 
     assert_eq!(settings.ui.theme_name, "default");
     assert!(!settings.ui.reduce_motion);
+    assert!(!settings.ui.low_power_mode);
     assert_eq!(
         settings.ui.browser_overlay_mode,
         BrowserOverlayPreference::Status
@@ -465,6 +466,7 @@ fn nested_ui_settings_load_merges_missing_fields_with_defaults() {
     assert_eq!(settings.ui.theme_name, "amber");
     assert!(settings.ui.show_help);
     assert!(!settings.ui.reduce_motion);
+    assert!(!settings.ui.low_power_mode);
     assert_eq!(
         settings.ui.browser_overlay_mode,
         BrowserOverlayPreference::Status
@@ -492,6 +494,20 @@ fn reduced_motion_preference_round_trips_without_changing_legacy_defaults() {
     let loaded = AppSettings::load_or_default(&path).expect("load reduced-motion setting");
 
     assert!(loaded.ui.reduce_motion);
+}
+
+#[test]
+fn low_power_preference_round_trips_without_changing_motion_preference() {
+    let dir = temp_dir("low-power");
+    let path = dir.join("settings.json");
+    let mut settings = AppSettings::default();
+    settings.ui.low_power_mode = true;
+
+    settings.save(&path).expect("save low-power setting");
+    let loaded = AppSettings::load_or_default(&path).expect("load low-power setting");
+
+    assert!(loaded.ui.low_power_mode);
+    assert!(!loaded.ui.reduce_motion);
 }
 
 #[test]

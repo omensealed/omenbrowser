@@ -229,6 +229,7 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
 
     let font_size = desktop.app.settings.ui.font_size.clamp(10, 24);
     let reduce_motion = desktop.app.settings.ui.reduce_motion;
+    let low_power_mode = desktop.app.settings.ui.low_power_mode;
     let appearance = column![
         themes,
         row![
@@ -267,6 +268,26 @@ pub(in crate::desktop) fn settings_view(desktop: &DesktopApp) -> Element<'_, Mes
         .wrap(),
         wrapped_text_owned(
             "Reduced motion pauses animated media previews while preserving a static image.",
+            13
+        ),
+        row![
+            wrapped_text_owned(
+                format!(
+                    "Low-power mode: {}",
+                    if low_power_mode { "On" } else { "Off" }
+                ),
+                14
+            ),
+            if low_power_mode {
+                omen_button("Disable", Message::Theme(ThemeMessage::ToggleLowPower))
+            } else {
+                subtle_button("Enable", Message::Theme(ThemeMessage::ToggleLowPower))
+            },
+        ]
+        .spacing(8)
+        .wrap(),
+        wrapped_text_owned(
+            "Low-power mode forces static previews and slows visible diagnostics sampling to 5 seconds; network and persistence semantics are unchanged.",
             13
         ),
     ]

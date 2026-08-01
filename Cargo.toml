@@ -1,6 +1,6 @@
 [package]
 name = "omenbrowser_rs"
-version = "0.9.6-5"
+version = "0.9.6-6"
 edition = "2021"
 rust-version = "1.85"
 description = "OMENbrowser Rust Desktop/TUI"
@@ -45,6 +45,10 @@ chat-client-rns = ["chat-client-reticulum"]
 chat-client-rns-legacy = ["chat-client", "experimental-rns-net-stack"]
 chat-client-lxmf = ["chat-client", "native-lxmf-sdk"]
 chat-client-popout = ["chat-client"]
+# Replies/mentions, reactions, revisions, pins, and durable mutation support
+# are always compiled for chat-client builds but remain explicit Link-negotiated
+# protocol capabilities. The following product flags gate additional room
+# policy/audit capabilities rather than enabling the core wire vocabulary.
 # Capability-negotiated room policy projection. Server authorization remains
 # unconditional, while legacy peers retain byte-exact four-field room values.
 omenchat-announcement-rooms = []

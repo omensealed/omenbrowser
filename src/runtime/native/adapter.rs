@@ -127,6 +127,12 @@ use crate::runtime::native::identity::{
 use crate::runtime::native::interface::{
     plan_interfaces, validate_startup_plans, NativeInterfacePlan,
 };
+#[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+use crate::runtime::native::invitation_capability_endpoint::{
+    InvitationCapabilityEndpointOwner, PreparedInvitationCapabilityEndpoint,
+};
+#[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+use crate::runtime::native::invitation_capability_probe::InvitationCapabilityProbeAdapter;
 #[cfg(feature = "native-lxmf")]
 use crate::runtime::native::lxmf_router::NativeDirectLxmfRouter;
 #[cfg(all(feature = "native-rns-net", any()))]
@@ -955,6 +961,10 @@ struct NativeTransportHandle {
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_lxmf_delivery_destination:
         Arc<AsyncMutex<rns_transport::destination::SingleInputDestination>>,
+    #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+    invitation_capability_endpoint: InvitationCapabilityEndpointOwner,
+    #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+    invitation_capability_probe: InvitationCapabilityProbeAdapter,
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1421,6 +1431,10 @@ impl NativeNetworkRuntime {
         );
         if let Some(previous) = previous {
             previous.shutdown.cancel();
+            #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+            previous.invitation_capability_endpoint.cancel();
+            #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+            previous.invitation_capability_probe.cancel();
         }
     }
 
@@ -1451,6 +1465,10 @@ impl NativeNetworkRuntime {
                 identity.clone(),
                 rns_transport::destination::DestinationName::new("lxmf", "delivery"),
             ))?;
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_endpoint = block_on_native_transport_setup(
+            PreparedInvitationCapabilityEndpoint::register(&mut transport, identity.clone()),
+        )?;
         #[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
         block_on_native_transport_setup(transport.set_receipt_handler(Box::new(
             CleanLxmfReceiptHandler {
@@ -1459,6 +1477,11 @@ impl NativeNetworkRuntime {
             },
         )))?;
         let transport = Arc::new(transport);
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_endpoint =
+            invitation_capability_endpoint.spawn(transport.clone());
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_probe = InvitationCapabilityProbeAdapter::new(transport.clone());
         let attached_interface_records = attach_tcp_client_interfaces(&transport, interfaces)?;
         let shutdown = tokio_util::sync::CancellationToken::new();
         let attached_interfaces = attached_interface_records
@@ -1535,6 +1558,10 @@ impl NativeNetworkRuntime {
             path_restore_ready,
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_lxmf_delivery_destination,
+            #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+            invitation_capability_endpoint,
+            #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+            invitation_capability_probe,
         })
     }
 
@@ -3627,6 +3654,16 @@ fn native_capability_records(
         RuntimeCapabilitySource::Configured,
         "requires an active LXMF adapter and a cached peer ratchet",
     ));
+    records.push(capability_record(
+        RuntimeCapability::AuthenticatedLxmfSourceEvidence,
+        if transport_active && cfg!(feature = "native-lxmf") {
+            RuntimeCapabilityAvailability::Supported
+        } else {
+            RuntimeCapabilityAvailability::Unknown
+        },
+        RuntimeCapabilitySource::Configured,
+        "integrated native LXMF verifies source identity and signature; external RPC provenance is unproven",
+    ));
 
     for capability in [
         RuntimeCapability::PaperUriDelivery,
@@ -3783,13 +3820,44 @@ impl NetworkRuntime for NativeNetworkRuntime {
             RuntimeLifecycleState::Draining,
             RuntimeBackendName::Reticulum,
         ));
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_endpoint = self
+            .transport
+            .lock()
+            .expect("native transport lock")
+            .as_ref()
+            .map(|handle| handle.invitation_capability_endpoint.clone());
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_probe = self
+            .transport
+            .lock()
+            .expect("native transport lock")
+            .as_ref()
+            .map(|handle| handle.invitation_capability_probe.clone());
         self.stop();
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_shutdown = if let Some(endpoint) = invitation_capability_endpoint
+        {
+            endpoint.shutdown().await.map(|_| ()).map_err(|error| {
+                AppError::Runtime(format!(
+                    "native Reticulum invitation capability endpoint shutdown failed: {error}"
+                ))
+            })
+        } else {
+            Ok(())
+        };
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        if let Some(probe) = invitation_capability_probe {
+            probe.shutdown().await;
+        }
         #[cfg(feature = "native-lxmf-sdk")]
         self.sdk_rpc_event_worker.stop().await;
         self.set_lifecycle_snapshot(RuntimeLifecycleSnapshot::new(
             RuntimeLifecycleState::Stopped,
             RuntimeBackendName::Reticulum,
         ));
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        invitation_capability_shutdown?;
         Ok(())
     }
 
@@ -4045,6 +4113,70 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 trace.failed_ifaces
             )));
             Ok(true)
+        }
+    }
+
+    async fn probe_lxmf_invitation_capability(
+        &self,
+        peer_hash: &str,
+        cancel: CancellationToken,
+    ) -> AppResult<crate::runtime::network::InvitationCapabilityProbeOutcome> {
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        {
+            if peer_hash.len() != rns_transport::hash::ADDRESS_HASH_SIZE * 2
+                || !peer_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(AppError::Runtime(
+                    "LXMF invitation capability peer must be canonical lowercase hexadecimal"
+                        .into(),
+                ));
+            }
+            if cancel.is_cancelled() {
+                return Err(AppError::from(NativeRuntimeError::Cancelled));
+            }
+            let peer_destination = parse_transport_destination_hash(peer_hash)?;
+            let handle = self.active_transport()?;
+            let deadline = Duration::from_millis(
+                crate::chat::invitation_capability::INVITATION_CAPABILITY_PROBE_DEADLINE_MS,
+            );
+            let operation = async {
+                let identity = clean_wait_for_destination_identity(
+                    &handle.transport,
+                    &handle.storage_path,
+                    peer_destination,
+                    deadline,
+                    cancel.clone(),
+                    Some(&self.event_tx),
+                    Some(&self.clean_destination_identities),
+                )
+                .await?;
+                handle
+                    .invitation_capability_probe
+                    .probe(peer_destination, identity, cancel.clone())
+                    .await
+                    .map_err(|error| AppError::Runtime(error.to_string()))
+            };
+            tokio::pin!(operation);
+            tokio::select! {
+                result = &mut operation => result,
+                _ = tokio::time::sleep(deadline) => {
+                    cancel.cancel();
+                    let _ = operation.await;
+                    Err(AppError::from(NativeRuntimeError::Timeout(
+                        "LXMF invitation capability probe".into(),
+                    )))
+                }
+            }
+        }
+        #[cfg(not(all(feature = "chat-client", not(feature = "native-rns-net"))))]
+        {
+            let _ = (peer_hash, cancel);
+            Err(AppError::Unsupported(
+                "LXMF invitation capability probing requires managed-native chat-client support"
+                    .into(),
+            ))
         }
     }
 
@@ -12071,6 +12203,7 @@ impl Default for NativeRuntimeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[cfg(not(all(feature = "native-rns-net", any())))]
     #[test]
@@ -13758,10 +13891,23 @@ mod tests {
             RuntimeLifecycleState::Running
         );
 
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        let invitation_capability_lifecycle = {
+            let handle = runtime
+                .active_transport()
+                .expect("active managed-native transport");
+            let endpoint = handle.invitation_capability_endpoint.clone();
+            let probe = handle.invitation_capability_probe.clone();
+            let destination_hash = endpoint.destination_hash();
+            assert!(handle.transport.has_destination(&destination_hash).await);
+            (handle.transport, endpoint, probe, destination_hash)
+        };
+
         let capabilities = runtime.capability_snapshot().await;
         assert_eq!(capabilities.backend, RuntimeBackendName::Reticulum);
         assert!(capabilities.supports(RuntimeCapability::IntegratedBackend));
         assert!(capabilities.supports(RuntimeCapability::DirectDelivery));
+        assert!(capabilities.supports(RuntimeCapability::AuthenticatedLxmfSourceEvidence));
         assert_eq!(
             capabilities.availability(RuntimeCapability::EventStream),
             RuntimeCapabilityAvailability::Unsupported
@@ -13772,6 +13918,32 @@ mod tests {
         );
 
         runtime.stop_runtime().await.expect("stop native runtime");
+        #[cfg(all(feature = "chat-client", not(feature = "native-rns-net")))]
+        {
+            let (transport, endpoint, probe, destination_hash) = invitation_capability_lifecycle;
+            assert!(!transport.has_destination(&destination_hash).await);
+            assert!(!endpoint
+                .shutdown()
+                .await
+                .expect("repeated endpoint shutdown"));
+            let peer = rns_transport::identity::PrivateIdentity::new_from_name(
+                "stopped-invitation-capability-probe-peer",
+            );
+            let delivery = rns_transport::destination::SingleOutputDestination::new(
+                *peer.as_identity(),
+                rns_transport::destination::DestinationName::new("lxmf", "delivery"),
+            );
+            assert_eq!(
+                probe
+                    .probe(
+                        delivery.desc.address_hash,
+                        *peer.as_identity(),
+                        CancellationToken::new(),
+                    )
+                    .await,
+                Err(crate::runtime::native::invitation_capability_probe::InvitationCapabilityProbeError::Cancelled)
+            );
+        }
         runtime
             .stop_runtime()
             .await
@@ -16771,7 +16943,10 @@ enable_transport = No
                 attachments: Vec::new(),
             }))
             .expect("send accepted stamped propagation message");
-        assert_eq!(accepted_send.transport_method, TransportMethod::Propagated);
+        assert_eq!(
+            accepted_send.transport_method,
+            crate::messaging::TransportMethod::Propagated
+        );
         let accepted = peer.next("acceptance result");
         assert_eq!(accepted["accepted"], true);
         assert_eq!(accepted["validation"]["messages"], 1);
@@ -16800,7 +16975,10 @@ enable_transport = No
                 attachments: Vec::new(),
             }))
             .expect("transport accepts under-cost envelope before remote validation");
-        assert_eq!(rejected_send.transport_method, TransportMethod::Propagated);
+        assert_eq!(
+            rejected_send.transport_method,
+            crate::messaging::TransportMethod::Propagated
+        );
         let rejected = peer.next("rejection result");
         assert_eq!(rejected["rejected"], true);
         assert_eq!(rejected["validation"]["messages"], 1);

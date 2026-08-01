@@ -5079,6 +5079,7 @@ pub struct MonitoringPanelState {
     pub estimated_outbound_bytes: u64,
     pub last_interface_stats: Option<crate::runtime::InterfaceStats>,
     pub last_network_snapshot: Option<NetworkSnapshot>,
+    pub last_propagation_status: Option<crate::runtime::PropagationStatus>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -5149,6 +5150,7 @@ pub enum SettingsAction {
     EditTheme,
     EditHome,
     ToggleReducedMotion,
+    ToggleLowPower,
     SelectRuntimeAuto,
     SelectRuntimeMock,
     SelectRuntimeReticulum,
@@ -5177,10 +5179,11 @@ pub enum SettingsAction {
 }
 
 impl SettingsAction {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::EditTheme,
         Self::EditHome,
         Self::ToggleReducedMotion,
+        Self::ToggleLowPower,
         Self::SelectRuntimeAuto,
         Self::SelectRuntimeMock,
         Self::SelectRuntimeReticulum,
@@ -5254,6 +5257,8 @@ pub struct App {
     pub monitoring_state: MonitoringPanelState,
     pub network_doctor_state: NetworkDoctorPanelState,
     pub operation_history: crate::operations::OperationHistory,
+    #[cfg(feature = "chat-client")]
+    pub omenchat_lxmf_invitation_preview: crate::chat::handoff::OmenChatLxmfInvitePreviewOwner,
     pub logs: LogBuffer,
     pub plugins_state: PluginsPanelState,
     pub settings_state: SettingsPanelState,
@@ -5555,6 +5560,9 @@ impl App {
             },
             network_doctor_state: NetworkDoctorPanelState::default(),
             operation_history: crate::operations::OperationHistory::default(),
+            #[cfg(feature = "chat-client")]
+            omenchat_lxmf_invitation_preview:
+                crate::chat::handoff::OmenChatLxmfInvitePreviewOwner::default(),
             logs,
             plugins_state: PluginsPanelState {
                 manifests: plugin_report
@@ -9558,6 +9566,207 @@ impl App {
         .await
     }
 
+    #[cfg(feature = "chat-client")]
+    pub async fn native_lxmf_invitation_live_report(
+        &mut self,
+        peer_hash: Option<String>,
+        server_destination: String,
+        wait_secs: u64,
+    ) -> AppResult<serde_json::Value> {
+        if !(1..=300).contains(&wait_secs) {
+            return Err(crate::error::AppError::Runtime(
+                "LXMF invitation smoke wait must be between 1 and 300 seconds".into(),
+            ));
+        }
+        if peer_hash
+            .as_deref()
+            .is_some_and(|peer| !is_16_byte_hex_hash(peer))
+        {
+            return Err(crate::error::AppError::Runtime(
+                "LXMF invitation smoke peer must be a canonical 32-character destination".into(),
+            ));
+        }
+        crate::chat::handoff::OmenChatInvitePayload::new(
+            server_destination.clone(),
+            "lobby",
+            "LXMF invitation smoke",
+            "OMENbrowser_rs live smoke",
+            "00000000000000000000000000000000",
+        )
+        .encode()
+        .map_err(|error| {
+            crate::error::AppError::Runtime(format!(
+                "bounded LXMF invitation smoke input was rejected: {error}"
+            ))
+        })?;
+        let runtime = self.runtime.clone();
+        let mut receiver = runtime.subscribe_events();
+        let announced = runtime.announce_identity().await?;
+        let status = runtime.status().await;
+        let local_source = status_message_value(&status.message, "local_lxmf_destination")
+            .ok_or_else(|| {
+                crate::error::AppError::Runtime(
+                    "active runtime did not report a local LXMF delivery destination".into(),
+                )
+            })?;
+        let mut payload = crate::chat::handoff::OmenChatInvitePayload::new(
+            server_destination.clone(),
+            "lobby",
+            "LXMF invitation smoke",
+            "OMENbrowser_rs live smoke",
+            local_source.clone(),
+        );
+        payload.expires_at_unix = Some(current_epoch_ms() / 1_000 + wait_secs + 300);
+        let encoded = payload.encode().map_err(|error| {
+            crate::error::AppError::Runtime(format!(
+                "bounded LXMF invitation smoke payload was rejected: {error}"
+            ))
+        })?;
+        let (readiness, readiness_retry) = match peer_hash.as_deref() {
+            Some(peer) => {
+                let (readiness, retry) = collect_lxmf_delivery_readiness(
+                    runtime.clone(),
+                    receiver.as_mut(),
+                    peer,
+                    wait_secs,
+                )
+                .await?;
+                (Some(readiness), retry)
+            }
+            None => (
+                None,
+                serde_json::json!({
+                    "attempted": false,
+                    "status": "receive_only",
+                }),
+            ),
+        };
+        let send = match (peer_hash.as_deref(), readiness.as_ref()) {
+            (Some(peer), Some(readiness)) if readiness.ready_to_send => {
+                let envelope = crate::messaging::MessageEnvelope {
+                    peer_hash: peer.into(),
+                    title: crate::chat::handoff::OMENCHAT_INVITE_PROTOCOL.into(),
+                    body: String::from_utf8(encoded).map_err(|_| {
+                        crate::error::AppError::Runtime(
+                            "bounded invitation encoding was not UTF-8".into(),
+                        )
+                    })?,
+                    delivery_mode: DeliveryMode::Direct,
+                    include_ticket: false,
+                    native_reply_ticket: None,
+                    operation: Some(crate::messaging::OutboundOperationIdentity::generate()),
+                    attachments: Vec::new(),
+                };
+                runtime.send_message(envelope).await.map_or_else(
+                    |error| {
+                        serde_json::json!({
+                            "requested": true,
+                            "ok": false,
+                            "error": error.to_string(),
+                        })
+                    },
+                    |message| {
+                        serde_json::json!({
+                            "requested": true,
+                            "ok": true,
+                            "message_id": message.message_id,
+                            "transport_method": message.transport_method,
+                            "transport_accepted_only": !message.delivered,
+                        })
+                    },
+                )
+            }
+            (Some(_), Some(_)) => serde_json::json!({
+                "requested": true,
+                "ok": false,
+                "skipped": "peer readiness did not permit a direct send",
+            }),
+            _ => serde_json::json!({
+                "requested": false,
+                "status": "receive_only",
+            }),
+        };
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
+        let mut examined_events = 0usize;
+        let mut lagged_events = 0u64;
+        let mut preview_observed = false;
+        if peer_hash.is_none() {
+            let Some(receiver) = receiver.as_mut() else {
+                return Ok(serde_json::json!({
+                    "report": "native_lxmf_omenchat_invitation_live",
+                    "classification": "event_stream_unavailable",
+                    "send": send,
+                    "receive": {"event_stream_available": false, "preview_observed": false},
+                }));
+            };
+            while tokio::time::Instant::now() < deadline && examined_events < 256 {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                match tokio::time::timeout(remaining, receiver.recv()).await {
+                    Ok(Ok(RuntimeBusEvent::MessageReceived(message))) => {
+                        examined_events += 1;
+                        if crate::chat::handoff::is_lxmf_omenchat_invitation_message(&message) {
+                            self.handle_runtime_bus_event(RuntimeBusEvent::MessageReceived(
+                                message,
+                            ));
+                            preview_observed = self
+                                .omenchat_lxmf_invitation_preview
+                                .pending()
+                                .is_some_and(|preview| {
+                                    preview
+                                        .payload
+                                        .server_destination
+                                        .eq_ignore_ascii_case(&server_destination)
+                                });
+                            if preview_observed {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Ok(_)) => examined_events += 1,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped))) => {
+                        lagged_events = lagged_events.saturating_add(skipped);
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
+                }
+            }
+        }
+        let preview = self.omenchat_lxmf_invitation_preview.pending();
+        let history_persisted = preview
+            .map(|preview| preview.payload.inviter_destination.as_str())
+            .map(|inviter| {
+                self.messaging_service.conversation(inviter).map(|thread| {
+                    thread
+                        .messages
+                        .iter()
+                        .any(crate::chat::handoff::is_lxmf_omenchat_invitation_message)
+                })
+            })
+            .transpose()?;
+        Ok(serde_json::json!({
+            "report": "native_lxmf_omenchat_invitation_live",
+            "warning": "This opt-in lane sends one tokenless, expiring invitation only when peer readiness passes. Submission is not peer delivery.",
+            "local_announce": announced,
+            "local_lxmf_destination": local_source,
+            "peer_hash": peer_hash,
+            "server_destination": server_destination,
+            "wait_secs": wait_secs,
+            "readiness": readiness,
+            "readiness_retry": readiness_retry,
+            "send": send,
+            "receive": {
+                "event_stream_available": receiver.is_some(),
+                "examined_events": examined_events,
+                "lagged_events": lagged_events,
+                "preview_observed": preview_observed,
+                "authenticated_sender_match": preview.is_some_and(|preview| matches!(preview.sender_evidence, crate::chat::handoff::OmenChatInviteSenderEvidence::AuthenticatedMatch)),
+                "history_persisted": history_persisted,
+                "connection_action_invoked": false,
+            },
+            "classification": if preview_observed { "preview_observed" } else if send.get("ok") == Some(&serde_json::Value::Bool(true)) { "submitted_unconfirmed" } else { "no_preview" },
+        }))
+    }
+
     pub async fn native_lxmf_propagation_diagnostics_report(
         &self,
         selected_from_settings: Option<String>,
@@ -10781,6 +10990,27 @@ impl App {
         }
     }
 
+    pub fn toggle_settings_low_power_mode(&mut self) -> bool {
+        let previous = self.settings.ui.low_power_mode;
+        self.settings.ui.low_power_mode = !previous;
+        if self.save_settings_change("low-power mode") {
+            self.status.task = if self.settings.ui.low_power_mode {
+                "low-power mode enabled; motion paused and visible diagnostics sample every 5s"
+                    .into()
+            } else {
+                "low-power mode disabled; explicit reduced-motion preference is unchanged".into()
+            };
+            true
+        } else {
+            self.settings.ui.low_power_mode = previous;
+            false
+        }
+    }
+
+    pub fn effective_reduce_motion(&self) -> bool {
+        self.settings.ui.reduce_motion || self.settings.ui.low_power_mode
+    }
+
     pub fn edit_settings_default_start_page(&mut self) {
         self.workspace.active_section = WorkspaceSection::Settings;
         self.workspace.focus = FocusArea::Command;
@@ -11851,6 +12081,7 @@ impl App {
                 true
             }
             SettingsAction::ToggleReducedMotion => self.toggle_settings_reduced_motion(),
+            SettingsAction::ToggleLowPower => self.toggle_settings_low_power_mode(),
             SettingsAction::SelectRuntimeAuto => {
                 self.set_runtime_backend_setting(RuntimeBackendSetting::Auto)
             }
@@ -16670,6 +16901,29 @@ impl App {
                     .monitoring_state
                     .estimated_inbound_bytes
                     .saturating_add(estimated_message_bytes(&message));
+                #[cfg(feature = "chat-client")]
+                if crate::chat::handoff::is_lxmf_omenchat_invitation_message(&message) {
+                    let now_unix = current_epoch_ms() / 1_000;
+                    match self
+                        .omenchat_lxmf_invitation_preview
+                        .admit_message_at(&message, now_unix)
+                    {
+                        Ok(true) => {
+                            self.status.task = "review the authenticated LXMF OMENchat invitation; no connection has been opened".into();
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            self.status.task =
+                                format!("rejected LXMF OMENchat invitation: {error}");
+                            self.logs.push_with_source(
+                                LogSeverity::Warn,
+                                LogSource::Messaging,
+                                self.status.task.clone(),
+                            );
+                        }
+                    }
+                    return true;
+                }
                 match self.messaging_service.ingest_runtime_message(message) {
                     Ok(stored) => {
                         self.merge_message_into_conversation(stored);
@@ -16823,6 +17077,7 @@ impl App {
                 self.defer_lxmf_delivery_evidence(evidence)
             }
             crate::runtime::RuntimeBusEvent::PropagationStatus(status) => {
+                self.monitoring_state.last_propagation_status = Some(status.clone());
                 self.status.propagation = if status.selected {
                     let destination = status
                         .destination_hash
@@ -20740,6 +20995,77 @@ impl App {
             "runtime capabilities: backend={:?} supported={supported} unsupported={unsupported} unknown={unknown}",
             snapshot.backend
         )
+    }
+
+    pub fn propagation_backend_status_lines(&self) -> Vec<String> {
+        let capabilities = self.diagnostics_state.last_runtime_capabilities.as_ref();
+        let availability = |capability| {
+            capabilities
+                .map(|snapshot| snapshot.availability(capability))
+                .unwrap_or_default()
+        };
+        let lifecycle = self
+            .diagnostics_state
+            .last_runtime_lifecycle
+            .as_ref()
+            .map(|snapshot| format!("{:?}", snapshot.state))
+            .unwrap_or_else(|| "not_collected".into());
+        let mode = match self.settings.reticulum_instance_mode {
+            ReticulumInstanceMode::Managed => "managed_integrated",
+            ReticulumInstanceMode::External => "external_daemon",
+        };
+        let status = self.monitoring_state.last_propagation_status.as_ref();
+        let selected = status
+            .and_then(|status| status.destination_hash.as_deref())
+            .map(compact_hash)
+            .unwrap_or_else(|| "none".into());
+        let path = status
+            .map(|status| if status.has_path { "known" } else { "unknown" })
+            .unwrap_or("not_collected");
+        let link = status
+            .map(|status| status.link_state.as_str())
+            .unwrap_or("not_collected");
+        let transfer = status
+            .map(|status| status.transfer_state.as_str())
+            .unwrap_or("not_collected");
+        let counts =
+            crate::operations::propagation::propagation_operation_counts(&self.operation_history);
+        let guarantee = match self.settings.reticulum_instance_mode {
+            ReticulumInstanceMode::Managed => {
+                "managed: app TTL/idempotency/correlation are enforced; peer delivery still requires authoritative evidence"
+            }
+            ReticulumInstanceMode::External => {
+                "external: daemon TTL/idempotency/correlation are unproven; uncertain sends are never auto-retried"
+            }
+        };
+        vec![
+            format!("backend mode={mode} lifecycle={lifecycle}"),
+            format!(
+                "propagation node={selected} path={path} link={link} transfer={transfer}"
+            ),
+            format!(
+                "operations queued={} in_flight={} settled={} failed={} expired={} cancelled={} uncertain={}",
+                counts.queued,
+                counts.in_flight,
+                counts.settled,
+                counts.failed,
+                counts.expired,
+                counts.cancelled,
+                counts.uncertain
+            ),
+            format!(
+                "capabilities propagation={:?} authenticated_source={:?} tickets={:?} stamps={:?} cancellation={:?} events={:?}",
+                availability(crate::runtime::RuntimeCapability::PropagationStatus),
+                availability(
+                    crate::runtime::RuntimeCapability::AuthenticatedLxmfSourceEvidence
+                ),
+                availability(crate::runtime::RuntimeCapability::Tickets),
+                availability(crate::runtime::RuntimeCapability::Stamps),
+                availability(crate::runtime::RuntimeCapability::DeliveryCancellation),
+                availability(crate::runtime::RuntimeCapability::EventStream),
+            ),
+            guarantee.into(),
+        ]
     }
 
     pub fn runtime_ownership_diagnostics_line(&self) -> String {
@@ -27534,6 +27860,26 @@ side
     }
 
     #[test]
+    fn settings_low_power_toggle_persists_without_overwriting_motion_preference() {
+        let mut app = App::new(test_config("settings-low-power"));
+        assert!(!app.settings.ui.reduce_motion);
+        assert!(!app.effective_reduce_motion());
+
+        assert!(app.toggle_settings_low_power_mode());
+        let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
+        assert!(saved.ui.low_power_mode);
+        assert!(!saved.ui.reduce_motion);
+        assert!(app.effective_reduce_motion());
+        assert!(app.status.task.contains("sample every 5s"));
+
+        assert!(app.toggle_settings_low_power_mode());
+        let saved = AppSettings::load_or_default(&app.paths.settings_file).expect("load settings");
+        assert!(!saved.ui.low_power_mode);
+        assert!(!saved.ui.reduce_motion);
+        assert!(!app.effective_reduce_motion());
+    }
+
+    #[test]
     fn settings_edit_rejects_invalid_home_and_max_age() {
         let mut app = App::new(test_config("settings-edit-invalid"));
 
@@ -33423,6 +33769,136 @@ side
             "a later failure must not erase the last successful sync"
         );
         assert!(failed.last_sync_error.is_some());
+    }
+
+    #[cfg(feature = "chat-client")]
+    fn lxmf_omenchat_invitation_runtime_message(authenticated: bool) -> MessageSummary {
+        let payload = crate::chat::handoff::OmenChatInvitePayload::new(
+            FIXTURE_NODE_HASH,
+            "lobby",
+            "Lobby",
+            "Inviter",
+            FIXTURE_PEER_HASH,
+        );
+        let mut fields = BTreeMap::new();
+        if authenticated {
+            fields.insert(
+                crate::messaging::LXMF_SOURCE_AUTHENTICATED_FIELD.into(),
+                "true".into(),
+            );
+        }
+        MessageSummary {
+            peer_hash: FIXTURE_PEER_HASH.into(),
+            peer_label: "Inviter".into(),
+            title: crate::chat::handoff::OMENCHAT_INVITE_PROTOCOL.into(),
+            content: String::from_utf8(payload.encode().expect("encode invite"))
+                .expect("JSON UTF-8"),
+            timestamp: current_epoch_ms() as f64 / 1_000.0,
+            transport_method: TransportMethod::Direct,
+            delivered: false,
+            failed: false,
+            incoming: true,
+            unread: true,
+            message_id: Some("invite-message".into()),
+            fields,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "chat-client")]
+    #[test]
+    fn runtime_invitation_activation_requires_per_message_authenticated_source_evidence() {
+        let mut app = App::new(test_config("runtime-lxmf-invitation"));
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::MessageReceived(
+                lxmf_omenchat_invitation_runtime_message(true),
+            ))
+        );
+        assert!(app.omenchat_lxmf_invitation_preview.pending().is_some());
+        assert!(app
+            .messaging_service
+            .conversation(FIXTURE_PEER_HASH)
+            .expect("empty invitation peer thread")
+            .messages
+            .is_empty());
+        assert!(app.status.task.contains("no connection has been opened"));
+
+        app.omenchat_lxmf_invitation_preview.cancel();
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::MessageReceived(
+                lxmf_omenchat_invitation_runtime_message(false),
+            ))
+        );
+        assert!(app.omenchat_lxmf_invitation_preview.pending().is_none());
+        assert!(app
+            .messaging_service
+            .conversation(FIXTURE_PEER_HASH)
+            .expect("empty invitation peer thread")
+            .messages
+            .is_empty());
+        assert!(app.status.task.contains("source is not authenticated"));
+    }
+
+    #[cfg(feature = "chat-client")]
+    #[tokio::test]
+    async fn live_invitation_report_rejects_bounds_before_runtime_work() {
+        let mut app = App::new(test_config("live-invitation-preflight"));
+        let wait_error = app
+            .native_lxmf_invitation_live_report(None, FIXTURE_NODE_HASH.into(), 0)
+            .await
+            .expect_err("zero wait rejected");
+        assert!(wait_error.to_string().contains("between 1 and 300"));
+
+        let server_error = app
+            .native_lxmf_invitation_live_report(None, "not-a-destination".into(), 1)
+            .await
+            .expect_err("invalid server rejected before announce");
+        assert!(server_error.to_string().contains("input was rejected"));
+
+        let peer_error = app
+            .native_lxmf_invitation_live_report(
+                Some("not-a-peer".into()),
+                FIXTURE_NODE_HASH.into(),
+                1,
+            )
+            .await
+            .expect_err("invalid peer rejected before announce");
+        assert!(peer_error.to_string().contains("peer must be a canonical"));
+    }
+
+    #[test]
+    fn propagation_backend_panel_is_event_driven_and_external_guarantees_stay_unproven() {
+        let mut app = App::new(test_config("propagation-backend-panel"));
+        app.settings.reticulum_instance_mode = ReticulumInstanceMode::External;
+        assert!(
+            app.handle_runtime_bus_event(RuntimeBusEvent::PropagationStatus(
+                crate::runtime::PropagationStatus {
+                    selected: true,
+                    destination_hash: Some(FIXTURE_NODE_HASH.into()),
+                    has_path: true,
+                    known_app_data: true,
+                    link_state: "active".into(),
+                    transfer_state: "idle".into(),
+                },
+            ))
+        );
+        crate::operations::propagation::begin_propagation_sync(
+            &mut app.operation_history,
+            91,
+            Some(FIXTURE_NODE_HASH),
+            1,
+        )
+        .expect("queued sync");
+
+        let lines = app.propagation_backend_status_lines();
+        let text = lines.join("\n");
+        assert!(text.contains("backend mode=external_daemon"));
+        assert!(text.contains("node=00112233..ddeeff"));
+        assert!(text.contains("path=known link=active transfer=idle"));
+        assert!(text.contains("queued=1"));
+        assert!(text.contains("daemon TTL/idempotency/correlation are unproven"));
+        assert!(text.contains("never auto-retried"));
+        assert!(!text.contains(FIXTURE_NODE_HASH));
     }
 
     #[test]
