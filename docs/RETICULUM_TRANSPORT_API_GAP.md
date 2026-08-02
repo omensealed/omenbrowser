@@ -1,9 +1,9 @@
 # Reticulum Transport API Gap
 
-OMENbrowser_rs now builds against the exact `reticulum-rs` / `lxmf` 0.9.5
+OMENbrowser_rs now builds against the exact `reticulum-rs` / `lxmf` 0.9.7
 train. Small NomadNet requests now use direct `PacketContext::Request` packets;
 oversized packed requests retain the bounded request-resource path. Exact empty
-and executable-form exchanges pass against current Python RNS 1.3.8 and
+and executable-form exchanges pass against current Python RNS 1.4.0 and
 NomadNet 1.2.7.
 
 This project intentionally uses the published crates as-is. Do not add a local
@@ -27,7 +27,7 @@ data from public primitives and sends it directly on the active link's bound
 interface. No automatic Resource retry follows a direct request, because a
 retry could repeat an executable form action whose response was merely lost.
 
-The 0.9.5 crate also exposes public request/response Resource helpers.
+The 0.9.7 crate also exposes public request/response Resource helpers.
 OMENbrowser selects `Transport::send_request_resource()` only when the packed
 request exceeds the Reticulum packet MDU, matching Python's primitive-selection
 boundary. Current Python verifies that oversized path and also verifies that
@@ -65,7 +65,7 @@ text and local acceptance checklist.
 
 ### IFAC/private gateway support
 
-Published `reticulum-rs-transport` 0.9.5 still exposes IFAC-related shared
+Published `reticulum-rs-transport` 0.9.7 still exposes IFAC-related shared
 configuration, but source inspection confirms that its stock TCP client and
 server wire paths serialize/deserialize `Packet` values directly through HDLC.
 They do not apply or verify the Python Reticulum IFAC transform. Shared IFAC
@@ -249,6 +249,39 @@ normal suites, rejects any claim that the maximum UDP Resource boundary works,
 and does not add a fork, local transport patch, larger application buffer, or
 unbounded retry. Smaller Resource cases retain only their separately tested
 interface and payload scopes.
+
+Reticulum 0.9.7 requalification (2026-08-01): the exact unchanged sentinel
+still fails at 456 versus 483 bytes against the official registry 0.9.7 train.
+The same conservative disposition remains: maximum-size UDP Resource parity is
+not claimed, the red test remains explicit, and no fork, patch override,
+application fragmentation, lowered protocol limit, or automatic retry hides
+the upstream boundary. Separately passing TCP, smaller-Resource, OMENchat, and
+NomadNet cases retain only their tested scope.
+
+The 0.9.7 source audit also confirms that upstream now increments received hop
+counts before publishing announce events and supervises its transport worker
+group. Pinned Python observes a directly connected peer at one hop and the
+complete path/identity/Link-data test passes with that reference-compatible
+value. OMEN retains its outer generation-scoped terminal recovery: interface
+workers still own ordinary reconnect, while repeated terminal observations can
+schedule at most one delayed runtime replacement and clean shutdown schedules
+none. Upstream supervision is therefore defense in depth, not grounds to start
+a competing reconnect loop.
+
+Stock 0.9.7 TCP remains insufficient evidence to remove OMEN's IFAC adapter.
+The retained adapter passes pinned/current Python vectors, bidirectional
+authentication, wrong-credential/tamper rejection, split/coalesced HDLC,
+reconnect, path/announce/identity recall, Link activation, and Link data. Its
+read and delimiter-free accumulation allocations are now explicitly bounded,
+backpressured delivery is cancellable, paired tasks are supervised, and tag
+comparison is constant-time without changing wire bytes or MTU.
+
+The 0.9.7 stamp/ticket decision remains unchanged: OMEN owns one authoritative
+decision and final stamp using authenticated relay-advertised cost, its existing
+safety ceiling, and reply-ticket precedence. Pinned/current Python and mixed
+0.6.0-1/0.9.7-1 propagation tests pass advertised cost and ticket wire checks.
+The upstream default propagation cost is not substituted for a raised live
+relay cost.
 
 Current-product NomadNet update (2026-07-18): the canonical `0.9.5-1` browser
 now passes a scheduled live page fetch against the standalone server's fixed

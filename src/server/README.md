@@ -150,7 +150,7 @@ omenchatd interfaces tcp-client gateway.example:42420 \
 
 IFAC is currently enforced only by omenchatd's project-local TCP **client**
 adapter. A `TCPServerInterface` containing `network_name` or `passphrase` is
-rejected at startup because the published reticulum-rs 0.9.6 stock TCP server
+rejected at startup because the published reticulum-rs 0.9.7 stock TCP server
 does not apply the Python IFAC wire transform. Run the enforcing gateway as the
 server and connect omenchatd to it as shown above.
 
@@ -593,7 +593,7 @@ Post-cancel Resource completion and Python/mixed-version peers remain separate
 interop gates.
 
 The separate two-process completion/cancel/reuse gate was rerun on the exact
-locked crates.io 0.9.6 transport on 2026-07-31. It remains red and blocks a
+locked crates.io 0.9.7 transport on 2026-08-01. It remains red and blocks a
 claim of live UDP Resource parity, but the maintainer classifies the published
 upstream limitation as non-blocking for the version-aligned OMEN release. Its
 receiver obtains the baseline
@@ -603,10 +603,10 @@ retry budget expires. The explicit command and evidence boundary are recorded
 in `docs/TESTING.md`. The test remains ignored in fast suites and must pass
 before UDP Resource completion is claimed. Current OMENchat upload/history and
 NomadNet Resource paths retain their separate passing interoperability evidence.
-The failure is isolated to the published Reticulum UDP worker: its 456-byte
+The failure is isolated to the published Reticulum 0.9.7 UDP worker: its 456-byte
 layout-derived transmit buffer cannot serialize a 483-byte maximum Resource
 wire packet and silently drops the serialization error. This remains unchanged
-in upstream v0.9.1 and `main` as checked on 2026-07-16; no protocol-limit or
+in the exact registry 0.9.7 train as checked on 2026-08-01; no protocol-limit or
 application-fragmentation workaround is enabled.
 
 Persistent SQLite connections enable foreign-key checks, WAL journaling,

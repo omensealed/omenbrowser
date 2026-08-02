@@ -113,7 +113,7 @@ async fn attach_plain_udp(transport: &Transport, bind_port: u16, peer_port: u16)
 async fn receiver_child(root: &Path, nonce: &str, server_port: u16, client_port: u16) {
     let server_identity =
         PrivateIdentity::new_from_name(&format!("omenchatd-multiprocess-server-{nonce}"));
-    let mut transport = Transport::new(transport_config(
+    let transport = Transport::new(transport_config(
         "omenchatd-resource-multiprocess-server",
         &server_identity,
     ));
@@ -484,9 +484,9 @@ async fn reticulum_multiprocess_resource_complete_cancel_reuse() {
 }
 
 #[test]
-#[ignore = "known upstream Reticulum 0.9.6 UDP maximum-Resource serialization regression"]
+#[ignore = "known upstream Reticulum 0.9.7 UDP maximum-Resource serialization regression"]
 fn reticulum_udp_tx_buffer_covers_max_resource_wire_packet() {
-    // reticulum-rs-transport through 0.9.6 sizes both buffers as
+    // reticulum-rs-transport 0.9.7 still sizes both buffers as
     // `size_of::<Packet>() * 3`. Packet payload storage is heap-backed, so
     // that Rust layout size is unrelated to the largest serialized packet.
     let upstream_udp_buffer = std::mem::size_of::<rns_transport::packet::Packet>() * 3;

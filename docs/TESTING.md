@@ -2344,7 +2344,7 @@ them with live page/message latency before changing product defaults.
 The `--two-core` case uses Linux `taskset` from `util-linux`; other platforms
 must apply their native CPU-affinity mechanism or run on low-core hardware.
 
-## omenchatd v0.9.6-7 recovery and event-loop gates
+## omenchatd v0.9.7-1 recovery and event-loop gates
 
 The standalone server has a separate runtime policy: available parallelism is
 clamped to one through four async workers, the blocking pool is capped at eight,
@@ -2378,7 +2378,7 @@ tests retain bounded draining and permit-release coverage.
 
 Resource lifecycle events retain the exact 32-byte Reticulum hash. Outbound
 application IDs use a 256-item/1 MiB global, 16-item-per-link, six-hour map and
-are released on terminal, link close, shutdown, or expiry. Because pinned 0.9.6
+are released on terminal, link close, shutdown, or expiry. Because registry 0.9.7
 inbound failure events do not contain OMENchat metadata, upload failure cleanup
 removes one candidate only for a unique authenticated-identity plus expected-size
 match. Ambiguous or unmatched failures remove none. Run:
@@ -3318,7 +3318,7 @@ OMENchat server, reconnect over the network, or inspect private identity
 material. Live open/close/reconnect behavior remains covered by the documented
 OMENchat smoke and interoperability gates.
 
-The typed LXMF SDK Operations fixtures prove every v0.9.6 delivery-state
+The typed LXMF SDK Operations fixtures prove every v0.9.7 delivery-state
 mapping, backend-dependent terminal-sent behavior, opaque message correlation,
 peer-target retention, bounded reason handling, exact attempts/sequence,
 transition and evidence coalescing, duplicate/stale rejection, terminal
@@ -4165,7 +4165,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.6-7` must report
+therefore exits with the expected signal status; current `0.9.7-1` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -4203,7 +4203,7 @@ evidence. Physical power-loss durability remains separate evidence.
 
 The native adapter regression
 `clean_omenchat_accepts_known_routed_paths_without_app_hop_cutoff` verifies
-that OMENbrowser delegates hop limits to Reticulum 0.9.6. Known 1-, 3-, 13-,
+that OMENbrowser delegates hop limits to Reticulum 0.9.7. Known 1-, 3-, 13-,
 and 127-hop paths are usable; an unknown path still requires discovery. Run it
 with:
 
@@ -5353,7 +5353,7 @@ Reticulum sender-cancel gate:
 
 It proves outbound initiator cancellation and production bridge cleanup, not
 receiver-side cancellation of an inbound audit page. The locked
-`reticulum-rs-transport 0.9.6` API has no public receiver-cancel operation.
+`reticulum-rs-transport 0.9.7` API has no public receiver-cancel operation.
 Keep that distinction in test and release claims.
 
 The non-product current/current moderation-audit process gate is:
@@ -5538,7 +5538,7 @@ latency, checkpointed database bytes, and Linux RSS when `/proc` is available;
 these observations are not hardware-independent thresholds. It does not add a
 worker, timer, queue, retry, or product feature.
 
-The same review verified that locked `reticulum-rs-transport 0.9.6`
+The same review verified that locked `reticulum-rs-transport 0.9.7`
 `Transport::cancel_resource` removes outbound state and sends
 `ResourceInitiatorCancel`. There is no public receiver-side cancellation
 operation or inbound advertisement handle. Inbound failure remains observable
@@ -5734,7 +5734,7 @@ cargo test --locked --no-default-features --features desktop-product \
   lxmf_topics --lib
 ```
 
-It compiler-checks the exact 0.9.6 topic request/trait surface and confirms that
+It compiler-checks the exact 0.9.7 topic request/trait surface and confirms that
 profile/dependency presence cannot activate either current product backend.
 External receive eligibility additionally requires bounded negotiated
 capabilities, cursor-gap recovery, a proven topic event contract, and
@@ -5760,7 +5760,7 @@ Python interoperability. A daemon is not available in the default test
 environment, so this live result must be reported separately rather than
 inferred from unit tests.
 
-The locked 0.9.6 topic event/provenance reproducer is:
+The locked 0.9.7 topic event/provenance reproducer is:
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
@@ -5821,7 +5821,7 @@ evidence; eight-record incremental pruning; and shutdown clearing. The opaque
 conversation key is bounded and never used as a path. Local rejection sends no
 network response, and there is deliberately no accept or transfer method.
 
-The locked 0.9.6 public Resource correlation reproducer is:
+The locked 0.9.7 public Resource correlation reproducer is:
 
     cargo test --locked --no-default-features --features native-reticulum \
       locked_096_public_resource --lib

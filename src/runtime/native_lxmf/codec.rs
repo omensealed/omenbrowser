@@ -3995,7 +3995,7 @@ mod tests {
             .build()
             .expect("current Python sender Tokio runtime");
         let (message, signature_valid, wire_message_id) = runtime.block_on(async {
-            let mut transport = Transport::new(TransportConfig::new(
+            let transport = Transport::new(TransportConfig::new(
                 "current-python-lxmf-receiver",
                 &transport_identity,
                 true,
@@ -4185,7 +4185,7 @@ mod tests {
             .build()
             .expect("ticket round-trip Tokio runtime");
         let (reply, reply_message_id) = tokio.block_on(async {
-            let mut transport = Transport::new(TransportConfig::new(
+            let transport = Transport::new(TransportConfig::new(
                 format!("{case}-transport"),
                 &transport_identity,
                 true,
@@ -4428,7 +4428,7 @@ mod tests {
             .expect("direct-stamp Tokio runtime");
         let (stamp_value, stamp_attempts, elapsed) = tokio.block_on(async {
             let started = Instant::now();
-            let mut transport = Transport::new(TransportConfig::new(
+            let transport = Transport::new(TransportConfig::new(
                 format!("{case}-transport"),
                 &transport_identity,
                 true,

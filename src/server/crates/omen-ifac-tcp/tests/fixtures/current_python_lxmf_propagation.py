@@ -16,7 +16,7 @@ LXMF_VERSION = "1.1.0"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 TITLE = "Current Python propagated LXMF"
-CONTENT = "Rust 0.9.6 synced and acknowledged this signed Python LXMF message"
+CONTENT = "Rust 0.9.7 synced and acknowledged this signed Python LXMF message"
 
 
 def verify_packages(

@@ -16,7 +16,7 @@ LXMF_VERSION = "1.1.0"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 TITLE = "Current Python direct LXMF"
-CONTENT = "Rust 0.9.6 received this signed Python LXMF message"
+CONTENT = "Rust 0.9.7 received this signed Python LXMF message"
 
 
 def verify_packages(source: pathlib.Path) -> None:

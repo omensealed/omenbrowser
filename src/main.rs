@@ -2832,6 +2832,7 @@ async fn native_startup_report(
             Err(error) => serde_json::json!({"ok": false, "error": error.to_string()}),
         },
         "runtime_status_after": status_after,
+        "upstream_software_parity": upstream_software_parity_diagnostics(),
         "interface_stats": interface_stats,
         "network_snapshot": network_snapshot,
         "stop": match stop_result {
@@ -2845,6 +2846,24 @@ async fn native_startup_report(
         object.insert("classification".into(), classification);
     }
     report
+}
+
+#[cfg(feature = "native-lxmf-sdk")]
+fn upstream_software_parity_diagnostics() -> serde_json::Value {
+    serde_json::json!({
+        "available": true,
+        "source": "official registry lxmf-sdk 0.9.7",
+        "interpretation": "advisory implementation capability inventory; not live interoperability proof",
+        "orientation": lxmf_sdk::current_software_parity_orientation(),
+    })
+}
+
+#[cfg(not(feature = "native-lxmf-sdk"))]
+fn upstream_software_parity_diagnostics() -> serde_json::Value {
+    serde_json::json!({
+        "available": false,
+        "interpretation": "lxmf-sdk parity inventory is not compiled in this product profile; it would be advisory capability metadata, not live interoperability proof",
+    })
 }
 
 fn report_result<T: serde::Serialize>(
@@ -4550,6 +4569,28 @@ mod tests {
         assert!(missing_upload
             .to_string()
             .contains("requires one upload file"));
+    }
+
+    #[test]
+    fn upstream_parity_diagnostics_are_advisory_not_live_proof() {
+        let diagnostics = upstream_software_parity_diagnostics();
+        let interpretation = diagnostics["interpretation"]
+            .as_str()
+            .expect("parity interpretation");
+        assert!(interpretation.contains("not live interoperability proof"));
+
+        #[cfg(feature = "native-lxmf-sdk")]
+        {
+            assert_eq!(diagnostics["available"], true);
+            assert_eq!(diagnostics["orientation"]["advisory"], true);
+            assert!(diagnostics["orientation"]["overall"]["inventory"]["total"]
+                .as_u64()
+                .is_some_and(|total| total > 0));
+            assert_eq!(diagnostics["source"], "official registry lxmf-sdk 0.9.7");
+        }
+
+        #[cfg(not(feature = "native-lxmf-sdk"))]
+        assert_eq!(diagnostics["available"], false);
     }
 
     #[test]
