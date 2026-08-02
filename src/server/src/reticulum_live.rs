@@ -3288,6 +3288,10 @@ mod tests {
         })
         .await
         .expect("Tokio timer must progress while blocking worker waits");
+        assert!(
+            !task.is_finished(),
+            "worker must still be blocked on the deliberately held server lock"
+        );
 
         release_tx.send(()).expect("release worker lock");
         lock_thread.join().expect("lock thread");
@@ -3295,7 +3299,7 @@ mod tests {
         let metrics = worker.worker_metrics();
         assert_eq!(metrics.in_flight, 0);
         assert_eq!(metrics.completed, 1);
-        assert!(metrics.max_micros >= 10_000);
+        assert_eq!(metrics.rejected, 0);
     }
 
     #[tokio::test]
