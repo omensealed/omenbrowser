@@ -1523,10 +1523,27 @@ fn validate_sdk_send_plan_ttl(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
 
 #[cfg(feature = "native-lxmf-sdk")]
 fn validate_external_rpc_delivery_options(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
+    let mut missing_guarantees = Vec::with_capacity(5);
+    if plan.send_request.ttl_ms.is_some() {
+        missing_guarantees.push("TTL");
+    }
+    if plan.send_request.idempotency_key.is_some() {
+        missing_guarantees.push("idempotency key");
+    }
+    if plan.send_request.correlation_id.is_some() {
+        missing_guarantees.push("correlation identifier");
+    }
+    if !plan.send_request.extensions.is_empty() {
+        missing_guarantees.push("extensions");
+    }
     if plan.rpc_delivery.ticket.is_some() {
-        return Err(AppError::Unsupported(
-            "external LXMF SDK/RPC 0.9.7 cannot preserve an explicit reply ticket".into(),
-        ));
+        missing_guarantees.push("explicit reply ticket");
+    }
+    if !missing_guarantees.is_empty() {
+        return Err(AppError::Unsupported(format!(
+            "external LXMF SDK/RPC 0.9.7 cannot preserve required send guarantees: {}",
+            missing_guarantees.join(", ")
+        )));
     }
     Ok(())
 }
@@ -1620,12 +1637,12 @@ mod tests {
         build_sdk_wire_delivery_from_envelope_with_issued_ticket,
         build_sdk_wire_delivery_with_issued_ticket, build_sdk_wire_delivery_with_policy,
         current_unix_secs_f64, hex_bytes, map_sdk_cancel_result, native_lxmf_sdk_record_ticket,
-        native_lxmf_sdk_runtime_boundary_decision, validate_sdk_send_plan_ttl,
-        EmbeddedNativeLxmfSdkSender, MissingNativeLxmfSdkSender, NativeLxmfSdkOutboundBridge,
-        NativeLxmfSdkRuntimeBoundaryKind, NativeLxmfSdkSender, NativeLxmfSdkSenderState,
-        NativeLxmfSdkTicketCache, NativeLxmfSdkWireDelivery, NativeLxmfSdkWireSubmitter,
-        RpcNativeLxmfSdkSender, NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS,
-        NATIVE_LXMF_SDK_TICKET_MAX_BYTES,
+        native_lxmf_sdk_runtime_boundary_decision, validate_external_rpc_delivery_options,
+        validate_sdk_send_plan_ttl, EmbeddedNativeLxmfSdkSender, MissingNativeLxmfSdkSender,
+        NativeLxmfSdkOutboundBridge, NativeLxmfSdkRuntimeBoundaryKind, NativeLxmfSdkSendPlan,
+        NativeLxmfSdkSender, NativeLxmfSdkSenderState, NativeLxmfSdkTicketCache,
+        NativeLxmfSdkWireDelivery, NativeLxmfSdkWireSubmitter, RpcNativeLxmfSdkSender,
+        NATIVE_LXMF_SDK_TICKET_CACHE_MAX_ITEMS, NATIVE_LXMF_SDK_TICKET_MAX_BYTES,
     };
 
     struct RecordedDelivery {
@@ -2807,7 +2824,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_rpc_097_send_capture_proves_preserved_and_dropped_fields() {
+    async fn upstream_rpc_097_send_capture_proves_preserved_and_dropped_fields() {
         let (endpoint, captured_rx, capture_worker) = capture_rpc_requests(2);
         let mut operation =
             OutboundOperationIdentity::validated("idem-external".into(), "corr-external".into())
@@ -2827,25 +2844,27 @@ mod tests {
         assert!(matches!(plan.send_request.ttl_ms, Some(1..)));
         assert_eq!(plan.rpc_delivery.ticket, None);
 
-        let sender = RpcNativeLxmfSdkSender::new(endpoint);
-        let receipt = sender
-            .send_plan(plan)
-            .await
-            .expect("external RPC capture send");
-        assert_eq!(receipt.message_id.as_deref(), Some("daemon-message-id"));
-        assert_eq!(receipt.state, "submitted_to_sdk_rpc");
-        assert_eq!(
-            sender
-                .cancel_delivery(
-                    receipt
-                        .message_id
-                        .as_deref()
-                        .expect("daemon cancellation identity"),
-                )
-                .await
-                .expect("external RPC capture cancellation"),
-            LxmfCancelOutcome::Accepted
-        );
+        let endpoint_for_send = endpoint.clone();
+        let send_request = plan.send_request;
+        let message_id = tokio::task::spawn_blocking(move || {
+            use lxmf_sdk::SdkBackend;
+
+            lxmf_sdk::RpcBackendClient::new(endpoint_for_send)
+                .send(send_request)
+                .expect("upstream RPC capture send")
+        })
+        .await
+        .expect("join upstream RPC capture send");
+        assert_eq!(message_id.0, "daemon-message-id");
+        tokio::task::spawn_blocking(move || {
+            use lxmf_sdk::SdkBackend;
+
+            lxmf_sdk::RpcBackendClient::new(endpoint)
+                .cancel(lxmf_sdk::MessageId(message_id.0))
+                .expect("upstream RPC capture cancellation")
+        })
+        .await
+        .expect("join upstream RPC capture cancellation");
 
         let captured = captured_rx
             .recv_timeout(Duration::from_secs(2))
@@ -2891,6 +2910,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn external_rpc_097_rejects_each_lossy_send_guarantee() {
+        let base = NativeLxmfSdkSendPlan {
+            send_request: lxmf_sdk::SendRequest::new("source", "peer", serde_json::json!({})),
+            rpc_delivery: rns_rpc::OutboundDeliveryOptions::default(),
+        };
+        let cases = [
+            ("TTL", {
+                let mut plan = base.clone();
+                plan.send_request.ttl_ms = Some(1);
+                plan
+            }),
+            ("idempotency key", {
+                let mut plan = base.clone();
+                plan.send_request.idempotency_key = Some("bounded-idempotency".into());
+                plan
+            }),
+            ("correlation identifier", {
+                let mut plan = base.clone();
+                plan.send_request.correlation_id = Some("bounded-correlation".into());
+                plan
+            }),
+            ("extensions", {
+                let mut plan = base.clone();
+                plan.send_request
+                    .extensions
+                    .insert("bounded".into(), serde_json::json!(true));
+                plan
+            }),
+            ("explicit reply ticket", {
+                let mut plan = base.clone();
+                plan.rpc_delivery.ticket = Some("not-logged".into());
+                plan
+            }),
+        ];
+
+        for (guarantee, plan) in cases {
+            let error = validate_external_rpc_delivery_options(&plan)
+                .expect_err("lossy external guarantee must fail closed");
+            let message = error.to_string();
+            assert!(message.contains("external LXMF SDK/RPC 0.9.7"));
+            assert!(message.contains(guarantee));
+            assert!(!message.contains("not-logged"));
+        }
+    }
+
+    #[tokio::test]
+    async fn external_rpc_097_rejects_combined_guarantees_before_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
+        listener
+            .set_nonblocking(true)
+            .expect("set isolated RPC sentinel nonblocking");
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}/rpc",
+            listener.local_addr().expect("RPC sentinel address").port()
+        );
+        let envelope = MessageEnvelope {
+            peer_hash: "peer".into(),
+            title: "combined".into(),
+            body: "body".into(),
+            delivery_mode: DeliveryMode::Direct,
+            include_ticket: false,
+            native_reply_ticket: None,
+            operation: Some(
+                OutboundOperationIdentity::validated("idem".into(), "corr".into())
+                    .expect("valid operation"),
+            ),
+            attachments: Vec::new(),
+        };
+        let mut plan = build_sdk_send_plan(&envelope, "source", None);
+        plan.send_request
+            .extensions
+            .insert("bounded".into(), serde_json::json!(true));
+
+        let error = RpcNativeLxmfSdkSender::new(endpoint)
+            .send_plan(plan)
+            .await
+            .expect_err("combined lossy guarantees must fail closed");
+        let message = error.to_string();
+        for guarantee in [
+            "TTL",
+            "idempotency key",
+            "correlation identifier",
+            "extensions",
+        ] {
+            assert!(message.contains(guarantee));
+        }
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+    }
+
     #[tokio::test]
     async fn external_rpc_097_rejects_explicit_reply_ticket_before_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
@@ -2927,7 +3039,8 @@ mod tests {
             .await
             .expect_err("unsupported explicit reply ticket must fail closed");
         let message = error.to_string();
-        assert!(message.contains("cannot preserve an explicit reply ticket"));
+        assert!(message.contains("cannot preserve required send guarantees"));
+        assert!(message.contains("explicit reply ticket"));
         assert!(!message.contains("102030"));
         assert!(!message.contains(ticket_bytes.as_slice().escape_ascii().to_string().as_str()));
         assert!(matches!(

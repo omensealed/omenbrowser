@@ -1,6 +1,6 @@
 # Dependency Security Status
 
-Reviewed on 2026-07-14 with the refreshed RustSec database and both independent
+Reviewed on 2026-08-02 with the refreshed RustSec database and both independent
 Cargo lockfiles. A nonzero audit is never reported as a pass.
 
 ## Inbound LXMF signature admission
@@ -68,55 +68,31 @@ range, runtime configuration, feature alias, storage format, or wire format
 changed. `src/server/Cargo.lock` is independent and none of these versions is
 present in omenchatd's enabled profiles.
 
-## Accepted Wayland build-time audit findings
+## Resolved Wayland build-time audit findings
 
-`cargo audit --no-fetch` now fails only on:
+Registry `wayland-scanner 0.31.11` now depends on fixed registry
+`quick-xml 0.41.0`. A precise lock update changed only those two packages and
+resolved RUSTSEC-2026-0194 and RUSTSEC-2026-0195 without changing Iced, its
+feature graph, or either manifest range. The path remains a Linux build-time
+proc macro through Iced/Wayland and rfd/ashpd and remains absent from the
+standalone server.
 
-- RUSTSEC-2026-0194: quadratic duplicate-attribute checking in `quick-xml`
-  0.39.2;
-- RUSTSEC-2026-0195: unbounded namespace declaration allocation in
-  `quick-xml` 0.39.2 `NsReader`.
+`scripts/verify-accepted-advisories.sh` retains its historical name but accepts
+no vulnerabilities. It requires a zero-vulnerability raw root audit, exact
+registry `wayland-scanner 0.31.11 -> quick-xml 0.41.0` parentage, no repository
+Rust import, no standalone-server package, and an empty `deny.toml` advisory
+ignore list. A new advisory, version/path change, runtime import, or server edge
+fails closed.
 
-The package is a Linux build-time dependency of `wayland-scanner 0.31.10`
-through Iced/Wayland and rfd/ashpd. It is absent from the standalone server and
-does not parse browser, Reticulum, LXMF, OMENchat, or user-selected XML at
-runtime.
+## GitHub Actions Node 24 maintenance
 
-Source inspection of the locked scanner shows it uses `quick_xml::Reader` and
-checked `Attributes`. Therefore the duplicate-attribute complexity path is
-reachable while compiling trusted Wayland protocol XML, while the
-namespace-aware `NsReader` allocation path is not called. This reduces runtime
-exposure but does not resolve the advisory. The maintainer accepts the two
-findings for v0.9.5-1 because neither path parses application or network input,
-the scanner is a compile-time proc macro, and the only reachable affected path
-processes fixed dependency-owned Wayland protocol XML.
-
-The required fixed version is `quick-xml >=0.41.0`, while
-`wayland-scanner 0.31.10` requires `quick-xml ^0.39`. A precise update was
-attempted and Cargo rejected it at dependency resolution without changing the
-lockfile. Resolving this requires an upstream Wayland/Iced-compatible release
-or an explicitly reviewed patch; this program will not vendor or broadly
-upgrade Iced as collateral work.
-
-Upstream Smithay merged its `quick-xml 0.41` scanner update in [pull request
-938](https://github.com/Smithay/wayland-rs/pull/938) on 2026-07-08, but crates.io
-still reports `wayland-scanner 0.31.10` as the latest release and its published
-manifest still requires `quick-xml ^0.39`. The merged source is useful
-removal-path evidence, but an unpublished branch is not an approved production
-dependency. Re-evaluate the next immutable registry release with a precise
-lockfile update, full native product matrix, `cargo audit`, and `cargo deny`;
-do not add a Git dependency or advisory exception to bridge the publication
-gap.
-
-`scripts/verify-accepted-advisories.sh` is the release boundary. It requires
-the raw audit to contain exactly RUSTSEC-2026-0194 and RUSTSEC-2026-0195, maps
-both to registry `quick-xml 0.39.2`, requires its only parent to be registry
-`wayland-scanner 0.31.10` with a proc-macro target, rejects any repository Rust
-import, and requires omenchatd to resolve no `quick-xml`. It then runs the
-filtered audit and the unfiltered standalone-server audit. `deny.toml` retains
-an empty advisory-ignore list. A new vulnerability, version, parent, runtime
-import, or server edge fails closed; a fixed scanner also fails until this
-temporary verifier and acceptance are deliberately removed.
+Completed GitHub run logs identified checkout v4, upload-artifact v4, and
+download-artifact v4 as Node-20 actions being forced onto Node 24. The workflows
+now use the minimal official Node-24-compatible releases pinned to full commit
+SHAs: `actions/checkout` v5.0.1, `actions/upload-artifact` v6.0.0, and
+`actions/download-artifact` v7.0.0. Workflow permissions, runner selection,
+artifact names, and the native/package job graph are unchanged. The local
+workflow-security verifier continues rejecting mutable action references.
 
 The audit also emits five allowed warning categories covering unmaintained and
 unsound transitive packages. They remain triage work and must not be
@@ -341,7 +317,7 @@ cargo tree --locked --no-default-features --features desktop-product \
 cargo tree --locked --no-default-features --features desktop-product \
   -i crossbeam-epoch@0.9.20
 cargo tree --locked --no-default-features --features desktop-product \
-  -i quick-xml@0.39.2
+  -i quick-xml@0.41.0
 cargo tree --locked --no-default-features --features desktop-product \
   -i num-bigint@0.4.8
 cargo tree --locked --no-default-features --features desktop-product \

@@ -857,6 +857,7 @@ dependencies = [
  "reticulum-rs-transport",
  "serde_json",
  "sha2",
+ "subtle",
  "tokio",
  "tokio-util",
 ]
@@ -871,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "omenchatd"
-version = "0.9.7-1"
+version = "0.9.7-2"
 dependencies = [
  "bzip2 0.5.2",
  "crossterm",
