@@ -375,6 +375,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "atomicwrites"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ef1bb8d1b645fe38d51dfc331d720fb5fc2c94b440c76cc79c80ff265ca33e3"
+dependencies = [
+ "rustix 0.38.44",
+ "tempfile",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3042,24 +3053,27 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lxmf"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbf136e91d4b2d6dde7edd5a50e8f95a02a62310645a9164403c66a70ff33ff9"
+checksum = "70a906d4b8a1650f34dbba6995465284112ce3b08d7c5f955d36c1dfd51d4bf8"
 dependencies = [
  "lxmf-wire",
 ]
 
 [[package]]
 name = "lxmf-reference"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15e4a1c545c947312b6ab287b92a537c0bfb888aa199a1a88e58e7c3a2747a1e"
+checksum = "9c35b49b72e1ab5d5783bcc69c29d96bef3acd2e7169cfd41d161140da9de6e9"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "lxmf-sdk"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a11a2df256b2348baf3c2471dd4cf52bef2d81661ddea42fec9dadd77360ed"
+checksum = "5bef7e3e898c519594c2d570b5861af08d27c48fa889c0e60d0a521586609fbc"
 dependencies = [
  "hex",
  "hmac",
@@ -3067,7 +3081,7 @@ dependencies = [
  "lxmf-wire",
  "reticulum-rs-rpc",
  "rustls",
- "rustls-pemfile",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
@@ -3080,13 +3094,14 @@ dependencies = [
 
 [[package]]
 name = "lxmf-wire"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "393d90d2f37d97ba1dd987cc5994261637d280abf9aa082ae17822dee54f2afa"
+checksum = "521a6e551ad2adea0677f8ecff20ee8c48def63ed76c640439d748a8f65a8048"
 dependencies = [
  "base64",
  "ed25519-dalek",
  "hex",
+ "hkdf",
  "rand_core 0.6.4",
  "reticulum-rs-core",
  "rmp-serde",
@@ -3891,7 +3906,7 @@ dependencies = [
 
 [[package]]
 name = "omenbrowser_rs"
-version = "0.9.6-7"
+version = "0.9.7-1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4717,9 +4732,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1de4ac11623f7f99cdbb2651071c738824fd9d8f7c931ed2006325d1512b89f8"
+checksum = "de1f0176024dce9a839a4547f8804d10ccb67cb592a9079bf38d331248a0334e"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -4727,11 +4742,12 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2984682e71b22a83c1e1598a98bb37991cc218a5c3f87c4652933e7e32f90e18"
+checksum = "bd8cbe1a795979d690675e471b4c6e9dc939d07969eafb1c216666f5035548a9"
 dependencies = [
  "aes",
+ "atomicwrites",
  "cbc",
  "crypto-common",
  "ed25519-dalek",
@@ -4748,9 +4764,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-rpc"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfdaa66306d0fbb64df9aa0b5126ba1eb5983261f2469bd4d7919e1612be35bc"
+checksum = "ae23784515a858f8e966cd1ae01232a922666f4e5a6430bda673c839a8a905b9"
 dependencies = [
  "base64",
  "ciborium",
@@ -4774,9 +4790,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.9.6"
+version = "0.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "149873f10b5c575718976ceb6be2dfc25a6adb0d4df012b7b80b135af40c788e"
+checksum = "9a8a7c35cb43f211d42bd682982d1c8b142855448f1a3129b7d6fe0f26c902c8"
 dependencies = [
  "aes",
  "base64",
@@ -5014,19 +5030,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "rustls-pki-types"
-version = "1.14.1"
+version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
+checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
 dependencies = [
  "web-time",
  "zeroize",

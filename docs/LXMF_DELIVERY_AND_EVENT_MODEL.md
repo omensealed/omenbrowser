@@ -252,7 +252,7 @@ retry, path request, propagation sync, or stamp expenditure.
 Each peer also has a fallback policy. `Ask before fallback` is the migration
 default and retains the explicit `Retry via propagation` action after a direct
 failure. `Automatic safe fallback` is opt-in and is copied into the durable
-operation metadata before dispatch. It enables the upstream 0.9.6 typed
+operation metadata before dispatch. It enables the upstream 0.9.7 typed
 `try_propagation_on_fail` option for direct delivery only. In the integrated
 clean runtime, automatic fallback is restricted to failures before the
 transport observes packet or Resource submission. The same signed LXMF message
@@ -321,7 +321,7 @@ The first dormant Resource-reference envelope is now defined under the proposed
 `omen-lxmf-resource-reference-v1` capability. It permits no automatic transfer,
 decode, or launch and has no runtime caller. Its application reference is a
 random offer/correlation identifier, not a Reticulum Resource hash: the locked
-0.9.6 public Resource API binds hashes and part requests to an active Link
+0.9.7 public Resource API binds hashes and part requests to an active Link
 transfer rather than exposing a durable object fetch. A future authenticated
 accept exchange must start the actual Resource and bind its observed hash to
 the accepted offer. The detailed activation and storage gates are recorded in
@@ -419,13 +419,13 @@ without adding a per-message redraw timer. Legacy rows that already have both
 operation identifiers but no deadline receive one 24-hour migration window on
 their next explicit retry.
 
-The pinned 0.9.6 `RpcBackendClient` removes `ttl_ms`, idempotency, correlation,
+The registry 0.9.7 `RpcBackendClient` still removes `ttl_ms`, idempotency, correlation,
 and extensions when translating its SDK request to `sdk_send_v2`. Its public
 daemon request contract also has no field for an explicit reply ticket.
 OMEN's deterministic loopback capture test exercises the real published client
 and proves the following boundary:
 
-| External RPC send property | 0.9.6 result |
+| External RPC send property | 0.9.7 result |
 |---|---|
 | source, destination, payload fields | preserved |
 | direct/propagated method | preserved |
@@ -467,7 +467,7 @@ external SDK/RPC path remains unproven and its messages cannot create an
 OMENchat invitation preview merely by using the invitation title.
 
 The minimal reproducer and upstream contract evidence are recorded in
-`docs/upstream/LXMF_SDK_0_9_6_RPC_SEND_FIELD_REPRODUCER.md`.
+`docs/upstream/LXMF_SDK_0_9_7_RPC_SEND_FIELD_REPRODUCER.md`.
 
 Cancellation preserves the upstream typed outcomes `accepted`,
 `already_terminal`, `not_found`, `too_late_to_cancel`, and `unsupported` at the

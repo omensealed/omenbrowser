@@ -1525,7 +1525,7 @@ fn validate_sdk_send_plan_ttl(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
 fn validate_external_rpc_delivery_options(plan: &NativeLxmfSdkSendPlan) -> AppResult<()> {
     if plan.rpc_delivery.ticket.is_some() {
         return Err(AppError::Unsupported(
-            "external LXMF SDK/RPC 0.9.6 cannot preserve an explicit reply ticket".into(),
+            "external LXMF SDK/RPC 0.9.7 cannot preserve an explicit reply ticket".into(),
         ));
     }
     Ok(())
@@ -1803,9 +1803,9 @@ mod tests {
                         "max_extension_keys": 16,
                         "idempotency_ttl_ms": 43200000
                     },
-                    "contract_release": "0.9.6",
+                    "contract_release": "0.9.7",
                     "schema_namespace": "lxmf-sdk-v2",
-                    "sdk_version": "0.9.6",
+                    "sdk_version": "0.9.7",
                     "python_reference": lxmf_sdk::ParityReference::default()
                 })),
                 error: None,
@@ -1886,7 +1886,11 @@ mod tests {
             attachments: vec![PathBuf::from("/tmp/report.txt")],
         };
 
-        let plan = build_sdk_send_plan(&envelope, "source", Some(7));
+        let mut plan = build_sdk_send_plan(&envelope, "source", Some(7));
+        plan.send_request.extensions.insert(
+            "omen_test_extension".into(),
+            serde_json::json!({ "bounded": true }),
+        );
 
         assert_eq!(plan.send_request.source, "source");
         assert_eq!(plan.send_request.destination, "peer");
@@ -2803,7 +2807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_rpc_096_send_capture_proves_preserved_and_dropped_fields() {
+    async fn external_rpc_097_send_capture_proves_preserved_and_dropped_fields() {
         let (endpoint, captured_rx, capture_worker) = capture_rpc_requests(2);
         let mut operation =
             OutboundOperationIdentity::validated("idem-external".into(), "corr-external".into())
@@ -2861,7 +2865,7 @@ mod tests {
         assert_eq!(params["include_ticket"], true);
         assert_eq!(params["try_propagation_on_fail"], true);
 
-        // The published lxmf-sdk 0.9.6 RpcBackendClient deliberately drops
+        // The published lxmf-sdk 0.9.7 RpcBackendClient still drops
         // these SendRequest fields before constructing sdk_send_v2 params.
         for absent in [
             "idempotency_key",
@@ -2888,7 +2892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_rpc_096_rejects_explicit_reply_ticket_before_connection() {
+    async fn external_rpc_097_rejects_explicit_reply_ticket_before_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
         listener
             .set_nonblocking(true)

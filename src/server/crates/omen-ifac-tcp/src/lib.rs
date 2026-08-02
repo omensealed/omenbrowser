@@ -18,6 +18,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MTU: usize = 262_144;
+const TCP_READ_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_HDLC_ACCUMULATION_BYTES: usize = DEFAULT_MTU * 2 + 128;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const IFAC_SALT: [u8; 32] = [
@@ -215,8 +217,8 @@ async fn run_ifac_stream<R, W>(
         let ifac = ifac.clone();
         let status = status.clone();
         tokio::spawn(async move {
-            let mut tcp_buffer = vec![0u8; DEFAULT_MTU.saturating_mul(16)];
-            let mut frame_buffer: Vec<u8> = Vec::with_capacity(DEFAULT_MTU.saturating_mul(4));
+            let mut tcp_buffer = vec![0u8; TCP_READ_BUFFER_BYTES];
+            let mut frame_buffer: Vec<u8> = Vec::with_capacity(MAX_HDLC_ACCUMULATION_BYTES);
             let mut hdlc_buffer = vec![0u8; DEFAULT_MTU.saturating_add(64)];
             loop {
                 tokio::select! {
@@ -244,13 +246,21 @@ async fn run_ifac_stream<R, W>(
                                         .and_then(|raw| Packet::deserialize(&mut InputBuffer::new(&raw)).ok())
                                     {
                                         Some(packet) => {
-                                            let _ = rx_channel
-                                                .send(RxMessage {
+                                            let send_result = tokio::select! {
+                                                _ = cancel_rx.cancelled() => break,
+                                                _ = iface_stop_rx.cancelled() => break,
+                                                _ = stop_rx.cancelled() => break,
+                                                result = rx_channel.send(RxMessage {
                                                     address: iface_address,
                                                     packet,
                                                     source: IfaceSource::None,
-                                                })
-                                                .await;
+                                                }) => result,
+                                            };
+                                            if send_result.is_err() {
+                                                mark_status(&status, "closed", Some("transport receive channel closed".to_string()), 0, 0);
+                                                stop_rx.cancel();
+                                                break;
+                                            }
                                         }
                                         None => {
                                             mark_status(&status, "connected", Some("ifac packet decode failed".to_string()), 0, 0);
@@ -258,7 +268,7 @@ async fn run_ifac_stream<R, W>(
                                     }
                                     frame_buffer.drain(..=end);
                                 }
-                                if frame_buffer.len() > DEFAULT_MTU.saturating_mul(64) {
+                                if frame_buffer.len() > MAX_HDLC_ACCUMULATION_BYTES {
                                     frame_buffer.clear();
                                 }
                             }
@@ -274,7 +284,8 @@ async fn run_ifac_stream<R, W>(
         })
     };
 
-    let tx_task = tokio::spawn(async move {
+    let supervisor_status = status.clone();
+    let mut tx_task = tokio::spawn(async move {
         let mut tx_channel = tx_channel.lock().await;
         let mut packet_buffer = vec![0u8; DEFAULT_MTU];
         let mut hdlc_buffer = vec![0u8; DEFAULT_MTU.saturating_mul(2).saturating_add(128)];
@@ -317,8 +328,40 @@ async fn run_ifac_stream<R, W>(
         }
     });
 
-    let _ = tx_task.await;
-    let _ = rx_task.await;
+    let mut rx_task = rx_task;
+    let (first_name, first_result) = tokio::select! {
+        result = &mut rx_task => ("read", result),
+        result = &mut tx_task => ("write", result),
+    };
+    stop.cancel();
+    if let Err(error) = first_result {
+        mark_status(
+            &supervisor_status,
+            "closed",
+            Some(format!("tcp {first_name} worker failed: {error}")),
+            0,
+            0,
+        );
+    }
+    let remaining_result = if first_name == "read" {
+        tx_task.await
+    } else {
+        rx_task.await
+    };
+    if let Err(error) = remaining_result {
+        let remaining_name = if first_name == "read" {
+            "write"
+        } else {
+            "read"
+        };
+        mark_status(
+            &supervisor_status,
+            "closed",
+            Some(format!("tcp {remaining_name} worker failed: {error}")),
+            0,
+            0,
+        );
+    }
 }
 
 async fn wait_reconnect(cancel: &CancellationToken, iface_stop: &CancellationToken) {
@@ -429,7 +472,7 @@ impl IfacContext {
         packet.push(unmasked[0]);
         packet.push(unmasked[1]);
         packet.extend_from_slice(&unmasked[2 + self.size..]);
-        if self.sign_tail(&packet) != ifac {
+        if !constant_time_eq(&self.sign_tail(&packet), &ifac) {
             return Err("ifac signature mismatch");
         }
         Ok(packet)
@@ -449,9 +492,23 @@ impl IfacContext {
     }
 }
 
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::IfacContext;
+    use super::{
+        constant_time_eq, IfacContext, MAX_HDLC_ACCUMULATION_BYTES, TCP_READ_BUFFER_BYTES,
+    };
 
     fn decode_hex(value: &str) -> Vec<u8> {
         assert_eq!(value.len() % 2, 0);
@@ -514,5 +571,16 @@ mod tests {
             ifac.decode_inbound(&encoded),
             Err("ifac signature mismatch")
         );
+    }
+
+    #[test]
+    fn ifac_stream_buffers_and_authentication_comparison_are_bounded() {
+        let read_buffer = vec![0_u8; TCP_READ_BUFFER_BYTES];
+        let frame_buffer = Vec::<u8>::with_capacity(MAX_HDLC_ACCUMULATION_BYTES);
+        assert_eq!(read_buffer.len(), 64 * 1024);
+        assert_eq!(frame_buffer.capacity(), 2 * 262_144 + 128);
+        assert!(constant_time_eq(b"same", b"same"));
+        assert!(!constant_time_eq(b"same", b"tampered"));
+        assert!(!constant_time_eq(b"same", b"samf"));
     }
 }
