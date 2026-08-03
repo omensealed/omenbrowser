@@ -232,6 +232,24 @@ fn omenchat_reaction_controls(
     controls.wrap().into()
 }
 
+fn omenchat_reply_control(
+    session_id: crate::chat::ChatSessionId,
+    room_id: crate::chat::protocol::RoomId,
+    event_id: u64,
+) -> Element<'static, Message> {
+    tooltip_button(
+        button(text(ICON_REPLY).font(nerd_icon_font()).size(ui_size(15)))
+            .on_press(Message::OmenChat(OmenChatMessage::BeginReply {
+                session_id,
+                room_id,
+                event_id,
+            }))
+            .padding([1, 3])
+            .style(inline_icon_button_style),
+        "Reply",
+    )
+}
+
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_message_revision_controls(
     session_id: crate::chat::ChatSessionId,
@@ -243,30 +261,26 @@ fn omenchat_message_revision_controls(
     let mut controls = row![].spacing(4).align_y(iced::Alignment::Center);
     if correction {
         controls = controls.push(tooltip_button(
-            button(centered_toolbar_icon(ICON_EDIT))
+            button(text(ICON_EDIT).font(nerd_icon_font()).size(ui_size(15)))
                 .on_press(Message::OmenChat(OmenChatMessage::BeginMessageCorrection {
                     session_id,
                     room_id,
                     event_id,
                 }))
-                .padding(0)
-                .width(Length::Fixed(toolbar_icon_button_side()))
-                .height(Length::Fixed(toolbar_icon_button_side()))
+                .padding([1, 3])
                 .style(inline_icon_button_style),
             "Correct this message",
         ));
     }
     if deletion {
         controls = controls.push(tooltip_button(
-            button(centered_toolbar_icon(ICON_DELETE))
+            button(text(ICON_DELETE).font(nerd_icon_font()).size(ui_size(15)))
                 .on_press(Message::OmenChat(OmenChatMessage::BeginMessageDeletion {
                     session_id,
                     room_id,
                     event_id,
                 }))
-                .padding(0)
-                .width(Length::Fixed(toolbar_icon_button_side()))
-                .height(Length::Fixed(toolbar_icon_button_side()))
+                .padding([1, 3])
                 .style(inline_icon_button_style),
             "Delete this message",
         ));
@@ -776,62 +790,8 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     resend.body,
                     resend.action,
                 ));
-            } else if let Some(event_id) = body.reply_target.filter(|_| {
-                message_hovered && desktop.omenchat_reply_mentions_available(session.session_id)
-            }) {
-                body_content = body_content.push(
-                    row![
-                        line,
-                        inline_icon_button_owned(
-                            ICON_REPLY,
-                            "Reply",
-                            Message::OmenChat(OmenChatMessage::BeginReply {
-                                session_id: session.session_id,
-                                room_id: session.active_room.room_id,
-                                event_id,
-                            }),
-                        )
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
-                );
             } else {
                 body_content = body_content.push(line);
-            }
-            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            if let Some(event_id) = body.reply_target {
-                let correction = revision_correction_targets.contains(&event_id);
-                let deletion = revision_deletion_targets.contains(&event_id);
-                if message_hovered && (correction || deletion) {
-                    body_content = body_content.push(omenchat_message_revision_controls(
-                        session.session_id,
-                        session.active_room.room_id,
-                        event_id,
-                        correction,
-                        deletion,
-                    ));
-                }
-            }
-            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-            if let Some((event_id, action)) =
-                body.pin_target
-                    .filter(|_| message_hovered)
-                    .and_then(|event_id| {
-                        desktop
-                            .omenchat_pin_action_for_target(
-                                session.session_id,
-                                session.active_room.room_id,
-                                event_id,
-                            )
-                            .map(|action| (event_id, action))
-                    })
-            {
-                body_content = body_content.push(omenchat_pin_control(
-                    session.session_id,
-                    session.active_room.room_id,
-                    event_id,
-                    action,
-                ));
             }
             if !body.reactions.is_empty() {
                 body_content = body_content.push(omenchat_reaction_summary_row(&body.reactions));
@@ -887,16 +847,68 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             }
             let mut body_element: Element<'_, Message> =
                 container(body_content).width(Length::Fill).into();
+            let mut hover_controls = row![].spacing(4).align_y(iced::Alignment::Center);
+            let mut has_hover_controls = false;
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             if let Some(event_id) = reaction_controls_target {
-                body_element = stack![
-                    body_element,
-                    container(omenchat_reaction_controls(
+                hover_controls = hover_controls.push(omenchat_reaction_controls(
+                    session.session_id,
+                    session.active_room.room_id,
+                    event_id,
+                ));
+                has_hover_controls = true;
+            }
+            if let Some(event_id) = body.reply_target.filter(|_| {
+                message_hovered && desktop.omenchat_reply_mentions_available(session.session_id)
+            }) {
+                hover_controls = hover_controls.push(omenchat_reply_control(
+                    session.session_id,
+                    session.active_room.room_id,
+                    event_id,
+                ));
+                has_hover_controls = true;
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some(event_id) = body.reply_target.filter(|_| message_hovered) {
+                let correction = revision_correction_targets.contains(&event_id);
+                let deletion = revision_deletion_targets.contains(&event_id);
+                if correction || deletion {
+                    hover_controls = hover_controls.push(omenchat_message_revision_controls(
                         session.session_id,
                         session.active_room.room_id,
                         event_id,
-                    ))
-                    .align_right(Length::Fill)
+                        correction,
+                        deletion,
+                    ));
+                    has_hover_controls = true;
+                }
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            if let Some((event_id, action)) =
+                body.pin_target
+                    .filter(|_| message_hovered)
+                    .and_then(|event_id| {
+                        desktop
+                            .omenchat_pin_action_for_target(
+                                session.session_id,
+                                session.active_room.room_id,
+                                event_id,
+                            )
+                            .map(|action| (event_id, action))
+                    })
+            {
+                hover_controls = hover_controls.push(omenchat_pin_control(
+                    session.session_id,
+                    session.active_room.room_id,
+                    event_id,
+                    action,
+                ));
+                has_hover_controls = true;
+            }
+            if has_hover_controls {
+                body_element = stack![
+                    body_element,
+                    container(hover_controls).align_right(Length::Fill)
                 ]
                 .into();
             }
