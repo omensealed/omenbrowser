@@ -4165,7 +4165,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-2` must report
+therefore exits with the expected signal status; current `0.9.7-3` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -5873,3 +5873,38 @@ ordinary pushes or pull requests. Successful Podman/Cross execution satisfies
 the project ARM64 headless release gate. Neither that gate nor a hosted ARM VM
 is physical Raspberry Pi qualification; record the optional hardware soak only
 before making that narrower claim.
+
+## v0.9.7-3 live-server poison and request-lag gates
+
+The standalone server maps a poisoned live-server mutex to the redacted typed
+error `live-server worker lock poisoned`. The regression tests use isolated
+temporary roots and a test-only poison helper; production code exposes no
+poison operation:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  live_worker_poison_is_typed_for_async_and_all_status_accessors
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  poisoned_live_runtime_shutdown_still_cancels_and_joins_owned_workers
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full poisoned_live_
+```
+
+The native NomadNet request adapter counts direct-response and Resource-event
+lag while continuing to wait for the existing correlated response, cancellation,
+stream close, or deadline. It never dispatches another request primitive. Run:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  request::tests::direct_event_lag_keeps_waiting_for_the_next_correlated_event
+cargo test --locked --no-default-features --features desktop-product \
+  request::tests::resource_event_lag_keeps_waiting_for_the_next_correlated_event
+cargo test --locked --no-default-features --features desktop-product \
+  timed_out_nomadnet_request_releases_outbound_resource
+```
+
+The maximum-UDP Resource sentinel remains deliberately ignored and visible. It
+must not be weakened or relabeled as passing while the locked upstream transmit
+buffer remains smaller than the maximum serialized Resource packet.

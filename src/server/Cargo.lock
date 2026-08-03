@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "omenchatd"
-version = "0.9.7-2"
+version = "0.9.7-3"
 dependencies = [
  "bzip2 0.5.2",
  "crossterm",

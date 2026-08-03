@@ -589,7 +589,7 @@ impl PendingLiveRecovery {
 fn start_admin_live_server(config: &ServerConfig) -> ServerResult<TuiLiveRuntime> {
     let tokio = crate::runtime_policy::build_runtime(crate::runtime_policy::TUI_THREAD_NAME)?;
     let runtime = tokio.block_on(reticulum_live::start_live_server(config))?;
-    let stats = runtime.live_server.stats().clone();
+    let stats = runtime.live_server.stats()?;
     Ok(TuiLiveRuntime {
         tokio,
         runtime,
@@ -957,7 +957,23 @@ impl AdminTui {
                 self.update_cached_user(updated);
                 if flag == STATUS_BANNED {
                     if enabled {
-                        let disconnected = self.disconnect_live_user(&user);
+                        let disconnected = match self.disconnect_live_user(&user) {
+                            Ok(disconnected) => disconnected,
+                            Err(error) => {
+                                append_admin_log(
+                                    &self.config,
+                                    format!(
+                                        "admin banned user id={} name={} but active-link close failed: {error}",
+                                        user.user_id, user.display_name
+                                    ),
+                                );
+                                self.status = format!(
+                                    "{} banned, but active links could not be closed: {error}",
+                                    user.display_name
+                                );
+                                return;
+                            }
+                        };
                         append_admin_log(
                             &self.config,
                             format!(
@@ -1188,18 +1204,12 @@ impl AdminTui {
             return;
         }
         match start_admin_live_server(&self.config) {
-            Ok(mut live) => {
-                let runtime = &mut live.runtime;
-                let last_stats = runtime.live_server.stats().summary_line();
-                let last_stats_snapshot = runtime.live_server.stats().clone();
+            Ok(live) => {
+                let runtime = &live.runtime;
                 let last_interface_stats = runtime.interface_stats_lines();
                 let destination = hex_lower_local(&runtime.destination_hash);
-                live.last_stats = last_stats;
-                live.last_stats_snapshot = last_stats_snapshot;
-                live.last_stats_at = Instant::now();
-                live.recent_stats = "waiting for next sample".into();
+                let mut live = live;
                 live.last_interface_stats = last_interface_stats;
-                live.interface_recovery_samples = 0;
                 self.live = Some(live);
                 self.live_runtime_generation = self.live_runtime_generation.saturating_add(1);
                 self.force_full_redraw = true;
@@ -1345,8 +1355,6 @@ impl AdminTui {
         match start_admin_live_server(&self.config) {
             Ok(mut next_live) => {
                 let destination = hex_lower_local(&next_live.runtime.destination_hash);
-                next_live.last_stats = next_live.runtime.live_server.stats().summary_line();
-                next_live.last_stats_snapshot = next_live.runtime.live_server.stats().clone();
                 next_live.last_stats_at = Instant::now();
                 next_live.recent_stats = format!(
                     "runtime recovered after {:?}; waiting for next sample",
@@ -1391,9 +1399,20 @@ impl AdminTui {
         }
         match drain_admin_live_events_logged(live, 64, &self.config) {
             Ok(drained) if drained > 0 => {
+                let stats = match live.runtime.live_server.stats() {
+                    Ok(stats) => stats,
+                    Err(error) => {
+                        self.live_status = format!(
+                            "live monitoring unavailable: {error}; stop and restart explicitly"
+                        );
+                        self.status = self.live_status.clone();
+                        self.force_full_redraw = true;
+                        return;
+                    }
+                };
                 self.live_status = format!(
                     "live server running | drained {drained} event(s) | {}",
-                    live.runtime.live_server.stats().summary_line()
+                    stats.summary_line()
                 );
                 // reticulum-rs 0.9.7 prints Link-close diagnostics directly to
                 // stdout. Invalidate Ratatui's diff buffer after live events so
@@ -1432,7 +1451,17 @@ impl AdminTui {
         }
 
         if now >= self.next_live_stats {
-            let stats_snapshot = live.runtime.live_server.stats().clone();
+            let stats_snapshot = match live.runtime.live_server.stats() {
+                Ok(stats) => stats,
+                Err(error) => {
+                    self.live_status = format!(
+                        "live monitoring unavailable: {error}; stop and restart explicitly"
+                    );
+                    self.status = self.live_status.clone();
+                    self.force_full_redraw = true;
+                    return;
+                }
+            };
             let stats = stats_snapshot.summary_line();
             let interface_stats = live.runtime.interface_stats_lines();
             let interface_health = live.runtime.interface_health();
@@ -1525,7 +1554,12 @@ impl AdminTui {
                     live.runtime.destination_name,
                     hex_lower_local(&live.runtime.destination_hash)
                 ));
-                lines.push(live.runtime.live_server.stats().summary_line());
+                match live.runtime.live_server.stats() {
+                    Ok(stats) => lines.push(stats.summary_line()),
+                    Err(error) => lines.push(format!(
+                        "statistics: unavailable ({error}); restart explicitly"
+                    )),
+                }
                 lines.push(live.runtime.queue_summary_line());
                 lines.extend(live.last_interface_stats.iter().cloned());
             }
@@ -1593,8 +1627,22 @@ impl AdminTui {
                 ]
                 .join("\n");
             };
-            let stats = live.runtime.live_server.stats();
-            let closed_links = live.runtime.live_server.recent_closed_link_summaries();
+            let stats = match live.runtime.live_server.stats() {
+                Ok(stats) => stats,
+                Err(error) => {
+                    return format!(
+                        "operator summary:\n  live monitoring unavailable: {error}\n  restart the live runtime explicitly"
+                    );
+                }
+            };
+            let closed_links = match live.runtime.live_server.recent_closed_link_summaries() {
+                Ok(closed_links) => closed_links,
+                Err(error) => {
+                    return format!(
+                        "operator summary:\n  closed-link monitoring unavailable: {error}\n  restart the live runtime explicitly"
+                    );
+                }
+            };
             let close_reasons = closed_links
                 .iter()
                 .map(|link| link.reason.as_str())
@@ -1657,7 +1705,14 @@ impl AdminTui {
                 .iter()
                 .map(|room| (room.room_id, room.name.clone()))
                 .collect::<BTreeMap<_, _>>();
-            let room_counts = live.runtime.live_server.active_room_counts();
+            let room_counts = match live.runtime.live_server.active_room_counts() {
+                Ok(room_counts) => room_counts,
+                Err(error) => {
+                    return format!(
+                        "operator summary:\n  room monitoring unavailable: {error}\n  restart the live runtime explicitly"
+                    );
+                }
+            };
             if room_counts.is_empty() {
                 lines.push("  none".into());
             } else {
@@ -1675,7 +1730,14 @@ impl AdminTui {
                 "  flags: high frames>=120/min, history>=20/min, ping>=30/min, upload>=10/min"
                     .into(),
             );
-            let active_links = live.runtime.live_server.active_link_summaries();
+            let active_links = match live.runtime.live_server.active_link_summaries() {
+                Ok(active_links) => active_links,
+                Err(error) => {
+                    return format!(
+                        "operator summary:\n  link monitoring unavailable: {error}\n  restart the live runtime explicitly"
+                    );
+                }
+            };
             if active_links.is_empty() {
                 lines.push("  none".into());
             } else {
@@ -1941,6 +2003,25 @@ impl AdminTui {
             .split(area);
         self.user_list_area = inner_rect(columns[0]);
         let users = &self.users;
+        let active_link_counts = match users
+            .iter()
+            .map(|user| self.active_user_link_count(user))
+            .collect::<ServerResult<Vec<_>>>()
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                self.status = format!(
+                    "moderation monitoring unavailable: {error}; restart the live runtime explicitly"
+                );
+                frame.render_widget(
+                    Paragraph::new(self.status.clone())
+                        .block(admin_block("Known Users"))
+                        .wrap(Wrap { trim: false }),
+                    area,
+                );
+                return;
+            }
+        };
         let user_list_width = self.user_list_area.width as usize;
         let items = users
             .iter()
@@ -1951,7 +2032,7 @@ impl AdminTui {
                 } else {
                     " "
                 };
-                let active_links = self.active_user_link_count(user);
+                let active_links = active_link_counts[index];
                 ListItem::new(moderation_user_list_label(
                     marker,
                     &moderation_user_text(user),
@@ -1977,7 +2058,7 @@ impl AdminTui {
             .split(columns[1]);
         let selected_user = users.get(self.selected_user);
         let selected_active_links = selected_user
-            .map(|user| self.active_user_link_count(user))
+            .and_then(|_| active_link_counts.get(self.selected_user).copied())
             .unwrap_or(0);
         let selected_user_text = selected_user.map(moderation_user_text);
         let details = if let Some(user_text) = selected_user_text.as_ref() {
@@ -3102,7 +3183,7 @@ impl AdminTui {
     }
 
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
-    fn disconnect_live_user(&mut self, user: &AdminUserRow) -> usize {
+    fn disconnect_live_user(&mut self, user: &AdminUserRow) -> ServerResult<usize> {
         self.live
             .as_mut()
             .map(|live| {
@@ -3110,12 +3191,12 @@ impl AdminTui {
                     .live_server
                     .disconnect_identity(&user.identity_hash)
             })
-            .unwrap_or(0)
+            .unwrap_or(Ok(0))
     }
 
     #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
-    fn disconnect_live_user(&mut self, _user: &AdminUserRow) -> usize {
-        0
+    fn disconnect_live_user(&mut self, _user: &AdminUserRow) -> ServerResult<usize> {
+        Ok(0)
     }
 
     fn toggle_selected_user_trust(&mut self) -> ServerResult<()> {
@@ -3164,7 +3245,7 @@ impl AdminTui {
             return Ok(());
         };
         self.clear_pending_user_delete();
-        let disconnected = self.disconnect_live_user(&user);
+        let disconnected = self.disconnect_live_user(&user)?;
         append_admin_log(
             &self.config,
             format!(
@@ -3285,7 +3366,7 @@ impl AdminTui {
             self.status = "no user selected".into();
             return Ok(());
         };
-        let active_links = self.active_user_link_count(&user);
+        let active_links = self.active_user_link_count(&user)?;
         if active_links > 0 {
             self.pending_delete_user_id = None;
             self.status = format!(
@@ -3337,17 +3418,18 @@ impl AdminTui {
             return Ok(());
         }
         let users = self.users.clone();
-        let eligible_users = users
+        let mut eligible_users = Vec::new();
+        let mut skipped_active = 0usize;
+        for user in users
             .iter()
             .filter(|user| stale_user_age_secs(user) >= USER_DELETE_MIN_AGE_SECS)
-            .filter(|user| self.active_user_link_count(user) == 0)
-            .cloned()
-            .collect::<Vec<_>>();
-        let skipped_active = users
-            .iter()
-            .filter(|user| stale_user_age_secs(user) >= USER_DELETE_MIN_AGE_SECS)
-            .filter(|user| self.active_user_link_count(user) > 0)
-            .count();
+        {
+            if self.active_user_link_count(user)? == 0 {
+                eligible_users.push(user.clone());
+            } else {
+                skipped_active = skipped_active.saturating_add(1);
+            }
+        }
 
         self.pending_delete_user_id = None;
         if eligible_users.is_empty() {
@@ -3399,23 +3481,28 @@ impl AdminTui {
     }
 
     #[cfg(any(feature = "live-reticulum", all(feature = "live-rns-net", any())))]
-    fn active_user_link_count(&self, user: &AdminUserRow) -> usize {
+    fn active_user_link_count(&self, user: &AdminUserRow) -> ServerResult<usize> {
         self.live
             .as_ref()
             .map(|live| {
                 live.runtime
                     .live_server
                     .active_identity_counts()
-                    .into_iter()
-                    .find_map(|(identity, count)| (identity == user.identity_hash).then_some(count))
-                    .unwrap_or(0)
+                    .map(|counts| {
+                        counts
+                            .into_iter()
+                            .find_map(|(identity, count)| {
+                                (identity == user.identity_hash).then_some(count)
+                            })
+                            .unwrap_or(0)
+                    })
             })
-            .unwrap_or(0)
+            .unwrap_or(Ok(0))
     }
 
     #[cfg(not(any(feature = "live-reticulum", all(feature = "live-rns-net", any()))))]
-    fn active_user_link_count(&self, _user: &AdminUserRow) -> usize {
-        0
+    fn active_user_link_count(&self, _user: &AdminUserRow) -> ServerResult<usize> {
+        Ok(0)
     }
 }
 
@@ -5137,6 +5224,67 @@ mod tests {
 
         app.stop_live_runtime();
         assert!(app.pending_live_recovery.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "live-reticulum")]
+    #[test]
+    fn poisoned_live_monitoring_reports_unavailable_without_stale_counts() {
+        let root = temp_root("poisoned-live-monitoring");
+        let config = ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("isolated config");
+        let mut app = AdminTui::new(config.clone());
+        let live = start_admin_live_server(&config).expect("start isolated live runtime");
+        live.runtime.live_server.poison_lock_for_test();
+        app.live = Some(live);
+
+        let text = app.monitoring_counter_text();
+        assert!(text.contains("live monitoring unavailable"));
+        assert!(text.contains("live-server worker lock poisoned"));
+        assert!(!text.contains("active links: 0"));
+
+        let live = app.live.take().expect("live runtime");
+        let error = stop_admin_live_server(live, &config)
+            .expect_err("shutdown reports failed best-effort enumeration");
+        assert!(error.to_string().contains("active-link enumeration failed"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(feature = "live-reticulum")]
+    #[test]
+    fn poisoned_live_moderation_fails_without_reporting_success() {
+        let root = temp_root("poisoned-live-moderation");
+        let config = ServerConfig::for_root(root.clone());
+        config::init_files(&config).expect("isolated config");
+        let mut app = AdminTui::new(config.clone());
+        let live = start_admin_live_server(&config).expect("start isolated live runtime");
+        live.runtime.live_server.poison_lock_for_test();
+        app.live = Some(live);
+        app.tab = AdminTab::Moderation;
+        app.users = vec![AdminUserRow {
+            user_id: 1,
+            identity_hash: vec![0x42; 16],
+            identity_hex: "42".repeat(16),
+            display_name: "Synthetic User".into(),
+            role_bits: 0,
+            status_bits: 0,
+            lxmf_destination: None,
+            first_seen_at: 1,
+            last_seen_at: Some(1),
+            trusted: false,
+            banned: false,
+            muted: false,
+        }];
+
+        let error = app
+            .kick_selected_user_links()
+            .expect_err("poisoned moderation must fail");
+        assert_eq!(error.to_string(), "live-server worker lock poisoned");
+        assert!(!app.status.contains("kicked"));
+        assert!(!app.status.contains("closed 0"));
+
+        let live = app.live.take().expect("live runtime");
+        let _ = stop_admin_live_server(live, &config);
         let _ = std::fs::remove_dir_all(root);
     }
 

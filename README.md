@@ -454,11 +454,11 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   isolated install/upgrade/launch/uninstall qualification. The published
   Reticulum 0.9.7 UDP worker still cannot transmit maximum Resource packets; that
   known upstream limitation remains visible and blocks a UDP Resource parity
-  claim, but does not block this version-aligned OMEN release. The two
-  `quick-xml 0.39.2` findings are accepted only on the machine-checked Linux
-  Wayland proc-macro build path and are absent from application runtime input
-  and standalone omenchatd. Historical 0.6 live results remain migration
-  baselines.
+  claim, but does not block this version-aligned OMEN release. The prior two
+  `quick-xml 0.39.2` findings are resolved: the locked Wayland proc-macro path
+  uses fixed `quick-xml 0.41.0`, the standalone server does not resolve that
+  crate, and the current audit policy accepts zero vulnerabilities. Historical
+  0.6 live results remain migration baselines.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when

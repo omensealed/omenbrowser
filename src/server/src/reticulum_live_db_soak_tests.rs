@@ -249,7 +249,7 @@ async fn persistent_sqlite_worker_stays_responsive_and_commits_monotonic_events_
     }
     heartbeat.await.expect("database soak heartbeat");
     let metrics = worker.worker_metrics();
-    let stats = worker.stats();
+    let stats = worker.stats().expect("worker stats");
     let accepted = accepted.load(Ordering::Relaxed);
     let observed_busy = observed_busy.load(Ordering::Relaxed);
     let heartbeat_max_us = heartbeat_max_us.load(Ordering::Relaxed);
