@@ -2,7 +2,7 @@ use iced::widget::text::Wrapping;
 use iced::widget::{text, Text};
 use iced::Length;
 
-use super::super::{printable_label, ui_size};
+use super::super::{content_font, printable_label, ui_size};
 
 pub(in crate::desktop) fn safe_timeline_text<'a>(
     content: impl Into<String>,
@@ -19,7 +19,9 @@ pub(in crate::desktop) fn safe_timeline_text<'a>(
                 .collect::<String>()
         );
     }
+    let font = content_font(&content);
     text(content)
+        .font(font)
         .size(ui_size(size))
         .wrapping(Wrapping::WordOrGlyph)
         .width(Length::Fill)

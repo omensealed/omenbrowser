@@ -1,7 +1,7 @@
 use iced::widget::{row, text};
 use iced::Element;
 
-use super::super::{emoji_font, Message};
+use super::super::{desktop_ui_font, emoji_font, Message};
 
 pub(in crate::desktop) fn compact_label(value: &str, max_chars: usize) -> String {
     let value = printable_label(value.trim());
@@ -51,8 +51,26 @@ pub(in crate::desktop) fn emoji_aware_text<'a>(value: String, size: u16) -> Elem
 pub(in crate::desktop) fn is_emoji_like(ch: char) -> bool {
     matches!(
         ch as u32,
-        0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2300..=0x23FF
+        0x00A9
+            | 0x00AE
+            | 0x203C
+            | 0x2049
+            | 0x20E3
+            | 0x2122
+            | 0x2139
+            | 0xFE0F
+            | 0x1F000..=0x1FAFF
+            | 0x2600..=0x27BF
+            | 0x2300..=0x23FF
     )
+}
+
+pub(in crate::desktop) fn content_font(value: &str) -> iced::Font {
+    if value.chars().any(is_emoji_like) {
+        emoji_font()
+    } else {
+        desktop_ui_font()
+    }
 }
 
 pub(in crate::desktop) fn visible_tab_window(
@@ -173,6 +191,14 @@ fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_font_selects_emoji_font_only_for_emoji_content() {
+        assert_eq!(content_font("plain chat text"), desktop_ui_font());
+        assert_eq!(content_font("hello 😂"), emoji_font());
+        assert_eq!(content_font("❤️"), emoji_font());
+        assert_eq!(content_font("1️⃣"), emoji_font());
+    }
 
     #[test]
     fn footer_status_compaction_stays_single_line() {
