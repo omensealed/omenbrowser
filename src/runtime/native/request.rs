@@ -321,6 +321,33 @@ impl NativeLinkRequestAdapter for MissingReticulum09LinkRequestAdapter {
 #[derive(Clone, Debug, Default)]
 pub struct Reticulum09LinkRequestAdapter;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RequestEventLagEvidence {
+    direct_response_events: u64,
+    resource_events: u64,
+}
+
+impl RequestEventLagEvidence {
+    fn record_direct(&mut self, skipped: u64) {
+        self.direct_response_events = self.direct_response_events.saturating_add(skipped);
+    }
+
+    fn record_resource(&mut self, skipped: u64) {
+        self.resource_events = self.resource_events.saturating_add(skipped);
+    }
+
+    fn timeout_suffix(self) -> String {
+        if self == Self::default() {
+            String::new()
+        } else {
+            format!(
+                "; skipped_direct_response_events={}; skipped_resource_events={}; remote outcome may be uncertain",
+                self.direct_response_events, self.resource_events
+            )
+        }
+    }
+}
+
 #[async_trait]
 impl NativeLinkRequestAdapter for Reticulum09LinkRequestAdapter {
     fn adapter_name(&self) -> &'static str {
@@ -398,6 +425,7 @@ impl Reticulum09LinkRequestAdapter {
 
         let deadline = tokio::time::Instant::now() + timeout;
         let mut active_response_resource = None;
+        let mut lag_evidence = RequestEventLagEvidence::default();
         loop {
             if cancel.is_cancelled() {
                 if let Some(response_resource_hash) = active_response_resource {
@@ -422,9 +450,10 @@ impl Reticulum09LinkRequestAdapter {
                     )
                     .await;
                 }
-                return Err(AppError::from(NativeRuntimeError::Timeout(
-                    "NomadNet direct request response".into(),
-                )));
+                return Err(AppError::from(NativeRuntimeError::Timeout(format!(
+                    "NomadNet direct request response{}",
+                    lag_evidence.timeout_suffix()
+                ))));
             }
             let wait = (deadline - now).min(Duration::from_millis(100));
             tokio::select! {
@@ -453,7 +482,10 @@ impl Reticulum09LinkRequestAdapter {
                         return Ok(response);
                     }
                 }
-                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    lag_evidence.record_direct(skipped);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     return Err(AppError::from(NativeRuntimeError::Native(
                         "native Reticulum direct response stream closed".into(),
@@ -517,7 +549,10 @@ impl Reticulum09LinkRequestAdapter {
                         }
                         _ => {}
                     },
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        lag_evidence.record_resource(skipped);
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return Err(AppError::from(NativeRuntimeError::Native(
                             "native Reticulum resource response stream closed".into(),
@@ -605,6 +640,7 @@ impl Reticulum09LinkRequestAdapter {
         let mut outbound_complete = false;
         let mut active_response_resource = None;
         let mut last_error = String::from("none");
+        let mut lag_evidence = RequestEventLagEvidence::default();
         loop {
             if cancel.is_cancelled() {
                 cancel_clean_page_request_resource(
@@ -646,7 +682,7 @@ impl Reticulum09LinkRequestAdapter {
                 return Err(AppError::from(NativeRuntimeError::Timeout(format!(
                     "NomadNet request-resource response; link_iface={:?}; destination_path={}; \
                          link_path={}; request_resource={}; target_events={}; progress_events={}; \
-                         unrelated_events={}; outbound_complete={}; last_error={}",
+                         unrelated_events={}; outbound_complete={}; last_error={}{}",
                     link_ingress_iface,
                     transport_path_status_summary(&destination_path),
                     transport_path_status_summary(&link_path),
@@ -655,7 +691,8 @@ impl Reticulum09LinkRequestAdapter {
                     progress_events,
                     unrelated_events,
                     outbound_complete,
-                    last_error
+                    last_error,
+                    lag_evidence.timeout_suffix()
                 ))));
             }
             let wait = (deadline - now).min(Duration::from_millis(100));
@@ -798,6 +835,7 @@ impl Reticulum09LinkRequestAdapter {
                     unrelated_events += 1;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    lag_evidence.record_resource(skipped);
                     tracing::debug!(
                         adapter = self.adapter_name(),
                         destination = %prepared.destination_hash,
@@ -862,8 +900,11 @@ impl Reticulum09LinkRequestAdapter {
                             }
                         }
                     }
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Ok(_) => {
                         unrelated_events += 1;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        lag_evidence.record_direct(skipped);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         cancel_clean_page_request_resource(
@@ -2234,6 +2275,57 @@ mod tests {
         assert!(
             NativeLinkResponseFrame::parse(&vec![0xc0; MAX_NOMADNET_RESPONSE_BYTES + 1]).is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn direct_event_lag_keeps_waiting_for_the_next_correlated_event() {
+        let (tx, mut rx) = broadcast::channel(2);
+        let mut evidence = RequestEventLagEvidence::default();
+        for value in [1u8, 2, 3] {
+            tx.send(value).expect("direct event receiver");
+        }
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(skipped)) => evidence.record_direct(skipped),
+            other => panic!("expected deterministic direct lag, got {other:?}"),
+        }
+        assert_eq!(rx.recv().await.expect("next direct event"), 2);
+        assert_eq!(evidence.direct_response_events, 1);
+        assert_eq!(evidence.resource_events, 0);
+    }
+
+    #[tokio::test]
+    async fn resource_event_lag_keeps_waiting_for_the_next_correlated_event() {
+        let (tx, mut rx) = broadcast::channel(2);
+        let mut evidence = RequestEventLagEvidence::default();
+        for value in [1u8, 2, 3] {
+            tx.send(value).expect("resource event receiver");
+        }
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(skipped)) => evidence.record_resource(skipped),
+            other => panic!("expected deterministic Resource lag, got {other:?}"),
+        }
+        assert_eq!(rx.recv().await.expect("next Resource event"), 2);
+        assert_eq!(evidence.direct_response_events, 0);
+        assert_eq!(evidence.resource_events, 1);
+    }
+
+    #[test]
+    fn terminal_timeout_lag_evidence_is_bounded_redacted_and_saturating() {
+        let mut evidence = RequestEventLagEvidence::default();
+        evidence.record_direct(u64::MAX);
+        evidence.record_direct(1);
+        evidence.record_resource(7);
+
+        let suffix = evidence.timeout_suffix();
+        assert!(suffix.contains("skipped_direct_response_events=18446744073709551615"));
+        assert!(suffix.contains("skipped_resource_events=7"));
+        assert!(suffix.contains("remote outcome may be uncertain"));
+        assert!(suffix.len() < 192);
+        assert!(RequestEventLagEvidence::default()
+            .timeout_suffix()
+            .is_empty());
     }
 
     #[test]

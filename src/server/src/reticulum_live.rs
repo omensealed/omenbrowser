@@ -367,6 +367,12 @@ impl<T> LiveServerWorker<T>
 where
     T: OmenchatTransport + Send + 'static,
 {
+    fn lock_server(&self) -> ServerResult<std::sync::MutexGuard<'_, OmenchatLiveServer<T>>> {
+        self.server
+            .lock()
+            .map_err(|_| ServerError::Message("live-server worker lock poisoned".into()))
+    }
+
     fn new(server: OmenchatLiveServer<T>) -> Self {
         Self {
             server: Arc::new(std::sync::Mutex::new(server)),
@@ -454,8 +460,8 @@ where
         }
     }
 
-    pub fn stats(&self) -> LiveServerStats {
-        self.server.lock().expect("live-server worker lock").stats()
+    pub fn stats(&self) -> ServerResult<LiveServerStats> {
+        Ok(self.lock_server()?.stats())
     }
 
     pub async fn expire_pending_handshakes(&self, now_unix: i64) -> ServerResult<usize> {
@@ -475,39 +481,40 @@ where
         .map_err(|error| ServerError::Message(format!("live-server worker failed: {error}")))?
     }
 
-    pub fn recent_closed_link_summaries(&self) -> Vec<crate::live::ClosedLinkSummary> {
-        self.server
-            .lock()
-            .expect("live-server worker lock")
-            .recent_closed_link_summaries()
+    pub fn recent_closed_link_summaries(
+        &self,
+    ) -> ServerResult<Vec<crate::live::ClosedLinkSummary>> {
+        Ok(self.lock_server()?.recent_closed_link_summaries())
     }
 
-    pub fn active_room_counts(&self) -> Vec<(crate::protocol::RoomId, usize)> {
-        self.server
-            .lock()
-            .expect("live-server worker lock")
-            .active_room_counts()
+    pub fn active_room_counts(&self) -> ServerResult<Vec<(crate::protocol::RoomId, usize)>> {
+        Ok(self.lock_server()?.active_room_counts())
     }
 
-    pub fn active_link_summaries(&self) -> Vec<crate::live::ActiveLinkSummary> {
-        self.server
-            .lock()
-            .expect("live-server worker lock")
-            .active_link_summaries()
+    pub fn active_link_summaries(&self) -> ServerResult<Vec<crate::live::ActiveLinkSummary>> {
+        Ok(self.lock_server()?.active_link_summaries())
     }
 
-    pub fn active_identity_counts(&self) -> Vec<(Vec<u8>, usize)> {
-        self.server
-            .lock()
-            .expect("live-server worker lock")
-            .active_identity_counts()
+    pub fn active_identity_counts(&self) -> ServerResult<Vec<(Vec<u8>, usize)>> {
+        Ok(self.lock_server()?.active_identity_counts())
     }
 
-    pub fn disconnect_identity(&self, identity_hash: &[u8]) -> usize {
-        self.server
-            .lock()
-            .expect("live-server worker lock")
-            .disconnect_identity(identity_hash)
+    pub fn disconnect_identity(&self, identity_hash: &[u8]) -> ServerResult<usize> {
+        Ok(self.lock_server()?.disconnect_identity(identity_hash))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_lock_for_test(&self) {
+        let server = self.server.clone();
+        std::thread::spawn(move || {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = server.lock().expect("test acquires live-server lock");
+                panic!("intentional test-only live-server poison");
+            }));
+            assert!(caught.is_err());
+        })
+        .join()
+        .expect("poison helper thread");
     }
 }
 
@@ -1309,7 +1316,10 @@ async fn run_live_server_async(
             next_handshake_sweep = Instant::now() + handshake_sweep_interval;
         }
         if Instant::now() >= next_stats {
-            let stats = runtime.live_server.stats();
+            let stats = match headless_stats_sample(&runtime.live_server, &config) {
+                Ok(stats) => stats,
+                Err(error) => break Err(error),
+            };
             println!("{}", stats.summary_line());
             println!("readiness: {}", runtime.interface_health().machine_label());
             append_server_log(&config, stats.summary_line());
@@ -1366,6 +1376,22 @@ async fn run_live_server_async(
     }
     run_result?;
     shutdown_result
+}
+
+fn headless_stats_sample<T>(
+    worker: &LiveServerWorker<T>,
+    config: &ServerConfig,
+) -> ServerResult<LiveServerStats>
+where
+    T: OmenchatTransport + Send + 'static,
+{
+    worker.stats().map_err(|error| {
+        append_server_log_error(
+            config,
+            format!("reticulum-rs live statistics failed: {error}"),
+        );
+        error
+    })
 }
 
 #[cfg(unix)]
@@ -1575,7 +1601,16 @@ impl ReticulumLiveRuntime {
             return Ok(());
         }
 
-        let active_links = self.live_server.active_link_summaries();
+        let (active_links, enumeration_error) = match self.live_server.active_link_summaries() {
+            Ok(active_links) => (active_links, None),
+            Err(error) => {
+                append_server_log_warning_path(
+                    &config.log_path(),
+                    format!("reticulum-rs shutdown skipped active-link close enumeration: {error}"),
+                );
+                (Vec::new(), Some(error))
+            }
+        };
         for active in &active_links {
             let channel = self.transport.channel(AddressHash::new(active.link_id));
             if let Err(error) = channel.close().await {
@@ -1618,7 +1653,13 @@ impl ReticulumLiveRuntime {
 
         if join_timeouts > 0 || join_failures > 0 {
             return Err(ServerError::Message(format!(
-                "reticulum-rs shutdown incomplete: worker_join_timeouts={join_timeouts} worker_join_failures={join_failures}"
+                "reticulum-rs shutdown incomplete: worker_join_timeouts={join_timeouts} worker_join_failures={join_failures} active_link_enumeration_failed={}"
+                , enumeration_error.is_some()
+            )));
+        }
+        if let Some(error) = enumeration_error {
+            return Err(ServerError::Message(format!(
+                "reticulum-rs shutdown completed after active-link enumeration failed: {error}"
             )));
         }
         Ok(())
@@ -2925,6 +2966,12 @@ mod tests {
         assert!(source.contains("next_announce.min(next_handshake_sweep).min(next_stats)"));
     }
 
+    #[test]
+    fn production_live_server_lock_has_no_expect_guard() {
+        let source = include_str!("reticulum_live.rs");
+        assert!(!source.contains("expect(\"live-server worker lock\")"));
+    }
+
     #[tokio::test]
     async fn event_wait_prioritizes_control_and_tolerates_one_closed_lane() {
         let budget = QueueBudget::new(1024, 1024);
@@ -3054,6 +3101,55 @@ mod tests {
         ))
     }
 
+    fn poison_live_worker<T>(worker: &LiveServerWorker<T>)
+    where
+        T: OmenchatTransport + Send + 'static,
+    {
+        worker.poison_lock_for_test();
+    }
+
+    fn assert_poison_error<T: std::fmt::Debug>(result: ServerResult<T>) {
+        let error = result.expect_err("poisoned live-server lock must fail");
+        assert_eq!(error.to_string(), "live-server worker lock poisoned");
+    }
+
+    #[tokio::test]
+    async fn live_worker_poison_is_typed_for_async_and_all_status_accessors() {
+        let worker = test_live_worker();
+        poison_live_worker(&worker);
+
+        assert_poison_error(
+            worker
+                .handle_event(OmenchatLinkEvent::LinkClosed {
+                    link_id: [0x31; 16],
+                    reason: Some("test".into()),
+                })
+                .await,
+        );
+        assert_poison_error(worker.stats());
+        assert_poison_error(worker.recent_closed_link_summaries());
+        assert_poison_error(worker.active_room_counts());
+        assert_poison_error(worker.active_link_summaries());
+        assert_poison_error(worker.active_identity_counts());
+        assert_poison_error(worker.disconnect_identity(b"test identity"));
+    }
+
+    #[test]
+    fn headless_statistics_poison_returns_fatal_error_and_logs_safely() {
+        let config = test_config("headless-stats-poison");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("isolated config");
+        let worker = test_live_worker();
+        poison_live_worker(&worker);
+
+        assert_poison_error(headless_stats_sample(&worker, &config));
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let log = std::fs::read_to_string(config.log_path()).expect("server log");
+        assert!(log.contains("reticulum-rs live statistics failed"));
+        assert!(log.contains("live-server worker lock poisoned"));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
     #[tokio::test]
     async fn live_runtime_shutdown_is_idempotent_and_joins_owned_workers() {
         let config = test_config("owned-shutdown");
@@ -3078,6 +3174,35 @@ mod tests {
             .expect("idempotent shutdown");
         drop(runtime);
         assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[tokio::test]
+    async fn poisoned_live_runtime_shutdown_still_cancels_and_joins_owned_workers() {
+        let config = test_config("poisoned-owned-shutdown");
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        let mut runtime = start_live_server(&config)
+            .await
+            .expect("start live runtime");
+        poison_live_worker(&runtime.live_server);
+
+        let error = tokio::time::timeout(Duration::from_secs(5), runtime.shutdown(&config))
+            .await
+            .expect("shutdown must remain bounded")
+            .expect_err("poisoned enumeration must remain visible");
+        assert!(error.to_string().contains("active-link enumeration failed"));
+        assert!(runtime.shutdown_complete);
+        assert!(runtime.owned_tasks.is_empty());
+        assert_eq!(runtime.queue_metrics().0.queued_items, 0);
+        assert_eq!(runtime.queue_metrics().1.queued_items, 0);
+
+        runtime
+            .shutdown(&config)
+            .await
+            .expect("completed shutdown remains idempotent");
+        assert!(crate::server_log::flush(Duration::from_secs(1)));
+        let log = std::fs::read_to_string(config.log_path()).expect("server log");
+        assert!(log.contains("skipped active-link close enumeration"));
         let _ = std::fs::remove_dir_all(config.root_dir());
     }
 
@@ -3359,7 +3484,7 @@ mod tests {
         let elapsed = started.elapsed();
         assert!(elapsed >= Duration::from_millis(90));
         assert!(elapsed < Duration::from_secs(1));
-        let stats = worker.stats();
+        let stats = worker.stats().expect("worker stats");
         assert_eq!(stats.protocol_errors, 1);
         assert!(stats
             .last_error

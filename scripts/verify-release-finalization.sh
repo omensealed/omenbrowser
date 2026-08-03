@@ -40,4 +40,17 @@ if [[ ! -f "$checklist" ]] || ! grep -Fqx "Target: \`v$version\`" "$checklist"; 
   exit 1
 fi
 
+if grep -Fq 'quick-xml 0.39.2` findings are accepted' README.md; then
+  echo "release finalization check: README retains the retired accepted-advisory claim" >&2
+  exit 1
+fi
+if ! grep -Fq 'expected_ids=()' scripts/verify-accepted-advisories.sh; then
+  echo "release finalization check: audit policy does not require zero accepted vulnerabilities" >&2
+  exit 1
+fi
+if ! grep -Eq '^ignore[[:space:]]*=[[:space:]]*\[\][[:space:]]*$' deny.toml; then
+  echo "release finalization check: deny.toml contains an advisory exception" >&2
+  exit 1
+fi
+
 echo "release finalization check: pass ($version; $notes; $checklist)"
