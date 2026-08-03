@@ -18,7 +18,7 @@ Run:
 
 ```bash
 cargo test --locked --no-default-features --features desktop-product \
-  external_rpc_097_ --lib -- --nocapture
+  upstream_rpc_097_ --lib -- --nocapture
 ```
 
 The test uses an isolated loopback MessagePack RPC capture endpoint and the
@@ -47,14 +47,21 @@ The separate ZMQ pipeline serializer carries those four fields, but that is
 not the `RpcBackendClient` path shipped by OMENbrowser and does not establish
 external-daemon guarantees for this product mode.
 
+The production fail-closed boundary is covered separately with:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  external_rpc_097_ --lib -- --nocapture
+```
+
 ## OMEN policy
 
-- Enforce persisted expiry locally without claiming daemon-side TTL.
-- Do not claim external-daemon idempotency, correlation, or extension support.
+- Reject plans requiring TTL, idempotency, correlation, or extensions before
+  connecting or dispatching.
 - Never automatically retry an uncertain external send.
 - Reject an explicit remembered reply ticket before opening the connection.
-- Preserve the method, stamp, fresh-ticket, fallback, and cancellation fields
-  that the public path demonstrably carries.
+- Keep endpoint availability distinct from full send equivalence. Managed
+  integrated sending remains the supported complete path.
 
 A later exact upstream release that changes this serialization will make the
 capture assertion fail and require a deliberate compatibility decision.

@@ -51,7 +51,7 @@ That gives the browser a clean startup with the selected Reticulum interfaces
 and usually gets Directory/announce traffic moving quickly. See
 [Getting Online Fast](GETTING_ONLINE.md) for the fuller note.
 
-Keep Reticulum instance mode set to **Managed** for v0.9.7-1. External/shared
+Keep Reticulum instance mode set to **Managed** for v0.9.7-2. External/shared
 mode is retained as a readable deferred configuration but intentionally does
 not start integrated interfaces until a real shared backend is negotiated. See
 [Network Backends](NETWORK_BACKENDS.md).

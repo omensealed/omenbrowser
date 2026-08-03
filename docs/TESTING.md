@@ -1994,12 +1994,12 @@ cargo deny --manifest-path src/server/Cargo.toml --locked --all-features \
   check advisories
 ```
 
-The verifier requires the current raw root audit to fail only on the two
-constrained `quick-xml` 0.39.2 advisories documented in
-`docs/maintenance/DEPENDENCY_SECURITY.md`, proves their exact proc-macro-only
-dependency boundary, and then applies only those two IDs to the accepted audit.
-Any additional vulnerability or dependency-path change is a regression. The
-server currently has no vulnerability-class finding or allowed warning.
+The verifier requires a vulnerability-free raw root audit and the reviewed
+registry build-time path `wayland-scanner 0.31.11 -> quick-xml 0.41.0`. It also
+proves the standalone server resolves neither package and repository Rust source
+does not import `quick-xml`. Any vulnerability or dependency-path change is a
+regression. The server currently has no vulnerability-class finding or allowed
+warning.
 
 RUSTSEC-2026-0002 is resolved in both optional TUI profiles by Ratatui 0.30.2
 and `lru` 0.18.1. The dependency gate also aligns Crossterm 0.29.0, preserves
@@ -2344,7 +2344,7 @@ them with live page/message latency before changing product defaults.
 The `--two-core` case uses Linux `taskset` from `util-linux`; other platforms
 must apply their native CPU-affinity mechanism or run on low-core hardware.
 
-## omenchatd v0.9.7-1 recovery and event-loop gates
+## omenchatd v0.9.7-2 recovery and event-loop gates
 
 The standalone server has a separate runtime policy: available parallelism is
 clamped to one through four async workers, the blocking pool is capped at eight,
@@ -4165,7 +4165,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-1` must report
+therefore exits with the expected signal status; current `0.9.7-2` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

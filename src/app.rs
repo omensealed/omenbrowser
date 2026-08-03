@@ -21035,7 +21035,7 @@ impl App {
                 "managed: app TTL/idempotency/correlation are enforced; peer delivery still requires authoritative evidence"
             }
             ReticulumInstanceMode::External => {
-                "external: daemon TTL/idempotency/correlation are unproven; uncertain sends are never auto-retried"
+                "external: RPC TTL/idempotency/correlation/extensions/reply-ticket guarantees are unsupported; rejected sends are never dispatched or auto-retried"
             }
         };
         vec![
@@ -33867,7 +33867,7 @@ side
     }
 
     #[test]
-    fn propagation_backend_panel_is_event_driven_and_external_guarantees_stay_unproven() {
+    fn propagation_backend_panel_is_event_driven_and_external_guarantees_are_unsupported() {
         let mut app = App::new(test_config("propagation-backend-panel"));
         app.settings.reticulum_instance_mode = ReticulumInstanceMode::External;
         assert!(
@@ -33896,8 +33896,10 @@ side
         assert!(text.contains("node=00112233..ddeeff"));
         assert!(text.contains("path=known link=active transfer=idle"));
         assert!(text.contains("queued=1"));
-        assert!(text.contains("daemon TTL/idempotency/correlation are unproven"));
-        assert!(text.contains("never auto-retried"));
+        assert!(text.contains(
+            "RPC TTL/idempotency/correlation/extensions/reply-ticket guarantees are unsupported"
+        ));
+        assert!(text.contains("never dispatched or auto-retried"));
         assert!(!text.contains(FIXTURE_NODE_HASH));
     }
 

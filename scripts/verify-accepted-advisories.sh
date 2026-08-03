@@ -35,24 +35,24 @@ quick_id="$(
   jq -r '
     [.packages[] | select(
       .name == "quick-xml"
-      and .version == "0.39.2"
+      and .version == "0.41.0"
       and .source == "registry+https://github.com/rust-lang/crates.io-index"
     ) | .id] | if length == 1 then .[0] else empty end
   ' "$metadata"
 )"
-[[ -n "$quick_id" ]] || fail "expected exactly registry quick-xml 0.39.2"
+[[ -n "$quick_id" ]] || fail "expected exactly registry quick-xml 0.41.0"
 
 scanner_id="$(
   jq -r '
     [.packages[] | select(
       .name == "wayland-scanner"
-      and .version == "0.31.10"
+      and .version == "0.31.11"
       and .source == "registry+https://github.com/rust-lang/crates.io-index"
       and any(.targets[].kind[]; . == "proc-macro")
     ) | .id] | if length == 1 then .[0] else empty end
   ' "$metadata"
 )"
-[[ -n "$scanner_id" ]] || fail "expected exactly registry wayland-scanner 0.31.10 proc-macro"
+[[ -n "$scanner_id" ]] || fail "expected exactly registry wayland-scanner 0.31.11 proc-macro"
 
 mapfile -t quick_parents < <(
   jq -r --arg quick "$quick_id" '
@@ -60,7 +60,7 @@ mapfile -t quick_parents < <(
   ' "$metadata" | sort -u
 )
 [[ ${#quick_parents[@]} -eq 1 && "${quick_parents[0]}" == "$scanner_id" ]] \
-  || fail "quick-xml 0.39.2 has a dependency parent other than wayland-scanner 0.31.10"
+  || fail "quick-xml 0.41.0 has a dependency parent other than wayland-scanner 0.31.11"
 
 if jq -e '.packages[] | select(.name == "quick-xml")' "$server_metadata" >/dev/null; then
   fail "standalone omenchatd resolved quick-xml"
@@ -76,30 +76,21 @@ set +e
 cargo audit "${audit_fetch_args[@]}" --json > "$audit_report"
 audit_status=$?
 set -e
-[[ $audit_status -eq 1 ]] || fail "raw root audit did not exit with the expected vulnerability status"
+[[ $audit_status -eq 0 ]] || fail "raw root audit reported a vulnerability"
 
 mapfile -t vulnerability_ids < <(
   jq -r '.vulnerabilities.list[].advisory.id' "$audit_report" | sort -u
 )
-expected_ids=(RUSTSEC-2026-0194 RUSTSEC-2026-0195)
+expected_ids=()
 [[ "${vulnerability_ids[*]}" == "${expected_ids[*]}" ]] \
   || fail "raw root audit contains an unaccepted vulnerability set: ${vulnerability_ids[*]:-none}"
-jq -e '
-  .vulnerabilities.count == 2
-  and all(.vulnerabilities.list[];
-    .package.name == "quick-xml"
-    and .package.version == "0.39.2"
-    and .package.source == "registry+https://github.com/rust-lang/crates.io-index"
-  )
-' "$audit_report" >/dev/null \
-  || fail "accepted advisories do not map exactly to registry quick-xml 0.39.2"
+jq -e '.vulnerabilities.count == 0 and (.vulnerabilities.list | length) == 0' \
+  "$audit_report" >/dev/null || fail "root audit is not vulnerability-free"
 
-cargo audit --no-fetch \
-  --ignore RUSTSEC-2026-0194 \
-  --ignore RUSTSEC-2026-0195 >/dev/null
+cargo audit --no-fetch >/dev/null
 cargo audit --no-fetch --file src/server/Cargo.lock >/dev/null
 
-echo "accepted build-time advisories: RUSTSEC-2026-0194 RUSTSEC-2026-0195"
-echo "accepted path: wayland-scanner 0.31.10 proc-macro -> quick-xml 0.39.2"
+echo "accepted build-time advisories: none"
+echo "reviewed path: wayland-scanner 0.31.11 proc-macro -> quick-xml 0.41.0"
 echo "standalone omenchatd quick-xml packages: 0"
 echo "accepted advisory verification: pass"

@@ -439,16 +439,14 @@ and proves the following boundary:
 | explicit remembered reply ticket | unsupported by the public request |
 | cancellation identity | daemon-returned message ID is preserved |
 
-OMEN still sets the complete typed request, persists the operation identity,
-and rejects locally expired work before dispatch. That is local admission and
-reconciliation, not daemon-side TTL or duplicate suppression. Ordinary external
-RPC sends therefore remain usable, but their remote TTL, idempotency, and
-correlation guarantees are explicitly unproven. OMEN never automatically
-retries an uncertain external send. An explicit remembered reply ticket is
-rejected before opening the RPC connection because silently discarding it could
-change stamp policy. The embedded RPC bridge independently retains these
-fields. A late authoritative terminal event may still correct local history
-after reconciliation.
+OMEN still constructs and persists the complete typed operation, but the
+external RPC sender now rejects any plan requiring TTL, idempotency,
+correlation, extensions, or an explicit remembered reply ticket before opening
+the endpoint or dispatching work. The rejection is `unsupported`, not sent or
+uncertain, and never selects another backend or starts a retry. Plans that use
+only demonstrably preserved fields remain representable, but normal durable
+OMEN sends require the rejected guarantees. Managed integrated sending and the
+embedded RPC bridge independently retain these fields and are unaffected.
 
 The desktop and TUI diagnostics now project this distinction through one
 event-driven propagation/backend evidence model. It retains only the latest
@@ -456,7 +454,7 @@ typed propagation status and summarizes the existing bounded operation history
 into queued, in-flight, settled, failed, expired, cancelled, and uncertain
 counts. Managed mode labels application TTL/idempotency/correlation separately
 from authoritative peer-delivery evidence. External mode explicitly labels the
-three daemon guarantees unproven and repeats the no-automatic-retry rule. The
+published 0.9.7 send guarantees unsupported and repeats the no-automatic-retry rule. The
 panel adds no worker, polling subscription, or retained status history.
 
 `authenticated_lxmf_source_evidence` is a separate runtime capability. The

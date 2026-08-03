@@ -369,6 +369,19 @@ pub(super) fn subtle_button_style(theme: &Theme, status: button::Status) -> butt
     }
 }
 
+pub(super) fn toggle_button_style(
+    theme: &Theme,
+    status: button::Status,
+    selected: bool,
+) -> button::Style {
+    let mut style = subtle_button_style(theme, status);
+    if selected {
+        style.border.color = mix_color(theme.palette().primary, omen_accent(), 0.75);
+        style.border.width = 2.0;
+    }
+    style
+}
+
 pub(super) fn warning_button_style(theme: &Theme, status: button::Status) -> button::Style {
     let base = match status {
         button::Status::Hovered => omen_warning(),
@@ -552,5 +565,16 @@ mod tests {
         assert!(!DESKTOP_THEME_CHOICES.contains(&"kanagawa"));
         assert!(!DESKTOP_THEME_CHOICES.contains(&"light"));
         assert!(!DESKTOP_THEME_CHOICES.contains(&"blood"));
+    }
+
+    #[test]
+    fn selected_toggle_uses_a_stronger_border_without_changing_layout_policy() {
+        let theme = omen_desktop_theme();
+        let inactive = toggle_button_style(&theme, button::Status::Active, false);
+        let active = toggle_button_style(&theme, button::Status::Active, true);
+        assert_eq!(inactive.border.width, 1.0);
+        assert_eq!(active.border.width, 2.0);
+        assert_ne!(inactive.border.color, active.border.color);
+        assert_eq!(inactive.border.radius, active.border.radius);
     }
 }

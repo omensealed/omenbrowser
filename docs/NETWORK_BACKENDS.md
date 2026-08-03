@@ -6,7 +6,7 @@ crate version or a saved mode name.
 
 ## Managed integrated mode
 
-`reticulum_instance_mode = "managed"` is the supported v0.9.7-1 product mode.
+`reticulum_instance_mode = "managed"` is the supported v0.9.7-2 product mode.
 OMENbrowser owns the runtime lifecycle, identity attachment, configured
 interfaces, bounded event workers, and orderly shutdown. The diagnostics
 lifecycle and capability snapshots report what that active adapter actually
@@ -43,6 +43,11 @@ status remain `unknown` or unavailable.
 The optional local LXMF SDK/RPC endpoint provides only the explicitly
 negotiated SDK functions and bounded event stream. It is not treated as a full
 Reticulum transport, interface, NomadNet, OMENchat, or shared-instance backend.
+The published 0.9.7 sender drops TTL, idempotency, correlation, and extensions
+and cannot represent an explicit remembered reply ticket. OMEN therefore
+rejects operations requiring any of those guarantees before connection or
+dispatch. Endpoint availability is not send-equivalence evidence; managed
+integrated sending is unaffected and no automatic backend fallback occurs.
 
 ## OMENchat announcement-room feature identity
 
@@ -102,7 +107,7 @@ owns interfaces and identities before external mode can start network work.
 ## Migration and rollback
 
 Existing external-mode configuration is preserved without conversion. To use
-the integrated v0.9.7-1 runtime, select Managed and restart. Do not delete
+the integrated v0.9.7-2 runtime, select Managed and restart. Do not delete
 identity, configuration, history, or cache data. Rolling back this safety gate
 is source-only, but should not be done without a tested shared backend because
 the former behavior launched an integrated runtime while labeling it External.

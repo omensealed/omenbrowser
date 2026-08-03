@@ -85,6 +85,13 @@ project-local interface implementation:
   `passphrase`, signs packet bytes, inserts the IFAC bytes, masks/unmasks the
   correct wire ranges, verifies inbound IFAC signatures, and then hands normal
   `Packet` values back to `reticulum-rs-transport`.
+- Signature-tag verification uses `subtle`'s constant-time comparison. A
+  poisoned interface configuration lock fails into one redacted terminal state
+  instead of panicking or reconnecting with partially trusted state.
+- Delimiter-free HDLC input retains at most 524,416 bytes between reads. One
+  fixed 64 KiB read may temporarily raise the buffer to 589,952 bytes before
+  frame scanning and retained-limit enforcement; larger or still-undelimited
+  state is cleared. These are transport-memory ceilings, not wire changes.
 - Non-IFAC TCP client profiles continue to use the stock upstream TCP client.
 - omenchatd refuses an IFAC-configured stock TCP server instead of falsely
   reporting that the private gateway is enforced. Its supported IFAC topology
@@ -279,7 +286,7 @@ comparison is constant-time without changing wire bytes or MTU.
 The 0.9.7 stamp/ticket decision remains unchanged: OMEN owns one authoritative
 decision and final stamp using authenticated relay-advertised cost, its existing
 safety ceiling, and reply-ticket precedence. Pinned/current Python and mixed
-0.6.0-1/0.9.7-1 propagation tests pass advertised cost and ticket wire checks.
+0.6.0-1/0.9.7-2 propagation tests pass advertised cost and ticket wire checks.
 The upstream default propagation cost is not substituted for a raised live
 relay cost.
 

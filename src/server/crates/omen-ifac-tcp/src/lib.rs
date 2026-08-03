@@ -12,6 +12,7 @@ use rns_transport::iface::{
 use rns_transport::serde::Serialize;
 use rns_transport::Packet;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
@@ -20,12 +21,35 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_MTU: usize = 262_144;
 const TCP_READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_HDLC_ACCUMULATION_BYTES: usize = DEFAULT_MTU * 2 + 128;
+// A read is appended before delimiter scanning and retained-buffer enforcement.
+// This is the bounded temporary peak; only MAX_HDLC_ACCUMULATION_BYTES survives
+// one receive-loop iteration.
+const MAX_HDLC_TEMPORARY_BUFFER_BYTES: usize = MAX_HDLC_ACCUMULATION_BYTES + TCP_READ_BUFFER_BYTES;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 const IFAC_SALT: [u8; 32] = [
     0xad, 0xf5, 0x4d, 0x88, 0x2c, 0x9a, 0x9b, 0x80, 0x77, 0x1e, 0xb4, 0x99, 0x5d, 0x70, 0x2d, 0x4a,
     0x3e, 0x73, 0x33, 0x91, 0xb2, 0xa0, 0xf5, 0x3f, 0x41, 0x6d, 0x9f, 0x90, 0x7e, 0x55, 0xcf, 0xf8,
 ];
+
+fn append_tcp_bytes(frame_buffer: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    if bytes.len() > TCP_READ_BUFFER_BYTES
+        || frame_buffer.len().saturating_add(bytes.len()) > MAX_HDLC_TEMPORARY_BUFFER_BYTES
+    {
+        frame_buffer.clear();
+        return false;
+    }
+    frame_buffer.extend_from_slice(bytes);
+    true
+}
+
+fn enforce_retained_frame_limit(frame_buffer: &mut Vec<u8>) -> bool {
+    if frame_buffer.len() > MAX_HDLC_ACCUMULATION_BYTES {
+        frame_buffer.clear();
+        return false;
+    }
+    true
+}
 
 #[derive(Clone)]
 pub struct IfacTcpRuntimeStatusHandle {
@@ -85,6 +109,33 @@ pub struct IfacTcpClient {
     status: Arc<Mutex<IfacTcpRuntimeStatus>>,
 }
 
+struct IfacTcpConfiguration {
+    addr: String,
+    ifac: IfacContext,
+    status: Arc<Mutex<IfacTcpRuntimeStatus>>,
+}
+
+fn snapshot_configuration(client: &Mutex<IfacTcpClient>) -> Result<IfacTcpConfiguration, ()> {
+    match client.lock() {
+        Ok(guard) => Ok(IfacTcpConfiguration {
+            addr: guard.addr.clone(),
+            ifac: guard.ifac.clone(),
+            status: guard.status.clone(),
+        }),
+        Err(poisoned) => {
+            let status = poisoned.into_inner().status.clone();
+            mark_status(
+                &status,
+                "terminal",
+                Some("interface configuration lock poisoned".to_string()),
+                0,
+                0,
+            );
+            Err(())
+        }
+    }
+}
+
 impl IfacTcpClient {
     pub fn new(
         addr: String,
@@ -109,13 +160,14 @@ impl IfacTcpClient {
     pub async fn spawn(context: InterfaceContext<IfacTcpClient>) {
         let iface_stop = context.channel.stop.clone();
         let iface_address = context.channel.address;
-        let (addr, ifac, status) = {
-            let guard = context
-                .inner
-                .lock()
-                .expect("ifac tcp client mutex poisoned");
-            (guard.addr.clone(), guard.ifac.clone(), guard.status.clone())
-        };
+        let IfacTcpConfiguration { addr, ifac, status } =
+            match snapshot_configuration(&context.inner) {
+                Ok(configuration) => configuration,
+                Err(()) => {
+                    iface_stop.cancel();
+                    return;
+                }
+            };
         let (rx_channel, tx_channel) = context.channel.split();
         let tx_channel = Arc::new(AsyncMutex::new(tx_channel));
 
@@ -236,7 +288,16 @@ async fn run_ifac_stream<R, W>(
                             }
                             Ok(n) => {
                                 add_status_traffic(&status, n as u64, 0);
-                                frame_buffer.extend_from_slice(&tcp_buffer[..n]);
+                                if !append_tcp_bytes(&mut frame_buffer, &tcp_buffer[..n]) {
+                                    mark_status(
+                                        &status,
+                                        "connected",
+                                        Some("temporary HDLC buffer limit exceeded".to_string()),
+                                        0,
+                                        0,
+                                    );
+                                    continue;
+                                }
                                 while let Some((start, end)) = Hdlc::find(&frame_buffer) {
                                     let frame = &frame_buffer[start..=end];
                                     let mut output = OutputBuffer::new(&mut hdlc_buffer);
@@ -268,9 +329,7 @@ async fn run_ifac_stream<R, W>(
                                     }
                                     frame_buffer.drain(..=end);
                                 }
-                                if frame_buffer.len() > MAX_HDLC_ACCUMULATION_BYTES {
-                                    frame_buffer.clear();
-                                }
+                                enforce_retained_frame_limit(&mut frame_buffer);
                             }
                             Err(error) => {
                                 mark_status(&status, "closed", Some(format!("tcp read failed: {error}")), 0, 0);
@@ -496,19 +555,19 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    left.iter()
-        .zip(right)
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
+    bool::from(left.ct_eq(right))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        constant_time_eq, IfacContext, MAX_HDLC_ACCUMULATION_BYTES, TCP_READ_BUFFER_BYTES,
+        append_tcp_bytes, constant_time_eq, enforce_retained_frame_limit, snapshot_configuration,
+        IfacContext, IfacTcpClient, MAX_HDLC_ACCUMULATION_BYTES, MAX_HDLC_TEMPORARY_BUFFER_BYTES,
+        TCP_READ_BUFFER_BYTES,
     };
+    use rns_transport::buffer::OutputBuffer;
+    use rns_transport::iface::hdlc::Hdlc;
+    use std::sync::{Arc, Mutex};
 
     fn decode_hex(value: &str) -> Vec<u8> {
         assert_eq!(value.len() % 2, 0);
@@ -574,13 +633,89 @@ mod tests {
     }
 
     #[test]
+    fn ifac_rejects_a_truncated_tag() {
+        let ifac = IfacContext::new(Some("private_ret"), Some("secret"), 16).unwrap();
+        let encoded = ifac
+            .encode_outbound(b"\x01\x02this-is-a-reticulum-packet")
+            .unwrap();
+        assert_eq!(
+            ifac.decode_inbound(&encoded[..2 + 16 - 1]),
+            Err("ifac packet too short")
+        );
+    }
+
+    #[test]
+    fn hdlc_escaped_delimiters_round_trip_and_are_found_once() {
+        let raw = b"prefix\x7esplit\x7descape";
+        let mut encoded = vec![0_u8; raw.len() * 2 + 2];
+        let mut output = OutputBuffer::new(&mut encoded);
+        Hdlc::encode(raw, &mut output).expect("encode escaped fixture");
+        let frame = output.as_slice();
+        let (start, end) = Hdlc::find(frame).expect("find encoded frame");
+        assert_eq!((start, end), (0, frame.len() - 1));
+        let mut decoded = vec![0_u8; raw.len()];
+        let mut decoded_output = OutputBuffer::new(&mut decoded);
+        Hdlc::decode(frame, &mut decoded_output).expect("decode escaped fixture");
+        assert_eq!(decoded_output.as_slice(), raw);
+        assert!(Hdlc::find(&frame[end + 1..]).is_none());
+    }
+
+    #[test]
     fn ifac_stream_buffers_and_authentication_comparison_are_bounded() {
         let read_buffer = vec![0_u8; TCP_READ_BUFFER_BYTES];
         let frame_buffer = Vec::<u8>::with_capacity(MAX_HDLC_ACCUMULATION_BYTES);
         assert_eq!(read_buffer.len(), 64 * 1024);
         assert_eq!(frame_buffer.capacity(), 2 * 262_144 + 128);
+        assert_eq!(
+            MAX_HDLC_TEMPORARY_BUFFER_BYTES,
+            MAX_HDLC_ACCUMULATION_BYTES + TCP_READ_BUFFER_BYTES
+        );
         assert!(constant_time_eq(b"same", b"same"));
         assert!(!constant_time_eq(b"same", b"tampered"));
         assert!(!constant_time_eq(b"same", b"samf"));
+
+        let mut delimiter_free = vec![0_u8; MAX_HDLC_ACCUMULATION_BYTES];
+        assert!(enforce_retained_frame_limit(&mut delimiter_free));
+        assert!(append_tcp_bytes(
+            &mut delimiter_free,
+            &vec![0_u8; TCP_READ_BUFFER_BYTES]
+        ));
+        assert_eq!(delimiter_free.len(), MAX_HDLC_TEMPORARY_BUFFER_BYTES);
+        assert!(!enforce_retained_frame_limit(&mut delimiter_free));
+        assert!(delimiter_free.is_empty());
+
+        let mut impossible_peak = vec![0_u8; MAX_HDLC_TEMPORARY_BUFFER_BYTES];
+        assert!(!append_tcp_bytes(&mut impossible_peak, &[0]));
+        assert!(impossible_peak.is_empty());
+    }
+
+    #[test]
+    fn poisoned_configuration_lock_becomes_a_redacted_terminal_status() {
+        let client = Arc::new(Mutex::new(
+            IfacTcpClient::new(
+                "127.0.0.1:1".into(),
+                Some("fixture-network".into()),
+                Some("fixture-passphrase".into()),
+                16,
+            )
+            .expect("fixture client"),
+        ));
+        let status = client.lock().expect("fixture lock").runtime_status_handle();
+        let poisoned = client.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("poison fixture lock");
+            panic!("deliberate configuration-lock poison");
+        })
+        .join();
+
+        assert!(snapshot_configuration(&client).is_err());
+        let report = status.to_json();
+        assert_eq!(report["stream_state"], "terminal");
+        assert_eq!(
+            report["last_error"],
+            "interface configuration lock poisoned"
+        );
+        assert!(!report.to_string().contains("fixture-passphrase"));
+        assert!(!report.to_string().contains("fixture-network"));
     }
 }
