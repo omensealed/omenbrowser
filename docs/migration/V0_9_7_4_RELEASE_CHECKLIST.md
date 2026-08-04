@@ -35,7 +35,7 @@ Released baseline: `v0.9.7-3` /
 ## External boundaries
 
 - [x] Hosted Linux/native Windows/Intel macOS/Apple Silicon macOS CI.
-- [ ] Native installer/DMG lifecycle checks.
+- [x] Native installer/DMG lifecycle checks.
 - [ ] Physical interface/radio testing.
 - [ ] Reviewed candidate merged to `main`.
 - [ ] Annotated tag or published release.

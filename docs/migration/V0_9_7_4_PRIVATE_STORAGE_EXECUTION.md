@@ -96,4 +96,8 @@ are compiled only on Unix, and the isolated RPC capture socket explicitly
 returns to blocking mode after a nonblocking accept loop. Production storage,
 send, cancellation, and replay behavior did not change. Native installer/DMG
 lifecycle and physical radio/interface evidence remain external boundaries.
-No tag or publication occurred during this work.
+Hosted Package run `30945085259` then passed the native Windows portable,
+NSIS, and MSI builds, both native macOS DMG builds, Linux release packaging,
+and package smoke from candidate `6db48cb1`. The publication job was correctly
+skipped for the branch qualification run. Physical radio/interface evidence
+remains an external boundary. No tag or publication occurred during this work.
