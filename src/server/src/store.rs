@@ -2515,6 +2515,7 @@ mod tests {
     const CRASH_TEST_DATABASE_ENV: &str = "OMENCHATD_CRASH_TEST_DATABASE";
     const CRASH_TEST_MODE_ENV: &str = "OMENCHATD_CRASH_TEST_MODE";
     const CRASH_TEST_READY_ENV: &str = "OMENCHATD_CRASH_TEST_READY";
+    #[cfg(unix)]
     const PRIVATE_UMASK_CHILD_ENV: &str = "OMENCHATD_PRIVATE_UMASK_CHILD";
 
     fn isolated_database_path(label: &str) -> std::path::PathBuf {

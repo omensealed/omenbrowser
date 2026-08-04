@@ -1628,6 +1628,7 @@ mod tests {
 
     const FIXTURE_OMENCHAT_HASH: &str = "00112233445566778899aabbccddeeff";
     const REPLACEMENT_OMENCHAT_HASH: &str = "ffffffffffffffffffffffffffffffff";
+    #[cfg(unix)]
     const PRIVATE_UMASK_INIT_CHILD: &str = "OMENCHATD_PRIVATE_UMASK_INIT_CHILD";
 
     fn temp_root(label: &str) -> PathBuf {
