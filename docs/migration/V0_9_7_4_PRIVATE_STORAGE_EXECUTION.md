@@ -88,6 +88,12 @@ cancellation, and dispatch behavior are unchanged. Rollback to `v0.9.7-3`
 needs no state conversion; corrected owner-only Unix modes may remain.
 
 The known maximum-UDP Resource limitation and deliberately ignored sentinel
-remain unchanged. Native Windows, Intel macOS, Apple Silicon macOS, physical
-radio/interface, and hosted CI evidence remain external boundaries and are not
-inferred from Linux. No push, tag, or publication occurred during this work.
+remain unchanged. GitHub CI run `30942224547` passed Linux quick checks and the
+native Windows MSVC, Intel macOS, and Apple Silicon macOS build/test/strict
+Clippy matrix on the reviewed candidate. Two preceding runs exposed and then
+verified narrow test-only portability corrections: Unix permission fixtures
+are compiled only on Unix, and the isolated RPC capture socket explicitly
+returns to blocking mode after a nonblocking accept loop. Production storage,
+send, cancellation, and replay behavior did not change. Native installer/DMG
+lifecycle and physical radio/interface evidence remain external boundaries.
+No tag or publication occurred during this work.
