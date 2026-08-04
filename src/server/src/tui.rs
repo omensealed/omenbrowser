@@ -4340,26 +4340,19 @@ fn audit_panel_text(path: &std::path::Path, max_lines: usize) -> String {
 
 fn ensure_log_file(path: &std::path::Path) -> ServerResult<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::private_fs::ensure_private_dir(parent)?;
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    drop(crate::private_fs::open_private_append(path)?);
     Ok(())
 }
 
 fn append_admin_log(config: &ServerConfig, message: impl AsRef<str>) {
     let path = config.log_path();
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = crate::private_fs::ensure_private_dir(parent);
     }
     let timestamp = unix_to_utc_string(current_unix_secs());
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    if let Ok(mut file) = crate::private_fs::open_private_append(&path) {
         let _ = writeln!(file, "{timestamp} {}", message.as_ref());
     }
 }

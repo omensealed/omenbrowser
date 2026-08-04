@@ -209,7 +209,7 @@ fn publish_cache_bytes(
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(ErrorKind::InvalidInput, "cache destination has no parent")
     })?;
-    fs::create_dir_all(parent)?;
+    crate::private_fs::ensure_private_parent_dir(parent)?;
     if !fs::symlink_metadata(parent)?.file_type().is_dir() {
         return Err(AppError::Settings(format!(
             "LXMF local delivery cache parent must be a directory: {}",

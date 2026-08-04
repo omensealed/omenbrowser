@@ -213,8 +213,9 @@ impl OmenchatStore {
     }
 
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
+        protect_existing_database(path.as_ref())?;
         let connection = rusqlite::Connection::open_with_flags(
-            path,
+            path.as_ref(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -227,8 +228,9 @@ impl OmenchatStore {
     }
 
     pub fn open_existing_for_maintenance(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
+        protect_existing_database(path.as_ref())?;
         let connection = rusqlite::Connection::open_with_flags(
-            path,
+            path.as_ref(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         connection.busy_timeout(Duration::ZERO)?;
@@ -259,13 +261,12 @@ impl OmenchatStore {
             .metadata()
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        prepare_database_path(path.as_ref())?;
         let connection = rusqlite::Connection::open(path.as_ref())?;
         configure_connection(&connection, true, busy_timeout)?;
         let store = Self::from_connection(connection);
         store.migrate(backup_required.then_some(path.as_ref()))?;
+        repair_database_sidecars(path.as_ref())?;
         Ok(store)
     }
 
@@ -1821,15 +1822,7 @@ fn create_migration_backup(
     version: i64,
 ) -> ServerResult<()> {
     let backup_path = migration_backup_path(source_path, version);
-    let reservation = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&backup_path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        reservation.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
+    let reservation = crate::private_fs::create_private_new(&backup_path)?;
     drop(reservation);
 
     let backup_result = (|| -> ServerResult<()> {
@@ -1852,6 +1845,46 @@ fn create_migration_backup(
         let _ = std::fs::remove_file(&backup_path);
     }
     backup_result
+}
+
+fn prepare_database_path(path: &std::path::Path) -> ServerResult<()> {
+    if let Some(parent) = path.parent() {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(crate::error::ServerError::Message(
+                        "database parent is not a real directory".into(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::private_fs::ensure_private_parent_dir(parent)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !crate::private_fs::repair_private_file_if_exists(path)? {
+        drop(crate::private_fs::create_private_new(path)?);
+    }
+    Ok(())
+}
+
+fn protect_existing_database(path: &std::path::Path) -> ServerResult<()> {
+    crate::private_fs::repair_private_file(path)?;
+    repair_database_sidecars(path)
+}
+
+fn repair_database_sidecars(path: &std::path::Path) -> ServerResult<()> {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(crate::error::ServerError::Message(
+            "database path has no regular filename".into(),
+        ));
+    };
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = path.with_file_name(format!("{filename}{suffix}"));
+        crate::private_fs::repair_private_file_if_exists(&sidecar)?;
+    }
+    Ok(())
 }
 
 fn configure_connection(
@@ -2482,6 +2515,8 @@ mod tests {
     const CRASH_TEST_DATABASE_ENV: &str = "OMENCHATD_CRASH_TEST_DATABASE";
     const CRASH_TEST_MODE_ENV: &str = "OMENCHATD_CRASH_TEST_MODE";
     const CRASH_TEST_READY_ENV: &str = "OMENCHATD_CRASH_TEST_READY";
+    #[cfg(unix)]
+    const PRIVATE_UMASK_CHILD_ENV: &str = "OMENCHATD_PRIVATE_UMASK_CHILD";
 
     fn isolated_database_path(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -2986,6 +3021,70 @@ mod tests {
 
         drop(store);
         remove_database_files(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sqlite_main_wal_and_shm_are_private_under_permissive_subprocess_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os(PRIVATE_UMASK_CHILD_ENV).is_none() {
+            let executable = std::env::current_exe().expect("test executable");
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("umask 0000; exec \"$1\" --exact store::tests::sqlite_main_wal_and_shm_are_private_under_permissive_subprocess_umask --nocapture")
+                .arg("omenchatd-private-umask")
+                .arg(executable)
+                .env(PRIVATE_UMASK_CHILD_ENV, "1")
+                .status()
+                .expect("private-umask subprocess");
+            assert!(status.success(), "private-umask subprocess failed");
+            return;
+        }
+
+        let database = isolated_database_path("private-umask");
+        let parent = database.parent().expect("parent");
+        let parent_mode = std::fs::metadata(parent)
+            .expect("parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let store = OmenchatStore::open(&database).expect("private database");
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO server_config(key, value) VALUES ('permission_probe', 'preserved')",
+                [],
+            )
+            .expect("representative write");
+        let filename = database
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("filename");
+        let wal = database.with_file_name(format!("{filename}-wal"));
+        let shm = database.with_file_name(format!("{filename}-shm"));
+        for path in [&database, &wal, &shm] {
+            assert!(path.exists(), "expected live SQLite path");
+            assert_eq!(
+                std::fs::metadata(path)
+                    .expect("SQLite metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(parent)
+                .expect("parent metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            parent_mode,
+            "custom database parent must remain unchanged"
+        );
+        drop(store);
+        remove_database_files(&database);
     }
 
     #[test]

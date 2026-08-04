@@ -518,6 +518,14 @@ It must not read from or write to `~/.reticulum`, `~/.nomadnetwork`, `~/.lxmd`,
 or OMENbrowser_rs client identity storage unless an operator explicitly changes
 paths in the server config.
 
+On Unix, the selected server home and exact server-owned directories are
+created/repaired as `0700`; config, identity, SQLite main/WAL/SHM, migration
+backups, uploads, generated pages, and active/rotated logs are `0600`. Custom
+database or identity files are protected without chmodding arbitrary existing
+ancestors. The systemd user unit also uses `UMask=0077`, but direct binary runs
+receive the same code-level protection. See `docs/PRIVATE_STORAGE.md` in the
+repository/package root.
+
 The TUI admin console is the primary interactive configuration surface for
 first-run setup, server identity, Reticulum interfaces, rooms, limits,
 moderation, logs, monitoring, MOTD, NomadNet portal preview, and audit review.

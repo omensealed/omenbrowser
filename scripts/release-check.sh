@@ -248,6 +248,16 @@ bash -n scripts/test-native-cli-identity.sh
 bash -n scripts/package-macos.sh
 bash -n scripts/package-linux-arm64-omenchatd.sh
 bash -n scripts/test-linux-arm64-headless.sh
+bash -n scripts/test-omenchatd-private-service.sh
+bash -n scripts/verify-private-storage-policy.sh
+
+echo "== Private storage policy =="
+bash scripts/verify-private-storage-policy.sh
+
+if [[ "$(uname -s)" == "Linux" ]]; then
+  echo "== omenchatd private service installer =="
+  bash scripts/test-omenchatd-private-service.sh
+fi
 
 echo "== TUI dependency check =="
 bash scripts/verify-tui-dependencies.sh

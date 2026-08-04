@@ -360,7 +360,7 @@ impl InterfaceConfigService {
     }
 
     pub fn apply(&self) -> crate::error::AppResult<PathBuf> {
-        std::fs::create_dir_all(&self.reticulum_config_dir)?;
+        crate::private_fs::ensure_private_dir(&self.reticulum_config_dir)?;
         let rendered = self.try_render_config_for_apply()?;
         if rendered.len() as u64 > RETICULUM_CONFIG_MAX_BYTES {
             return Err(AppError::Settings(format!(
@@ -471,7 +471,7 @@ impl InterfaceConfigService {
 
     fn persist(&self) -> crate::error::AppResult<()> {
         if let Some(parent) = self.profiles_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::private_fs::ensure_private_parent_dir(parent)?;
         }
         let payload = InterfaceProfilesFile {
             profiles: self.profiles.clone(),
@@ -508,7 +508,7 @@ impl InterfaceConfigService {
             }
         }
         if let Some(parent) = self.gateways_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::private_fs::ensure_private_parent_dir(parent)?;
         }
         let payload = GatewayPresetsFile {
             gateways: vec![
@@ -927,7 +927,7 @@ fn write_atomic_private_with(
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(ErrorKind::InvalidInput, "configuration path has no parent")
     })?;
-    std::fs::create_dir_all(parent)?;
+    crate::private_fs::ensure_private_parent_dir(parent)?;
     if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
         return Err(AppError::Settings(format!(
             "configuration parent must be a directory: {}",

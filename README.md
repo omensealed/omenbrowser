@@ -77,6 +77,12 @@ layout.
 default. It keeps identity material, Reticulum config/storage, SQLite data, logs,
 and NomadNet portal pages under its own home.
 
+On Unix, OMEN-owned private directories are created/repaired as `0700` and
+sensitive managed files as `0600`, independent of the caller's umask. Existing
+known managed paths receive metadata-only repair; external ancestors and
+user-selected import/export trees are not recursively changed. See
+[`docs/PRIVATE_STORAGE.md`](docs/PRIVATE_STORAGE.md).
+
 ## Install From Release
 
 For normal testing, use the packaged release instead of building from source:

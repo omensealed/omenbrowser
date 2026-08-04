@@ -736,8 +736,9 @@ fn retained_bytes(
 
 fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() => {
-            validate_private_mode(path, &metadata, true)
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            crate::private_fs::ensure_private_dir(path)?;
+            Ok(())
         }
         Ok(_) => Err(anyhow!(
             "OMENchat mutation intent parent must be a directory"
@@ -749,17 +750,8 @@ fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
                     "OMENchat identity storage root must be a directory"
                 ));
             }
-            let builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            let mut builder = builder;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder.create(path)?;
-            let metadata = fs::symlink_metadata(path)?;
-            validate_private_mode(path, &metadata, true)
+            crate::private_fs::ensure_private_dir(path)?;
+            Ok(())
         }
         Err(error) => Err(error.into()),
     }
@@ -768,7 +760,8 @@ fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
 fn reserve_or_validate_private_database(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {
-            validate_private_mode(path, &metadata, false)
+            crate::private_fs::repair_private_file(path)?;
+            Ok(())
         }
         Ok(_) => Err(anyhow!(
             "OMENchat mutation intent database must be a regular file"
@@ -786,27 +779,6 @@ fn reserve_or_validate_private_database(path: &Path) -> anyhow::Result<()> {
         }
         Err(error) => Err(error.into()),
     }
-}
-
-fn validate_private_mode(
-    path: &Path,
-    metadata: &fs::Metadata,
-    directory: bool,
-) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(anyhow!(
-                "OMENchat mutation intent {} permissions must be owner-only: {}",
-                if directory { "directory" } else { "database" },
-                path.display()
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (path, metadata, directory);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1461,7 +1433,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_or_permissive_database_is_rejected() {
+    fn symlinked_database_is_rejected_and_permissive_database_is_repaired() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
         let root = isolated_root("unsafe");
@@ -1478,7 +1450,18 @@ mod tests {
         fs::remove_file(&database).expect("remove symlink");
         fs::write(&database, []).expect("database");
         fs::set_permissions(&database, fs::Permissions::from_mode(0o644)).expect("database mode");
-        assert!(MutationIntentStore::open_for_identity_storage_root(&root).is_err());
+        drop(
+            MutationIntentStore::open_for_identity_storage_root(&root)
+                .expect("permissive database is repaired"),
+        );
+        assert_eq!(
+            fs::metadata(&database)
+                .expect("database metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

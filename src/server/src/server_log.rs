@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -14,6 +14,15 @@ const LOG_RECORD_BYTES: usize = 16 * 1024;
 const LOG_CONTROL_ITEMS: usize = 8;
 const LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const LOG_BACKUP_FILES: usize = 3;
+
+pub(crate) fn prepare_log_path(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        crate::private_fs::ensure_private_parent_dir(parent)?;
+    }
+    repair_rotated_logs(path, LOG_BACKUP_FILES)?;
+    drop(crate::private_fs::open_private_append(path)?);
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ServerLogSeverity {
@@ -347,11 +356,14 @@ fn write_log_line(
     }
     if !files.contains_key(path) {
         if let Some(parent) = path.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
+            if crate::private_fs::ensure_private_dir(parent).is_err() {
                 return false;
             }
         }
-        let Ok(file) = OpenOptions::new().create(true).append(true).open(path) else {
+        if repair_rotated_logs(path, backup_files).is_err() {
+            return false;
+        }
+        let Ok(file) = crate::private_fs::open_private_append(path) else {
             return false;
         };
         let bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
@@ -396,11 +408,19 @@ fn rotate_logs(path: &Path, backup_files: usize) -> std::io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    match std::fs::rename(path, rotated_log_path(path, 1)) {
-        Ok(()) => Ok(()),
+    let rotated = rotated_log_path(path, 1);
+    match std::fs::rename(path, &rotated) {
+        Ok(()) => crate::private_fs::repair_private_file(&rotated),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn repair_rotated_logs(path: &Path, backup_files: usize) -> std::io::Result<()> {
+    for index in 1..=backup_files {
+        crate::private_fs::repair_private_file_if_exists(&rotated_log_path(path, index))?;
+    }
+    Ok(())
 }
 
 fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
@@ -683,6 +703,50 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove failure directory");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn writer_repairs_existing_active_and_rotated_modes_without_changing_content() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-log-permission-repair-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let path = root.join("omenchatd.log");
+        let rotated = rotated_log_path(&path, 1);
+        std::fs::write(&path, b"active-preserved\n").expect("active");
+        std::fs::write(&rotated, b"rotated-preserved\n").expect("rotated");
+        for retained in [&path, &rotated] {
+            std::fs::set_permissions(retained, std::fs::Permissions::from_mode(0o644))
+                .expect("permissive mode");
+        }
+        let mut files = BTreeMap::new();
+        assert!(write_log_line(&mut files, &path, "new record", 4096, 4));
+        flush_files(&mut files);
+        drop(files);
+
+        assert!(std::fs::read_to_string(&path)
+            .expect("active content")
+            .starts_with("active-preserved\n"));
+        assert_eq!(
+            std::fs::read_to_string(&rotated).expect("rotated content"),
+            "rotated-preserved\n"
+        );
+        for retained in [&path, &rotated] {
+            assert_eq!(
+                std::fs::metadata(retained)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     #[test]
     fn rotation_caps_backup_count_and_preserves_newest_log() {
         let root = std::env::temp_dir().join(format!(
@@ -717,6 +781,25 @@ mod tests {
             rotated_log_path(&path, 2),
         ] {
             assert!(std::fs::metadata(retained).expect("retained log").len() <= 128);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for retained in [
+                path.clone(),
+                rotated_log_path(&path, 1),
+                rotated_log_path(&path, 2),
+            ] {
+                assert_eq!(
+                    std::fs::metadata(retained)
+                        .expect("retained log metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
         }
 
         std::fs::remove_dir_all(root).expect("remove rotation root");

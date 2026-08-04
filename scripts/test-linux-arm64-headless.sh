@@ -22,12 +22,15 @@ cross test --locked \
   --target "$target"
 
 echo "== ARM64 headless omenchatd tests =="
-# These two parent tests directly re-exec the ARM test binary and therefore
-# bypass Cross's QEMU runner. Their child fixtures still compile, and the same
-# crash-boundary tests remain mandatory in the native host matrix.
+# These parent tests directly re-exec the ARM test binary and therefore bypass
+# Cross's QEMU runner. Their child fixtures still compile, and the same crash-
+# boundary and permissive-umask tests remain mandatory in the native host
+# matrix.
 cross test --locked --manifest-path src/server/Cargo.toml \
   --target "$target" \
   --no-default-features --features server-headless -- \
+  --skip config::tests::init_creates_complete_private_tree_under_permissive_subprocess_umask \
+  --skip store::tests::sqlite_main_wal_and_shm_are_private_under_permissive_subprocess_umask \
   --skip store::tests::process_kill_preserves_committed_event_and_rolls_back_in_flight_event \
   --skip upload::tests::process_kill_upload_recovery_is_conservative_at_every_commit_boundary
 

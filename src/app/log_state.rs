@@ -87,7 +87,7 @@ impl LogBuffer {
         retain_files: usize,
         load_recent_entries: usize,
     ) -> Self {
-        let _ = std::fs::create_dir_all(&logs_dir);
+        let _ = crate::private_fs::ensure_private_dir(&logs_dir);
         let policy = StructuredLogDiskPolicy::normalized(max_file_bytes, retain_files);
         let log_file = logs_dir.join("omenbrowser_rs.jsonl");
         let worker = StructuredLogWorker::start();

@@ -1690,6 +1690,9 @@ mod tests {
                     }
                 };
                 stream
+                    .set_nonblocking(false)
+                    .expect("set isolated RPC capture blocking");
+                stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("set RPC capture read timeout");
                 stream

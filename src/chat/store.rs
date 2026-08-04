@@ -144,9 +144,12 @@ pub(crate) const CHAT_HISTORY_SEARCH_READ_MAX_BYTES: usize = 64 * 1024 * 1024;
 impl SqliteChatStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::private_fs::ensure_private_parent_dir(parent)?;
         }
-        let connection = rusqlite::Connection::open(path)?;
+        if !crate::private_fs::repair_private_file_if_exists(path.as_ref())? {
+            drop(crate::private_fs::create_private_new(path.as_ref())?);
+        }
+        let connection = rusqlite::Connection::open(path.as_ref())?;
         let store = Self { connection };
         store.migrate()?;
         Ok(store)
@@ -158,8 +161,9 @@ impl SqliteChatStore {
     /// search. The connection is additionally placed in SQLite query-only mode
     /// so an accidentally called mutating store method fails closed.
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
+        crate::private_fs::repair_private_file(path.as_ref())?;
         let connection = rusqlite::Connection::open_with_flags(
-            path,
+            path.as_ref(),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .context("open existing OMENchat history read-only")?;

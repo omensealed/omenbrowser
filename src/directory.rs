@@ -333,7 +333,7 @@ struct DirectoryFile {
 impl DirectoryService {
     pub fn new(path: PathBuf) -> crate::error::AppResult<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::private_fs::ensure_private_parent_dir(parent)?;
             if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
                 return Err(AppError::Settings(format!(
                     "directory-store parent must be a directory: {}",
@@ -1424,7 +1424,7 @@ fn publish_directory_bytes(
             "directory-store path has no parent",
         )
     })?;
-    std::fs::create_dir_all(parent)?;
+    crate::private_fs::ensure_private_parent_dir(parent)?;
     if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
         return Err(AppError::Settings(format!(
             "directory-store parent must be a directory: {}",

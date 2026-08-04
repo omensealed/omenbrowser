@@ -794,6 +794,7 @@ impl MessageStore {
         peer_label: Option<&str>,
     ) -> AppResult<ConversationThread> {
         let raw = read_thread_file(path)?;
+        crate::private_fs::repair_private_file(path)?;
         match serde_json::from_slice::<ConversationThread>(&raw) {
             Ok(mut thread) => {
                 validate_thread(&thread)?;
@@ -1239,7 +1240,7 @@ fn validate_thread(thread: &ConversationThread) -> AppResult<()> {
 }
 
 fn ensure_real_directory(path: &Path) -> AppResult<()> {
-    std::fs::create_dir_all(path)?;
+    crate::private_fs::ensure_private_dir(path)?;
     if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
         return Err(AppError::Runtime(format!(
             "message storage root must be a directory and not a symbolic link: {}",
@@ -1458,6 +1459,7 @@ fn inventory_thread_files(root: &Path) -> AppResult<Vec<(PathBuf, u64)>> {
         {
             continue;
         }
+        crate::private_fs::repair_private_file(&path)?;
         let peer_key = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -1738,6 +1740,7 @@ fn prune_corrupt_backups(root: &Path) -> AppResult<()> {
         if !is_corrupt_backup_name(name) || !entry.file_type()?.is_file() {
             continue;
         }
+        crate::private_fs::repair_private_file(&entry.path())?;
         let bytes = entry.metadata()?.len();
         total_bytes = total_bytes.saturating_add(bytes);
         backups.push((name.to_owned(), entry.path(), bytes));

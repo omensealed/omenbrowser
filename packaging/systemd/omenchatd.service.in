@@ -10,6 +10,7 @@ ExecStart=__OMENCHATD_BIN__ run --home __OMENCHATD_HOME__
 Restart=on-failure
 RestartSec=10
 Environment=RUST_LOG=info
+UMask=0077
 
 [Install]
 WantedBy=default.target

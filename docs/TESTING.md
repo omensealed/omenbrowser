@@ -1316,6 +1316,26 @@ interoperability.
 
 ## omenchatd SQLite policy and event IDs
 
+The private-storage suite includes dedicated subprocesses launched with
+`umask 0000`; it never changes umask in the parallel test process. It proves a
+complete server tree is `0700`/`0600`, keeps a WAL connection open while
+checking main/WAL/SHM as `0600`, repairs permissive existing metadata without
+changing content, and leaves unrelated parents unchanged:
+
+```sh
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  init_creates_complete_private_tree_under_permissive_subprocess_umask
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  sqlite_main_wal_and_shm_are_private_under_permissive_subprocess_umask
+bash scripts/test-omenchatd-private-service.sh
+```
+
+Desktop `tests/app_paths.rs` and structured-log tests cover exact managed
+directory repair, source-tree/ancestor preservation, private active/rotated
+logs, and private migration markers. Unix mode assertions are platform-gated.
+
 The standalone store tests use only uniquely named databases under the system
 temporary directory. They verify persistent PRAGMAs directly and launch 12
 contending connections to prove that per-room event IDs remain unique and
@@ -4165,7 +4185,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-3` must report
+therefore exits with the expected signal status; current `0.9.7-4` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

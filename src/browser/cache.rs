@@ -51,7 +51,7 @@ struct CacheIndexEntry {
 
 impl PageCache {
     pub fn new(cache_dir: PathBuf) -> AppResult<Self> {
-        std::fs::create_dir_all(&cache_dir)?;
+        crate::private_fs::ensure_private_dir(&cache_dir)?;
         let index = load_or_rebuild_index(&cache_dir)?;
         let cache = Self {
             cache_dir,

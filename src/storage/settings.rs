@@ -823,7 +823,7 @@ fn save_settings_payload(
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Settings("settings path has no parent directory".into()))?;
-    std::fs::create_dir_all(parent)?;
+    crate::private_fs::ensure_private_parent_dir(parent)?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_file() => {
             return Err(AppError::Settings(format!(
