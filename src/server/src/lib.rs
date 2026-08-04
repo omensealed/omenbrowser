@@ -6,6 +6,7 @@ pub mod config;
 pub mod database_recovery;
 pub mod error;
 pub mod live;
+mod private_fs;
 pub mod protocol;
 #[cfg(feature = "live-reticulum")]
 pub mod reticulum_live;

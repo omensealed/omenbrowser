@@ -260,7 +260,7 @@ fn publish_form_state_bytes_with(
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(ErrorKind::InvalidInput, "form-state path has no parent")
     })?;
-    std::fs::create_dir_all(parent)?;
+    crate::private_fs::ensure_private_parent_dir(parent)?;
     if !std::fs::symlink_metadata(parent)?.file_type().is_dir() {
         return Err(AppError::Settings(format!(
             "browser form-state parent must be a directory: {}",

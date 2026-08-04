@@ -246,7 +246,7 @@ impl PluginRegistry {
         builtins: Vec<PluginManifest>,
         enabled_plugin_ids: &[String],
     ) -> AppResult<PluginDiscovery> {
-        std::fs::create_dir_all(&self.plugins_dir)?;
+        crate::private_fs::ensure_private_dir(&self.plugins_dir)?;
         let mut registry = self.load_registry()?;
         let mut registry_changed = false;
         let enabled = enabled_plugin_ids
@@ -364,12 +364,13 @@ impl PluginRegistry {
             PLUGIN_REGISTRY_MAX_BYTES,
             "plugin registry",
         )?;
+        crate::private_fs::repair_private_file(&self.registry_path)?;
         serde_json::from_slice(&raw)
             .map_err(|error| AppError::Settings(format!("plugin registry error: {error}")))
     }
 
     pub fn save_registry(&self, registry: &PluginRegistryFile) -> AppResult<()> {
-        std::fs::create_dir_all(&self.plugins_dir)?;
+        crate::private_fs::ensure_private_dir(&self.plugins_dir)?;
         let payload = serde_json::to_string_pretty(registry)
             .map_err(|error| AppError::Settings(format!("plugin registry error: {error}")))?;
         if (payload.len() as u64).saturating_add(1) > PLUGIN_REGISTRY_MAX_BYTES {
@@ -406,11 +407,11 @@ impl PluginRegistry {
         let target = self.plugins_dir.join(&manifest.plugin_id);
         ensure_plugin_target_absent(&target, &manifest.plugin_id)?;
         let mut registry = self.load_registry()?;
-        std::fs::create_dir_all(&self.plugins_dir)?;
+        crate::private_fs::ensure_private_dir(&self.plugins_dir)?;
         let staging = self
             .plugins_dir
             .join(plugin_install_staging_name(&manifest.plugin_id));
-        std::fs::create_dir(&staging)?;
+        crate::private_fs::ensure_private_dir(&staging)?;
         let mut budget = PluginInstallBudget::default();
         if let Err(error) = copy_plugin_tree(source, &staging, 0, &mut budget) {
             let _ = std::fs::remove_dir_all(&staging);
@@ -849,7 +850,7 @@ fn copy_plugin_tree(
                     "plugin install exceeds the {PLUGIN_INSTALL_MAX_DEPTH} directory depth limit"
                 )));
             }
-            std::fs::create_dir(&destination)?;
+            crate::private_fs::ensure_private_dir(&destination)?;
             copy_plugin_tree(&entry.path(), &destination, depth + 1, budget)?;
         } else if file_type.is_file() {
             let metadata = entry.metadata()?;

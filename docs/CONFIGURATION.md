@@ -17,6 +17,12 @@ omenbrowser_rs --desktop --app-root /tmp/omenbrowser-rs-test
 Each root owns identities, Reticulum config/storage, messages, caches, plugin
 state, and pane layout.
 
+On Unix, the exact managed directory tree is created and repaired as `0700`,
+and known sensitive managed files are `0600`; see
+[`PRIVATE_STORAGE.md`](PRIVATE_STORAGE.md). This metadata-only policy does not
+recursively chmod import/export trees or arbitrary custom ancestors. Other
+platforms retain their native filesystem semantics.
+
 When the native OMENchat client is compiled, desktop startup owns one random
 16-byte client-instance identifier per active identity-scoped storage root at
 `omenchat/client-instance-id`. It is created through a same-directory,

@@ -381,7 +381,7 @@ fn identity_upload_lock(identity_hash: &[u8]) -> Arc<Mutex<()>> {
 }
 
 fn ensure_safe_identity_dir(cache_root: &Path, identity_dir: &Path) -> ServerResult<()> {
-    std::fs::create_dir_all(cache_root)?;
+    crate::private_fs::ensure_private_dir(cache_root)?;
     if identity_dir.parent() != Some(cache_root) {
         return Err(ServerError::Message(
             "upload identity directory escapes configured cache root".into(),
@@ -396,7 +396,7 @@ fn ensure_safe_identity_dir(cache_root: &Path, identity_dir: &Path) -> ServerRes
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(identity_dir)?;
+            crate::private_fs::ensure_private_dir(identity_dir)?;
         }
         Err(error) => return Err(error.into()),
     }
@@ -1257,6 +1257,22 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::metadata(&root)
+                .expect("upload root metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(stored.path.parent().expect("identity upload directory"))
+                .expect("identity upload metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

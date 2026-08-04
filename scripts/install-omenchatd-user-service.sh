@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_or_package_root="$(cd -- "$script_dir/.." && pwd)"
@@ -139,7 +140,16 @@ fi
 
 omenchatd_bin_dir="$(cd -- "$(dirname -- "$omenchatd_bin")" && pwd)"
 omenchatd_bin="$omenchatd_bin_dir/$(basename -- "$omenchatd_bin")"
+if [[ -L "$omenchatd_home" ]]; then
+  echo "omenchatd home must not be a symbolic link" >&2
+  exit 2
+fi
 mkdir -p "$omenchatd_home"
+if [[ ! -d "$omenchatd_home" || -L "$omenchatd_home" ]]; then
+  echo "omenchatd home must be a real directory" >&2
+  exit 2
+fi
+chmod 0700 "$omenchatd_home"
 omenchatd_home="$(cd -- "$omenchatd_home" && pwd)"
 
 working_dir="$(dirname -- "$omenchatd_bin")"

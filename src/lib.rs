@@ -33,6 +33,7 @@ pub mod micron;
 mod msgpack;
 pub mod operations;
 pub mod plugins;
+mod private_fs;
 pub mod product_identity;
 mod protocol_limits;
 pub mod runtime;

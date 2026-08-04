@@ -15,6 +15,11 @@ The archive includes:
 - checksums;
 - systemd user-service template.
 
+The user-service template includes `UMask=0077`. Its installer creates or
+repairs only the selected `OMENCHATD_HOME` as `0700`, leaves its parent
+unchanged, and preserves the home on uninstall. The server binary also enforces
+private managed modes when run outside systemd.
+
 ## Local `.deb`
 
 ```bash

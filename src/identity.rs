@@ -73,7 +73,7 @@ impl IdentityManager {
     ) -> AppResult<IdentityProfile> {
         let raw = provider.create_identity_material(label)?;
         validate_identity_material(&raw)?;
-        ensure_real_directory(&self.identities_dir)?;
+        crate::private_fs::ensure_private_dir(&self.identities_dir)?;
         let default_path = self.identities_dir.join("default_identity");
         let identity_path = if default_path.exists() {
             self.backup_if_exists(&default_path)?;
@@ -115,7 +115,7 @@ impl IdentityManager {
         label: Option<&str>,
     ) -> AppResult<IdentityProfile> {
         let raw = read_identity_material(&source_path)?;
-        ensure_real_directory(&self.identities_dir)?;
+        crate::private_fs::ensure_private_dir(&self.identities_dir)?;
         let target_path = self.identities_dir.join(
             source_path
                 .file_name()
@@ -147,7 +147,11 @@ impl IdentityManager {
         let raw = read_identity_material(&profile.path)?;
         let managed_backup_dir = target_dir.is_none();
         let target_dir = target_dir.unwrap_or_else(|| self.backups_dir.clone());
-        ensure_real_directory(&target_dir)?;
+        if managed_backup_dir {
+            crate::private_fs::ensure_private_dir(&target_dir)?;
+        } else {
+            ensure_real_directory(&target_dir)?;
+        }
         let target_path = unique_backup_path(&target_dir);
         publish_identity_material(&target_path, &raw, PublishMode::CreateNew)?;
         if managed_backup_dir {
@@ -184,6 +188,7 @@ impl IdentityManager {
                     "managed identity discovery exceeds the {IDENTITY_DISCOVERY_MAX_PROFILES} profile limit"
                 )));
             }
+            crate::private_fs::repair_private_file(&path)?;
             let raw = read_identity_material(&path)?;
             profiles.push(IdentityProfile {
                 label: path_label(&path),
@@ -221,7 +226,7 @@ impl IdentityManager {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        ensure_real_directory(&self.backups_dir)?;
+        crate::private_fs::ensure_private_dir(&self.backups_dir)?;
         let backup_path = unique_backup_path(&self.backups_dir);
         publish_identity_material(&backup_path, &raw, PublishMode::CreateNew)?;
         prune_managed_backups(&self.backups_dir)?;
@@ -389,6 +394,7 @@ fn prune_managed_backups(directory: &Path) -> AppResult<()> {
         if !is_managed_backup_name(name) || !entry.file_type()?.is_file() {
             continue;
         }
+        crate::private_fs::repair_private_file(&entry.path())?;
         let bytes = entry.metadata()?.len();
         total_bytes = total_bytes.saturating_add(bytes);
         backups.push((name.to_owned(), entry.path(), bytes));

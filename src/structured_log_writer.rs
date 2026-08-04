@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    fs::{File, OpenOptions},
+    fs::File,
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -402,6 +402,10 @@ pub fn append_structured_log_entry(
         stats.unsafe_paths_refused = 1;
         return stats;
     }
+    if crate::private_fs::repair_private_file_if_exists(active_path).is_err() {
+        stats.unsafe_paths_refused = 1;
+        return stats;
+    }
 
     let Some(encoded) = encode_entry(entry, policy.max_file_bytes as usize) else {
         stats.write_failures = 1;
@@ -446,7 +450,7 @@ fn secure_parent(path: &Path) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    if !parent.exists() && std::fs::create_dir_all(parent).is_err() {
+    if crate::private_fs::ensure_private_dir(parent).is_err() {
         return false;
     }
     parent
@@ -462,7 +466,7 @@ fn regular_or_missing(path: &Path) -> bool {
 }
 
 fn open_append(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+    crate::private_fs::open_private_append(path)
 }
 
 fn encode_entry(entry: &LogEntry, byte_limit: usize) -> Option<Vec<u8>> {
@@ -552,6 +556,10 @@ fn prune_rotated_logs(
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
+        if crate::private_fs::repair_private_file(&entry.path()).is_err() {
+            stats.unsafe_paths_refused += 1;
+            continue;
+        }
         stats.matching_rotated_files += 1;
         rotated.push((metadata.modified().unwrap_or(UNIX_EPOCH), entry.path()));
     }
@@ -587,6 +595,7 @@ fn merge_stats(target: &mut StructuredLogDiskStats, other: StructuredLogDiskStat
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -663,8 +672,31 @@ mod tests {
         assert!(rotated.iter().all(|entry| entry
             .metadata()
             .is_ok_and(|metadata| metadata.len() <= policy.max_file_bytes)));
-        let persisted = std::fs::read_to_string(active).expect("active log");
+        let persisted = std::fs::read_to_string(&active).expect("active log");
         assert!(persisted.contains("...<truncated>"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&active)
+                    .expect("active metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            for entry in rotated {
+                assert_eq!(
+                    entry
+                        .metadata()
+                        .expect("rotated metadata")
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -683,6 +715,51 @@ mod tests {
         );
         assert!(stats.directory_scan_truncated);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_repairs_existing_active_and_rotated_modes_without_changing_content() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_dir("permission-repair");
+        let active = root.join("omenbrowser_rs.jsonl");
+        let rotated = root.join("omenbrowser_rs-1.jsonl");
+        std::fs::write(&active, b"active-preserved\n").expect("active");
+        std::fs::write(&rotated, b"rotated-preserved\n").expect("rotated");
+        for path in [&active, &rotated] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))
+                .expect("permissive mode");
+        }
+
+        let repair =
+            enforce_structured_log_retention(&active, StructuredLogDiskPolicy::normalized(4096, 4));
+        assert_eq!(repair.unsafe_paths_refused, 0);
+        let stats = append_structured_log_entry(
+            &active,
+            &entry(2, "new record"),
+            StructuredLogDiskPolicy::normalized(4096, 4),
+        );
+
+        assert_eq!(stats.write_failures, 0);
+        assert!(std::fs::read_to_string(&active)
+            .expect("active content")
+            .starts_with("active-preserved\n"));
+        assert_eq!(
+            std::fs::read_to_string(&rotated).expect("rotated content"),
+            "rotated-preserved\n"
+        );
+        for path in [&active, &rotated] {
+            assert_eq!(
+                std::fs::metadata(path)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[cfg(unix)]

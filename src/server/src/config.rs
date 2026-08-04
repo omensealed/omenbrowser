@@ -499,7 +499,7 @@ max_bytes_per_room = {history_retention_max_bytes_per_room}
         F: FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
     {
         let root = self.root_dir();
-        std::fs::create_dir_all(&root)?;
+        crate::private_fs::ensure_private_dir(&root)?;
         if self.config_path.exists() {
             let previous = std::fs::read(&self.config_path)?;
             let previous_text = std::str::from_utf8(&previous).map_err(|error| {
@@ -717,17 +717,20 @@ fn toml_string(value: &str) -> String {
 }
 
 pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
-    std::fs::create_dir_all(config.root_dir())?;
+    crate::private_fs::ensure_private_dir(&config.root_dir())?;
     if let Some(parent) = config.identity_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_sensitive_parent(parent, &config.root_dir())?;
     }
     if let Some(parent) = config.database_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_sensitive_parent(parent, &config.root_dir())?;
     }
-    std::fs::create_dir_all(&config.reticulum_config_path)?;
-    std::fs::create_dir_all(config.nomadnet_pages_path())?;
+    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
+    crate::private_fs::ensure_private_dir(&config.reticulum_storage_path())?;
+    crate::private_fs::ensure_private_dir(&config.nomadnet_pages_path())?;
+    crate::private_fs::ensure_private_dir(&config.upload_cache_path())?;
 
     write_if_missing(&config.config_path, config.render_toml().as_bytes())?;
+    crate::private_fs::repair_private_file_if_exists(&config_backup_path(&config.config_path))?;
     write_if_missing(
         &config.reticulum_config_file(),
         render_reticulum_base_config(config).as_bytes(),
@@ -735,7 +738,20 @@ pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
     enforce_private_file(&config.reticulum_config_file())?;
     touch_log_file(config)?;
     write_identity_if_missing(&config.identity_path)?;
+    crate::private_fs::repair_private_file_if_exists(
+        &config.identity_path.with_extension("placeholder.bak"),
+    )?;
+    crate::private_fs::repair_private_file_if_exists(
+        &config
+            .reticulum_config_file()
+            .with_extension("before-interface-edit.bak"),
+    )?;
 
+    if !crate::private_fs::repair_private_file_if_exists(&config.database_path)? {
+        drop(crate::private_fs::create_private_new(
+            &config.database_path,
+        )?);
+    }
     let connection = rusqlite::Connection::open(&config.database_path)?;
     connection.execute_batch(include_str!("../migrations/001_init.sql"))?;
     connection.execute(
@@ -752,12 +768,23 @@ pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
 fn touch_log_file(config: &ServerConfig) -> ServerResult<()> {
     let path = config.log_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_sensitive_parent(parent, &config.root_dir())?;
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    crate::server_log::prepare_log_path(&path)?;
+    Ok(())
+}
+
+pub(crate) fn ensure_sensitive_parent(
+    parent: &std::path::Path,
+    managed_root: &std::path::Path,
+) -> ServerResult<()> {
+    if parent.starts_with(managed_root) {
+        crate::private_fs::ensure_private_dir(parent)?;
+        return Ok(());
+    }
+    crate::private_fs::ensure_private_parent_dir(parent).map_err(|_| {
+        ServerError::Message("configured private-state parent is not a real directory".into())
+    })?;
     Ok(())
 }
 
@@ -852,11 +879,15 @@ pub fn ensure_nomadnet_portal(
 ) -> ServerResult<PathBuf> {
     let path = config.nomadnet_index_page_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::private_fs::ensure_private_dir(parent)?;
     }
     if !path.exists() {
         let page = render_nomadnet_portal(config, omenchat_destination_hash)?;
-        std::fs::write(&path, page)?;
+        let mut file = crate::private_fs::create_private_new(&path)?;
+        use std::io::Write;
+        file.write_all(page.as_bytes())?;
+    } else {
+        crate::private_fs::repair_private_file(&path)?;
     }
     Ok(path)
 }
@@ -935,7 +966,7 @@ pub fn write_reticulum_tcp_server_config(
     config: &ServerConfig,
     tcp_server: &TcpServerOverride,
 ) -> ServerResult<()> {
-    std::fs::create_dir_all(&config.reticulum_config_path)?;
+    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let rendered = render_reticulum_tcp_server_config(config, tcp_server);
     write_private_atomic(&config_path, rendered.as_bytes())?;
@@ -946,7 +977,7 @@ pub fn write_reticulum_tcp_client_config(
     config: &ServerConfig,
     tcp_client: &TcpClientOverride,
 ) -> ServerResult<()> {
-    std::fs::create_dir_all(&config.reticulum_config_path)?;
+    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let rendered = render_reticulum_tcp_client_config(config, tcp_client);
     write_private_atomic(&config_path, rendered.as_bytes())?;
@@ -958,7 +989,7 @@ pub fn add_reticulum_tcp_client_config(
     tcp_client: &TcpClientOverride,
 ) -> ServerResult<String> {
     validate_tcp_client_override(tcp_client)?;
-    std::fs::create_dir_all(&config.reticulum_config_path)?;
+    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let current = read_reticulum_config_bounded(&config_path)?;
     let blocks = reticulum_interface_blocks(&current);
@@ -1510,18 +1541,17 @@ fn render_destination_status(_config: &ServerConfig) -> String {
     "destination: unavailable (rebuild with --features live-reticulum)\n".into()
 }
 
-fn write_if_missing(path: &PathBuf, bytes: &[u8]) -> ServerResult<()> {
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()> {
+    match crate::private_fs::create_private_new(path) {
         Ok(mut file) => {
             use std::io::Write;
             file.write_all(bytes)?;
             Ok(())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            crate::private_fs::repair_private_file(path)?;
+            Ok(())
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -1550,29 +1580,25 @@ fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()
 }
 
 pub(crate) fn enforce_private_file(path: &std::path::Path) -> ServerResult<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+    crate::private_fs::repair_private_file(path)?;
     Ok(())
 }
 
 #[cfg(all(feature = "live-rns-net", any()))]
-fn write_identity_if_missing(path: &PathBuf) -> ServerResult<()> {
+fn write_identity_if_missing(path: &std::path::Path) -> ServerResult<()> {
     use crate::error::ServerError;
 
     if path.exists() {
         let existing = std::fs::read(path)?;
         if existing.len() == 64 {
+            enforce_private_file(path)?;
             return Ok(());
         }
         if existing == PLACEHOLDER_IDENTITY {
             let backup_path = path.with_extension("placeholder.bak");
             if !backup_path.exists() {
                 std::fs::copy(path, &backup_path)?;
+                enforce_private_file(&backup_path)?;
             }
         } else {
             return Err(ServerError::Message(format!(
@@ -1585,11 +1611,12 @@ fn write_identity_if_missing(path: &PathBuf) -> ServerResult<()> {
 
     let identity = rns_crypto::identity::Identity::new(&mut rns_crypto::OsRng);
     rns_net::storage::save_identity(&identity, path)?;
+    enforce_private_file(path)?;
     Ok(())
 }
 
 #[cfg(not(all(feature = "live-rns-net", any())))]
-fn write_identity_if_missing(path: &PathBuf) -> ServerResult<()> {
+fn write_identity_if_missing(path: &std::path::Path) -> ServerResult<()> {
     write_if_missing(path, PLACEHOLDER_IDENTITY)
 }
 
@@ -1601,6 +1628,7 @@ mod tests {
 
     const FIXTURE_OMENCHAT_HASH: &str = "00112233445566778899aabbccddeeff";
     const REPLACEMENT_OMENCHAT_HASH: &str = "ffffffffffffffffffffffffffffffff";
+    const PRIVATE_UMASK_INIT_CHILD: &str = "OMENCHATD_PRIVATE_UMASK_INIT_CHILD";
 
     fn temp_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1667,6 +1695,192 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_repairs_owned_modes_without_changing_private_contents_or_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = temp_root("private-modes-parent");
+        std::fs::create_dir_all(&parent).expect("parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("parent mode");
+        let root = parent.join("managed");
+        let config = ServerConfig::for_root(root.clone());
+        init_files(&config).expect("initial init");
+        config.save().expect("create config backup");
+        let identity_backup = config.identity_path.with_extension("placeholder.bak");
+        std::fs::write(&identity_backup, PLACEHOLDER_IDENTITY).expect("identity backup");
+        let reticulum_backup = config
+            .reticulum_config_file()
+            .with_extension("before-interface-edit.bak");
+        std::fs::write(&reticulum_backup, b"reticulum-backup").expect("Reticulum backup");
+        let rotated_log = config.log_path().with_file_name("omenchatd.log.1");
+        std::fs::write(&rotated_log, b"rotated-log\n").expect("rotated log");
+        let config_bytes = std::fs::read(&config.config_path).expect("config bytes");
+        let identity_bytes = std::fs::read(&config.identity_path).expect("identity bytes");
+        let backup_paths = [
+            config_backup_path(&config.config_path),
+            identity_backup,
+            reticulum_backup,
+            rotated_log,
+        ];
+        let backup_bytes = backup_paths
+            .iter()
+            .map(|path| std::fs::read(path).expect("backup bytes"))
+            .collect::<Vec<_>>();
+
+        for directory in [
+            config.root_dir(),
+            config.reticulum_config_path.clone(),
+            config.reticulum_storage_path(),
+            config.nomadnet_pages_path(),
+            config.upload_cache_path(),
+        ] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))
+                .expect("permissive directory");
+        }
+        for file in [
+            config.config_path.clone(),
+            config.identity_path.clone(),
+            config.reticulum_config_file(),
+            config.database_path.clone(),
+            config.log_path(),
+        ]
+        .into_iter()
+        .chain(backup_paths.iter().cloned())
+        {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644))
+                .expect("permissive file");
+        }
+
+        init_files(&config).expect("repair init");
+
+        for directory in [
+            config.root_dir(),
+            config.reticulum_config_path.clone(),
+            config.reticulum_storage_path(),
+            config.nomadnet_pages_path(),
+            config.upload_cache_path(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory)
+                    .expect("directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        for file in [
+            config.config_path.clone(),
+            config.identity_path.clone(),
+            config.reticulum_config_file(),
+            config.database_path.clone(),
+            config.log_path(),
+        ]
+        .into_iter()
+        .chain(backup_paths.iter().cloned())
+        {
+            assert_eq!(
+                std::fs::metadata(file)
+                    .expect("file metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            std::fs::read(&config.config_path).expect("config"),
+            config_bytes
+        );
+        assert_eq!(
+            std::fs::read(&config.identity_path).expect("identity"),
+            identity_bytes
+        );
+        for (path, expected) in backup_paths.iter().zip(backup_bytes) {
+            assert_eq!(std::fs::read(path).expect("backup"), expected);
+        }
+        assert_eq!(
+            std::fs::metadata(&parent)
+                .expect("parent metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        std::fs::remove_dir_all(parent).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_creates_complete_private_tree_under_permissive_subprocess_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os(PRIVATE_UMASK_INIT_CHILD).is_none() {
+            let executable = std::env::current_exe().expect("test executable");
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("umask 0000; exec \"$1\" --exact config::tests::init_creates_complete_private_tree_under_permissive_subprocess_umask --nocapture")
+                .arg("omenchatd-private-init")
+                .arg(executable)
+                .env(PRIVATE_UMASK_INIT_CHILD, "1")
+                .status()
+                .expect("private-init subprocess");
+            assert!(status.success(), "private-init subprocess failed");
+            return;
+        }
+
+        let parent = temp_root("permissive-umask-parent");
+        std::fs::create_dir_all(&parent).expect("parent");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+            .expect("parent mode");
+        let config = ServerConfig::for_root(parent.join("managed"));
+        init_files(&config).expect("init");
+
+        for directory in [
+            config.root_dir(),
+            config.reticulum_config_path.clone(),
+            config.reticulum_storage_path(),
+            config.nomadnet_pages_path(),
+            config.upload_cache_path(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory)
+                    .expect("directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        for file in [
+            config.config_path.clone(),
+            config.identity_path.clone(),
+            config.reticulum_config_file(),
+            config.database_path.clone(),
+            config.log_path(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(file)
+                    .expect("file metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(&parent)
+                .expect("parent metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        std::fs::remove_dir_all(parent).expect("cleanup");
     }
 
     #[cfg(unix)]
@@ -2312,6 +2526,26 @@ mod tests {
         );
         assert!(page.contains("Stored Portal"));
         assert!(page.contains(&format!("omenchat://{FIXTURE_OMENCHAT_HASH}")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path.parent().expect("page directory"))
+                    .expect("page directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("page metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
 
         std::fs::write(&path, "custom operator page").expect("custom page");
         let same_path = ensure_nomadnet_portal(&config, REPLACEMENT_OMENCHAT_HASH).expect("ensure");
@@ -2320,6 +2554,18 @@ mod tests {
             std::fs::read_to_string(&path).expect("read custom"),
             "custom operator page"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("repaired page metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

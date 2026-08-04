@@ -564,6 +564,36 @@ fn thread_publication_is_private_and_thread_symlinks_are_not_followed() {
 
 #[cfg(unix)]
 #[test]
+fn existing_thread_mode_is_repaired_without_changing_message_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_dir("existing-thread-permission-repair");
+    let store = MessageStore::new(root.clone()).expect("store");
+    store
+        .append(message("private-peer", 1.0, false))
+        .expect("append thread");
+    let path = root.join("private-peer.json");
+    let bytes = std::fs::read(&path).expect("thread bytes");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+        .expect("permissive thread mode");
+
+    let loaded = store.get_thread("private-peer").expect("load thread");
+
+    assert_eq!(loaded.messages.len(), 1);
+    assert_eq!(std::fs::read(&path).expect("thread bytes"), bytes);
+    assert_eq!(
+        std::fs::metadata(&path)
+            .expect("thread metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[cfg(unix)]
+#[test]
 fn existing_single_component_nonportable_filename_remains_update_compatible() {
     let root = temp_dir("legacy-nonportable-filename");
     let legacy_path = root.join("legacy:peer.json");

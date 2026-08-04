@@ -2634,7 +2634,7 @@ fn load_or_create_identity(config: &ServerConfig) -> ServerResult<PrivateIdentit
 
     let identity = PrivateIdentity::new_from_rand(OsRng);
     if let Some(parent) = config.identity_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::config::ensure_sensitive_parent(parent, &config.root_dir())?;
     }
     crate::config::replace_private_file(&config.identity_path, &identity.to_private_key_bytes())?;
     Ok(identity)

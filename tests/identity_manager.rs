@@ -421,6 +421,38 @@ fn identity_publication_is_private_and_refuses_linked_storage_roots() {
         .is_symlink());
 }
 
+#[cfg(unix)]
+#[test]
+fn managed_identity_discovery_repairs_mode_without_changing_identity_or_hash() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_dir("existing-permission-repair");
+    let manager = IdentityManager::new(root.join("identities"), root.join("backups"));
+    let profile = manager
+        .create_managed_identity("Existing Identity")
+        .expect("identity");
+    let bytes = std::fs::read(&profile.path).expect("identity bytes");
+    std::fs::set_permissions(&profile.path, std::fs::Permissions::from_mode(0o644))
+        .expect("permissive identity mode");
+
+    let discovered = manager
+        .list_managed_identities()
+        .expect("discover identity");
+
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].hash_hex, profile.hash_hex);
+    assert_eq!(std::fs::read(&profile.path).expect("identity bytes"), bytes);
+    assert_eq!(
+        std::fs::metadata(&profile.path)
+            .expect("identity metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    std::fs::remove_dir_all(root).expect("cleanup");
+}
+
 struct FixedIdentityMaterialProvider;
 
 impl IdentityMaterialProvider for FixedIdentityMaterialProvider {

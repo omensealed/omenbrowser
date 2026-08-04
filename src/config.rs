@@ -83,7 +83,16 @@ impl AppPaths {
             &self.logs_dir,
             &self.diagnostics_dir,
         ] {
-            std::fs::create_dir_all(dir)?;
+            crate::private_fs::ensure_private_dir(dir)?;
+        }
+        for file in [
+            &self.settings_file,
+            &self.directory_file,
+            &self.interfaces_file,
+            &self.gateways_file,
+            &self.browser_form_state_file,
+        ] {
+            crate::private_fs::repair_private_file_if_exists(file)?;
         }
         Ok(())
     }
@@ -156,13 +165,15 @@ impl AppPaths {
             &mut migration,
         )?;
 
-        std::fs::create_dir_all(&legacy.identity_storage_dir)?;
-        std::fs::write(
-            marker,
+        ensure_migration_marker_parent(&legacy.identity_storage_dir)?;
+        let mut marker_file = crate::private_fs::create_private_new(&marker)?;
+        use std::io::Write;
+        marker_file.write_all(
             format!(
                 "app-level storage adopted into {}\n",
                 self.identity_storage_root().display()
-            ),
+            )
+            .as_bytes(),
         )?;
         Ok(Some(migration))
     }
@@ -187,7 +198,7 @@ fn copy_dir_missing(
         return Ok(());
     }
     if !target.exists() {
-        std::fs::create_dir_all(target)?;
+        crate::private_fs::ensure_private_dir(target)?;
         migration.created_dirs += 1;
     }
     for entry in std::fs::read_dir(source)? {
@@ -216,11 +227,25 @@ fn copy_file_missing(
         return Ok(());
     }
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::private_fs::ensure_private_dir(parent)?;
     }
     std::fs::copy(source, target)?;
     migration.copied_files += 1;
     Ok(())
+}
+
+fn ensure_migration_marker_parent(path: &Path) -> AppResult<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(AppError::Settings(
+            "legacy migration marker parent is not a real directory".into(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::private_fs::ensure_private_dir(path)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn identity_storage_key(identity_path: &std::path::Path, hash_hex: Option<&str>) -> String {
