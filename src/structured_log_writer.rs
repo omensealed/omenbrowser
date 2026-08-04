@@ -595,6 +595,7 @@ fn merge_stats(target: &mut StructuredLogDiskStats, other: StructuredLogDiskStat
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::fs::OpenOptions;
     use std::sync::atomic::{AtomicU64, Ordering};
 
