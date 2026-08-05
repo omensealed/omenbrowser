@@ -6,6 +6,7 @@ pub mod config;
 pub mod database_recovery;
 pub mod error;
 pub mod live;
+mod path_policy;
 mod private_fs;
 pub mod protocol;
 #[cfg(feature = "live-reticulum")]
@@ -14,6 +15,7 @@ pub mod reticulum_live;
 mod runtime_policy;
 pub mod server_log;
 pub mod session;
+mod sqlite;
 pub mod store;
 pub mod transport;
 #[cfg(feature = "tui")]
@@ -340,14 +342,14 @@ impl Omenchatd {
                 }
             }
             CliCommand::Tui(options) => {
-                let config = config_from_options(&options)?;
                 #[cfg(feature = "tui")]
                 {
+                    let config = config_from_options(&options)?;
                     tui::run_admin_console(config)
                 }
                 #[cfg(not(feature = "tui"))]
                 {
-                    let _ = config;
+                    let _ = options;
                     Err(crate::error::ServerError::Message(
                         "omenchatd tui is unavailable in this headless build; rebuild with --features server-full or tui".into(),
                     ))

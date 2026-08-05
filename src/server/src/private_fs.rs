@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
@@ -54,18 +54,28 @@ pub(crate) fn ensure_private_parent_dir(path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn repair_private_file(path: &Path) -> io::Result<()> {
-    require_regular_file(&std::fs::symlink_metadata(path)?)?;
-    set_mode(path, PRIVATE_FILE_MODE)
+    drop(open_existing_private(path, false, false)?);
+    Ok(())
 }
 
 pub(crate) fn repair_private_file_if_exists(path: &Path) -> io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             require_regular_file(&metadata)?;
-            set_mode(path, PRIVATE_FILE_MODE)?;
+            drop(open_existing_private_with_metadata(
+                path, &metadata, false, false,
+            )?);
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn validate_private_target_if_exists(path: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => require_regular_file(&metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
 }
@@ -79,19 +89,20 @@ pub(crate) fn create_private_new(path: &Path) -> io::Result<File> {
         options.mode(PRIVATE_FILE_MODE);
     }
     let file = options.open(path)?;
-    repair_private_file(path)?;
+    protect_created_file(path, &file)?;
     Ok(file)
 }
 
 pub(crate) fn open_private_append(path: &Path) -> io::Result<File> {
-    if repair_private_file_if_exists(path)? {
-        return OpenOptions::new().append(true).open(path);
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => return open_existing_private_with_metadata(path, &metadata, false, true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     match create_private_append_new(path) {
         Ok(file) => Ok(file),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            repair_private_file(path)?;
-            OpenOptions::new().append(true).open(path)
+            open_existing_private(path, false, true)
         }
         Err(error) => Err(error),
     }
@@ -106,8 +117,76 @@ fn create_private_append_new(path: &Path) -> io::Result<File> {
         options.mode(PRIVATE_FILE_MODE);
     }
     let file = options.open(path)?;
-    repair_private_file(path)?;
+    protect_created_file(path, &file)?;
     Ok(file)
+}
+
+pub(crate) fn read_private_bounded(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut file = open_existing_private(path, false, false)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "private file exceeds configured byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn open_existing_private(path: &Path, write: bool, append: bool) -> io::Result<File> {
+    let expected = std::fs::symlink_metadata(path)?;
+    open_existing_private_with_metadata(path, &expected, write, append)
+}
+
+fn open_existing_private_with_metadata(
+    path: &Path,
+    expected: &std::fs::Metadata,
+    write: bool,
+    append: bool,
+) -> io::Result<File> {
+    require_regular_file(expected)?;
+    let mut options = OpenOptions::new();
+    options.read(!append).write(write).append(append);
+    let file = options.open(path)?;
+    validate_opened_file(expected, &file.metadata()?)?;
+    set_file_mode(&file, PRIVATE_FILE_MODE)?;
+    validate_path_still_refers_to_file(path, &file)?;
+    Ok(file)
+}
+
+fn protect_created_file(path: &Path, file: &File) -> io::Result<()> {
+    require_regular_file(&file.metadata()?)?;
+    set_file_mode(file, PRIVATE_FILE_MODE)?;
+    validate_path_still_refers_to_file(path, file)
+}
+
+fn validate_path_still_refers_to_file(path: &Path, file: &File) -> io::Result<()> {
+    let path_metadata = std::fs::symlink_metadata(path)?;
+    require_regular_file(&path_metadata)?;
+    validate_opened_file(&path_metadata, &file.metadata()?)
+}
+
+fn validate_opened_file(
+    expected: &std::fs::Metadata,
+    opened: &std::fs::Metadata,
+) -> io::Result<()> {
+    require_regular_file(opened)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if expected.dev() != opened.dev() || expected.ino() != opened.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private file changed during validation",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = expected;
+    Ok(())
 }
 
 fn require_directory(metadata: &std::fs::Metadata) -> io::Result<()> {
@@ -134,6 +213,17 @@ fn require_regular_file(metadata: &std::fs::Metadata) -> io::Result<()> {
 fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(unix)]
+fn set_file_mode(file: &File, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode(_file: &File, _mode: u32) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -211,6 +301,33 @@ mod tests {
             io::ErrorKind::InvalidInput
         );
         assert_eq!(std::fs::read(target).expect("read"), b"untouched");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn detects_when_opened_file_is_not_the_prevalidated_inode() {
+        let root = root("inode-mismatch");
+        std::fs::create_dir_all(&root).expect("root");
+        let expected = root.join("expected");
+        let replacement = root.join("replacement");
+        std::fs::write(&expected, b"expected").expect("expected file");
+        std::fs::write(&replacement, b"replacement").expect("replacement file");
+
+        let expected_metadata = std::fs::symlink_metadata(&expected).expect("expected metadata");
+        let replacement_metadata =
+            std::fs::symlink_metadata(&replacement).expect("replacement metadata");
+        let error = validate_opened_file(&expected_metadata, &replacement_metadata)
+            .expect_err("different inode must be rejected");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            std::fs::read(&expected).expect("expected bytes"),
+            b"expected"
+        );
+        assert_eq!(
+            std::fs::read(&replacement).expect("replacement bytes"),
+            b"replacement"
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

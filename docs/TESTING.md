@@ -1332,6 +1332,29 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
 bash scripts/test-omenchatd-private-service.sh
 ```
 
+The v0.9.7-5 containment matrix additionally covers all three configured
+private paths with parent traversal, a config-file symlink before TOML parsing,
+an intermediate managed-directory symlink, a final selected-root symlink,
+clean relative managed paths, clean external paths, and a missing external
+ancestor. Rejections assert that an outside sentinel's bytes and mode are
+unchanged and that no partial identity, database, SQLite sidecar, Reticulum,
+log, upload, or page state appears. The centralized SQLite wrapper has a
+focused final-database-symlink test and the existing live WAL/SHM subprocess
+continues to prove journal behavior and owner-only modes.
+
+```sh
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  'config::tests::'
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  'path_policy::tests'
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  'sqlite::tests'
+bash scripts/verify-private-storage-policy.sh
+```
+
 Desktop `tests/app_paths.rs` and structured-log tests cover exact managed
 directory repair, source-tree/ancestor preservation, private active/rotated
 logs, and private migration markers. Unix mode assertions are platform-gated.
@@ -4185,7 +4208,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-4` must report
+therefore exits with the expected signal status; current `0.9.7-5` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

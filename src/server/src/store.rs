@@ -214,10 +214,7 @@ impl OmenchatStore {
 
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
         protect_existing_database(path.as_ref())?;
-        let connection = rusqlite::Connection::open_with_flags(
-            path.as_ref(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let connection = crate::sqlite::open_read_only(path.as_ref())?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(crate::error::ServerError::Message(format!(
@@ -229,10 +226,7 @@ impl OmenchatStore {
 
     pub fn open_existing_for_maintenance(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
         protect_existing_database(path.as_ref())?;
-        let connection = rusqlite::Connection::open_with_flags(
-            path.as_ref(),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
+        let connection = crate::sqlite::open_read_write(path.as_ref())?;
         connection.busy_timeout(Duration::ZERO)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != SCHEMA_VERSION {
@@ -262,7 +256,7 @@ impl OmenchatStore {
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
         prepare_database_path(path.as_ref())?;
-        let connection = rusqlite::Connection::open(path.as_ref())?;
+        let connection = crate::sqlite::open(path.as_ref())?;
         configure_connection(&connection, true, busy_timeout)?;
         let store = Self::from_connection(connection);
         store.migrate(backup_required.then_some(path.as_ref()))?;
@@ -1177,7 +1171,7 @@ impl OmenchatStore {
             .collect::<std::collections::BTreeSet<_>>();
         for upload in &tracked {
             let path = std::path::PathBuf::from(&upload.path);
-            if !path.starts_with(identity_dir) {
+            if path.parent() != Some(identity_dir) {
                 report.unsafe_paths.push(path);
             } else {
                 match std::fs::symlink_metadata(&path) {
@@ -1826,10 +1820,7 @@ fn create_migration_backup(
     drop(reservation);
 
     let backup_result = (|| -> ServerResult<()> {
-        let mut destination = rusqlite::Connection::open_with_flags(
-            &backup_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
+        let mut destination = crate::sqlite::open_read_write(&backup_path)?;
         let backup = rusqlite::backup::Backup::new(source, &mut destination)?;
         backup.run_to_completion(100, Duration::from_millis(10), None)?;
         drop(backup);

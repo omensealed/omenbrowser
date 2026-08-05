@@ -39,3 +39,38 @@ only the selected `OMENCHATD_HOME` as `0700` without changing its parent.
 Windows and other non-Unix platforms continue using their native filesystem
 semantics. This release does not claim POSIX mode enforcement or add a new ACL
 framework on those platforms.
+
+## Standalone-server containment boundary
+
+Before `omenchatd` parses an existing configuration, it establishes the selected
+server root and reads `config.toml` through a bounded, stable regular-file
+handle. A final config symlink or other non-regular object is rejected before
+any configured identity, database, Reticulum, upload, log, or page path is
+used. On Unix, the object device/inode is checked before and after the bounded
+read.
+
+Configured identity, database, and Reticulum paths may be clean managed paths
+or clean custom paths, but they may not contain a parent (`..`) component.
+Managed descendants are walked from the canonical selected root one normal
+component at a time. Existing symlinks and non-directories in that suffix are
+rejected, and missing components are created individually as `0700`.
+Containment is not authorized by a raw string or lexical-prefix check.
+
+Clean custom paths remain supported. An existing custom parent is required to
+be a real directory and its mode is not changed. `omenchatd` may create only a
+missing final dedicated parent when its immediate parent already exists; it
+does not recursively create or claim an external ancestor tree. Operators must
+therefore control custom parent trees and prevent untrusted replacement of path
+components. This release deliberately does not claim capability-style safety
+inside an externally writable ancestor.
+
+Server-owned SQLite source connections add SQLite `NOFOLLOW` while preserving
+their existing read-only, read-write, create, URI, mutex, WAL, timeout,
+transaction, migration, and backup modes. On Unix, only the already validated
+parent is resolved to its stable filesystem spelling before open; the final
+database component remains unresolved so `NOFOLLOW` still rejects a database
+symlink. This permits system-owned aliases such as macOS `/var` without
+weakening the final-file boundary. Sensitive-file reads and append opens
+validate the path and opened handle, apply `0600` to that handle, and revalidate
+the path identity before use where the standard library exposes the required
+metadata.

@@ -410,10 +410,7 @@ where
 
     let prepare_result = (|| -> ServerResult<()> {
         copy_sqlite_database(database, &stage)?;
-        let connection = rusqlite::Connection::open_with_flags(
-            &stage,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
+        let connection = crate::sqlite::open_read_write(&stage)?;
         let transaction = rusqlite::Transaction::new_unchecked(
             &connection,
             rusqlite::TransactionBehavior::Immediate,
@@ -517,8 +514,7 @@ fn validate_regular_file(path: &Path, label: &str) -> ServerResult<()> {
 }
 
 fn validate_migration_backup(database: &Path, backup: &Path) -> ServerResult<i64> {
-    let connection =
-        rusqlite::Connection::open_with_flags(backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = crate::sqlite::open_read_only(backup)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(ServerError::Message(format!(
@@ -540,10 +536,7 @@ fn validate_migration_backup(database: &Path, backup: &Path) -> ServerResult<i64
 }
 
 fn prove_exclusive_database_access(database: &Path) -> ServerResult<()> {
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-    )?;
+    let connection = crate::sqlite::open_read_write(database)?;
     connection.busy_timeout(Duration::ZERO)?;
     connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
     connection.execute_batch("BEGIN EXCLUSIVE; ROLLBACK;").map_err(|error| {
@@ -555,8 +548,7 @@ fn prove_exclusive_database_access(database: &Path) -> ServerResult<()> {
 }
 
 fn validate_current_database(path: &Path) -> ServerResult<()> {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = crate::sqlite::open_read_only(path)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version != SCHEMA_VERSION {
         return Err(ServerError::Message(format!(
@@ -677,8 +669,7 @@ fn validate_current_database(path: &Path) -> ServerResult<()> {
 fn validate_downgrade_copy(path: &Path, target_version: i64) -> ServerResult<()> {
     debug_assert!(matches!(target_version, 4..=12));
     let schema_label = format!("schema-{target_version}");
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let connection = crate::sqlite::open_read_only(path)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version != target_version {
         return Err(ServerError::Message(format!(
@@ -887,8 +878,7 @@ fn ensure_schema_eight_usage_is_retained(
 }
 
 fn checkpoint_staged_database(path: &Path) -> ServerResult<()> {
-    let connection =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let connection = crate::sqlite::open_read_write(path)?;
     connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     let mode: String = connection.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
     if !mode.eq_ignore_ascii_case("delete") {
@@ -909,12 +899,8 @@ fn checkpoint_staged_database(path: &Path) -> ServerResult<()> {
 
 fn copy_sqlite_database(source: &Path, destination: &Path) -> ServerResult<()> {
     let destination_path = destination.to_path_buf();
-    let source =
-        rusqlite::Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut destination = rusqlite::Connection::open_with_flags(
-        destination,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-    )?;
+    let source = crate::sqlite::open_read_only(source)?;
+    let mut destination = crate::sqlite::open_read_write(destination)?;
     let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
     backup.run_to_completion(100, Duration::from_millis(10), None)?;
     drop(backup);
