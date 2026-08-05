@@ -43,6 +43,9 @@ const SERVER_PORT_ENV: &str = "OMENCHATD_RESOURCE_MULTIPROCESS_SERVER_PORT";
 const CLIENT_PORT_ENV: &str = "OMENCHATD_RESOURCE_MULTIPROCESS_CLIENT_PORT";
 const TEST_NAME: &str =
     "reticulum_live::multiprocess_tests::reticulum_multiprocess_resource_complete_cancel_reuse";
+const SPLIT_SENTINEL_TEST_NAME: &str =
+    "reticulum_live::multiprocess_tests::reticulum_split_metadata_assembly_preserves_segment_two_payload";
+const SPLIT_SENTINEL_ENV: &str = "OMENCHATD_RESOURCE_SPLIT_METADATA_SENTINEL";
 
 fn reserve_udp_ports() -> (u16, u16) {
     let first = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve first UDP port");
@@ -387,11 +390,18 @@ async fn sender_child(root: &Path, nonce: &str, server_port: u16, client_port: u
     publish_marker(&marker(root, "sender-complete"));
 }
 
-fn spawn_role(role: &str, root: &Path, nonce: &str, server_port: u16, client_port: u16) -> Child {
+fn spawn_role_for_test(
+    test_name: &str,
+    role: &str,
+    root: &Path,
+    nonce: &str,
+    server_port: u16,
+    client_port: u16,
+) -> Child {
     Command::new(std::env::current_exe().expect("current test binary"))
         .args([
             "--exact",
-            TEST_NAME,
+            test_name,
             "--ignored",
             "--nocapture",
             "--test-threads=1",
@@ -405,6 +415,37 @@ fn spawn_role(role: &str, root: &Path, nonce: &str, server_port: u16, client_por
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|error| panic!("spawn {role} child: {error}"))
+}
+
+fn spawn_role(role: &str, root: &Path, nonce: &str, server_port: u16, client_port: u16) -> Child {
+    spawn_role_for_test(TEST_NAME, role, root, nonce, server_port, client_port)
+}
+
+fn spawn_split_sentinel_role(
+    role: &str,
+    root: &Path,
+    nonce: &str,
+    server_port: u16,
+    client_port: u16,
+) -> Child {
+    Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            SPLIT_SENTINEL_TEST_NAME,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ROLE_ENV, role)
+        .env(ROOT_ENV, root)
+        .env(NONCE_ENV, nonce)
+        .env(SERVER_PORT_ENV, server_port.to_string())
+        .env(CLIENT_PORT_ENV, client_port.to_string())
+        .env(SPLIT_SENTINEL_ENV, "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("spawn split sentinel {role}: {error}"))
 }
 
 async fn wait_child(mut child: Child, wait: Duration) -> (Output, bool) {
@@ -481,6 +522,164 @@ async fn reticulum_multiprocess_resource_complete_cancel_reuse() {
     assert!(marker(&root, "sender-complete").is_file());
     assert!(marker(&root, "receiver-complete").is_file());
     std::fs::remove_dir_all(&root).expect("remove isolated multiprocess root");
+}
+
+async fn split_sentinel_receiver_child(
+    root: &Path,
+    nonce: &str,
+    server_port: u16,
+    client_port: u16,
+) {
+    let server_identity =
+        PrivateIdentity::new_from_name(&format!("omenchatd-split-sentinel-server-{nonce}"));
+    let transport = Transport::new(transport_config(
+        "omenchatd-split-sentinel-server",
+        &server_identity,
+    ));
+    let destination = transport
+        .add_destination(
+            server_identity,
+            DestinationName::new(OMENCHAT_RNS_APP_NAME, "split-sentinel"),
+        )
+        .await;
+    let transport = Arc::new(transport);
+    attach_plain_udp(&transport, server_port, client_port).await;
+    let announce_shutdown = CancellationToken::new();
+    let announce_task = {
+        let transport = transport.clone();
+        let shutdown = announce_shutdown.clone();
+        tokio::spawn(async move {
+            while !shutdown.is_cancelled() {
+                transport.send_announce(&destination, None).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+    };
+    publish_marker(&marker(root, "split-receiver-ready"));
+
+    let expected = std::fs::read(root.join("split-expected.bin")).expect("read split fixture");
+    let complete = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut events = transport.resource_events();
+        loop {
+            let event = events.recv().await.expect("split Resource stream open");
+            match event.kind {
+                ResourceEventKind::Complete(complete) => break complete,
+                ResourceEventKind::InboundFailed(failure) => {
+                    panic!("split Resource failed before assembly: {}", failure.reason)
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("split Resource completion timeout");
+
+    // This assertion intentionally fails with official 0.9.7 and becomes the
+    // removal proof after an official fixed train replaces it (issue #553,
+    // upstream PR #556). It exercises the unmodified transport crate.
+    assert_eq!(complete.metadata, Some(b"split-sentinel".to_vec()));
+    assert_eq!(complete.data, expected);
+    announce_shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(1), announce_task).await;
+}
+
+async fn split_sentinel_sender_child(root: &Path, nonce: &str, server_port: u16, client_port: u16) {
+    let server_identity =
+        PrivateIdentity::new_from_name(&format!("omenchatd-split-sentinel-server-{nonce}"));
+    let destination = SingleInputDestination::new(
+        server_identity,
+        DestinationName::new(OMENCHAT_RNS_APP_NAME, "split-sentinel"),
+    )
+    .desc;
+    let client_identity =
+        PrivateIdentity::new_from_name(&format!("omenchatd-split-sentinel-client-{nonce}"));
+    let transport = Arc::new(Transport::new(transport_config(
+        "omenchatd-split-sentinel-client",
+        &client_identity,
+    )));
+    attach_plain_udp(&transport, client_port, server_port).await;
+    assert!(
+        transport
+            .await_path(&destination.address_hash, Duration::from_secs(5), None)
+            .await
+    );
+    let link = transport.link(destination).await;
+    await_link_activation(&transport, &link, Duration::from_secs(5))
+        .await
+        .expect("split sentinel Link activation");
+    let link_id = *link.lock().await.id();
+    let payload = std::fs::read(root.join("split-expected.bin")).expect("read split fixture");
+    transport
+        .send_resource(&link_id, payload, Some(b"split-sentinel".to_vec()))
+        .await
+        .expect("dispatch split metadata Resource");
+    wait_marker(
+        &marker(root, "split-receiver-complete"),
+        Duration::from_secs(35),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "known upstream Reticulum 0.9.7 split-Resource metadata assembly defect (#553; fix proposed in #556)"]
+async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
+    if std::env::var_os(SPLIT_SENTINEL_ENV).is_some() {
+        install_resource_diagnostic_logger();
+        let root = PathBuf::from(child_value(ROOT_ENV));
+        let nonce = child_value(NONCE_ENV);
+        let server_port = child_port(SERVER_PORT_ENV);
+        let client_port = child_port(CLIENT_PORT_ENV);
+        match child_value(ROLE_ENV).as_str() {
+            "receiver" => {
+                split_sentinel_receiver_child(&root, &nonce, server_port, client_port).await;
+                publish_marker(&marker(&root, "split-receiver-complete"));
+            }
+            "sender" => split_sentinel_sender_child(&root, &nonce, server_port, client_port).await,
+            role => panic!("unknown split sentinel role {role}"),
+        }
+        return;
+    }
+
+    let nonce = format!("{}-{}", std::process::id(), current_epoch_ms());
+    let root = std::env::temp_dir().join(format!("omenchatd-split-sentinel-{nonce}"));
+    std::fs::create_dir_all(&root).expect("create split sentinel root");
+    let metadata_len = b"split-sentinel".len();
+    let second_segment_offset = crate::resource_compat::RETICULUM_0_9_7_MAX_EFFICIENT_RESOURCE_BYTES
+        - crate::resource_compat::RETICULUM_RESOURCE_METADATA_LENGTH_PREFIX_BYTES
+        - metadata_len;
+    let mut payload = vec![0x5a; second_segment_offset + 4096];
+    payload[second_segment_offset..second_segment_offset + 3].copy_from_slice(&[0, 0, 8]);
+    std::fs::write(root.join("split-expected.bin"), payload).expect("write split fixture");
+    let (server_port, client_port) = reserve_udp_ports();
+    let receiver = spawn_split_sentinel_role("receiver", &root, &nonce, server_port, client_port);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !marker(&root, "split-receiver-ready").is_file() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("split receiver readiness");
+    let sender = spawn_split_sentinel_role("sender", &root, &nonce, server_port, client_port);
+    let (sender_output, sender_timed_out) = wait_child(sender, Duration::from_secs(40)).await;
+    let (receiver_output, receiver_timed_out) = wait_child(receiver, Duration::from_secs(40)).await;
+    assert!(
+        !sender_timed_out
+            && !receiver_timed_out
+            && sender_output.status.success()
+            && receiver_output.status.success(),
+        "upstream split-metadata sentinel failed as expected on affected 0.9.7\n\
+         sender status={} timed_out={} stdout={} stderr={}\n\
+         receiver status={} timed_out={} stdout={} stderr={}",
+        sender_output.status,
+        sender_timed_out,
+        String::from_utf8_lossy(&sender_output.stdout),
+        String::from_utf8_lossy(&sender_output.stderr),
+        receiver_output.status,
+        receiver_timed_out,
+        String::from_utf8_lossy(&receiver_output.stdout),
+        String::from_utf8_lossy(&receiver_output.stderr),
+    );
+    std::fs::remove_dir_all(&root).expect("remove split sentinel root");
 }
 
 #[test]

@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.7-5 compatibility boundary
+### v0.6.0-1 / v0.9.7-6 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.7-5 release retains protocol version `1`, protocol name
+The v0.9.7-6 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -25,6 +25,13 @@ accepts a valid frame received as either generic context `0x00` or the legacy
 `0x4f` context, ignores context-zero non-frames, and keeps legacy `0x4f`
 responses for compatibility. This is transport adaptation; it does not change
 the OMENchat frame protocol.
+
+The exact 0.9.7 implementation temporarily caps upload negotiation and
+admission so `3 + len("omenchat-resource:") + len(resource_id) + payload`
+does not exceed 1,048,575 bytes. The configured value is retained, the default
+512 KiB limit is unchanged, and no operation or capability identifier changes.
+Unsafe Resource fetches return the existing bounded error operation before a
+Resource-offer frame is sent.
 
 `fixtures/omenchat/v0_6_0_1_wire.rs` records public v0.6.0-1 session-open,
 room-message, and history-resource-offer bytes plus the protocol and transport
@@ -197,7 +204,7 @@ inbound frame carrying the `SessionOpen` operation number.
 ### Authoritative production capability matrix
 
 This table describes the canonical `desktop-product` client and
-`server-headless`/`server-full` server at 0.9.7-5. Capability names come from
+`server-headless`/`server-full` server at 0.9.7-6. Capability names come from
 `omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
 shared vocabulary, the client's request, and the canonical server's acceptance.
 Definition alone never activates a capability: each Link must request it and

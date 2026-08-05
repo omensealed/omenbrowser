@@ -438,6 +438,16 @@ impl ChatLinkTransport for DesktopOmenChatTransport {
     }
 
     fn send_resource(&mut self, resource_id: &str, payload: Vec<u8>) -> anyhow::Result<()> {
+        let metadata_len = crate::chat::rns::resource_metadata(resource_id).len();
+        if !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
+            payload.len(),
+            metadata_len,
+        ) {
+            self.rejected_outgoing_resources = self.rejected_outgoing_resources.saturating_add(1);
+            anyhow::bail!(
+                "OMENchat Resource exceeds the safe Reticulum 0.9.7 single-segment limit"
+            );
+        }
         let next_bytes = self
             .outgoing_resource_bytes
             .checked_add(payload.len())

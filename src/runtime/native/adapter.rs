@@ -9,9 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "native-lxmf")]
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-#[cfg(all(feature = "native-rns-net", any()))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
@@ -68,6 +66,34 @@ const OMENCHAT_RESOURCE_METADATA_PREFIX: &[u8] = b"omenchat-resource:";
 const OMENCHAT_FRAME_RESOURCE_METADATA: &[u8] = b"omenchat-frame:";
 #[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_CLEAN_RESOURCE_MAX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS: usize = 256;
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL: Duration = Duration::from_secs(2 * 60);
+#[cfg(not(all(feature = "native-rns-net", any())))]
+fn remember_omenchat_rejected_split_resource(
+    rejected: &mut BTreeMap<[u8; 32], Instant>,
+    resource_hash: [u8; 32],
+    now: Instant,
+) -> bool {
+    rejected.retain(|_, inserted| {
+        now.duration_since(*inserted) <= OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL
+    });
+    if rejected.contains_key(&resource_hash) {
+        return false;
+    }
+    if rejected.len() >= OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
+        if let Some(oldest) = rejected
+            .iter()
+            .min_by_key(|(_, inserted)| **inserted)
+            .map(|(hash, _)| *hash)
+        {
+            rejected.remove(&oldest);
+        }
+    }
+    rejected.insert(resource_hash, now);
+    true
+}
 #[cfg(feature = "native-lxmf")]
 const PROPAGATION_STAMP_BLOCKING_JOBS: usize = 2;
 #[cfg(feature = "native-lxmf")]
@@ -10138,9 +10164,11 @@ fn spawn_clean_omenchat_event_bridge(
         #[cfg(feature = "native-lxmf")]
         let clean_lxmf_seen_messages = clean_lxmf_seen_messages.clone();
         tokio::spawn(async move {
+            let mut rejected_split_resources = BTreeMap::<[u8; 32], Instant>::new();
             loop {
                 match resource_events.recv().await {
                     Ok(event) => {
+                        let now = Instant::now();
                         let event_link_id = address_hash_to_link_id(event.link_id);
                         let link_id = {
                             let active_links = active_omenchat_links
@@ -10192,21 +10220,70 @@ fn spawn_clean_omenchat_event_bridge(
                             rns_transport::resource::ResourceEventKind::SegmentComplete(
                                 segment,
                             ) => {
-                                if let Some(link_id) = link_id {
+                                if segment.total_segments <= 1 {
+                                    continue;
+                                }
+                                let Some(link_id) = link_id else {
+                                    // This worker also observes LXMF Resources. Only Resources
+                                    // owned by an active OMENchat Link are governed here.
+                                    continue;
+                                };
+                                let resource_hash = event.hash.to_bytes();
+                                let first_rejection = remember_omenchat_rejected_split_resource(
+                                    &mut rejected_split_resources,
+                                    resource_hash,
+                                    now,
+                                );
+                                if first_rejection {
+                                    let transfer_id = hex_encode(event.hash.as_slice());
+                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                        ResourceLifecycleEvent {
+                                            transfer_id: transfer_id.clone(),
+                                            state: ResourceLifecycleState::Failed,
+                                            bytes: Some(segment.total_data_size),
+                                            reason: Some(
+                                                "split Resource rejected on affected Reticulum 0.9.7 train"
+                                                    .into(),
+                                            ),
+                                            operation_id: None,
+                                            source: Some("omenchat".into()),
+                                            purpose: Some("omenchat-resource".into()),
+                                            direction: Some("inbound".into()),
+                                            peer: Some(hex_encode(&link_id)),
+                                        },
+                                    ));
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 OMENchat resource segment complete link_id={} resource={} segment={}/{} total_bytes={}",
+                                        "native Reticulum 0.9 OMENchat split resource rejected link_id={} resource={} segment={}/{} total_bytes={} tracked={}",
                                         hex_encode(&link_id),
-                                        hex_encode(event.hash.as_slice()),
+                                        transfer_id,
                                         segment.segment_index,
                                         segment.total_segments,
-                                        segment.total_data_size
+                                        segment.total_data_size,
+                                        rejected_split_resources.len()
                                     )));
+                                    let clean_link = clean_omenchat_links
+                                        .lock()
+                                        .expect("native clean OMENchat link lock")
+                                        .get(&link_id)
+                                        .cloned();
+                                    if let Some(clean_link) = clean_link {
+                                        clean_close_link(&clean_link.transport, &clean_link.link)
+                                            .await;
+                                    }
                                 }
-                                // The transport emits the final assembled payload through
-                                // `Complete`; retaining a segment here would duplicate data.
                                 continue;
                             }
                             rns_transport::resource::ResourceEventKind::Complete(complete) => {
+                                if rejected_split_resources
+                                    .remove(&event.hash.to_bytes())
+                                    .is_some()
+                                {
+                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                        "native Reticulum 0.9 OMENchat rejected split resource completion suppressed resource={}",
+                                        hex_encode(event.hash.as_slice())
+                                    )));
+                                    continue;
+                                }
                                 complete
                             }
                             rns_transport::resource::ResourceEventKind::OutboundComplete => {
@@ -10365,6 +10442,47 @@ fn spawn_clean_omenchat_event_bridge(
                             complete.metadata.as_deref().is_some_and(|metadata| {
                                 metadata.starts_with(OMENCHAT_RESOURCE_METADATA_PREFIX)
                             });
+                        if is_metadata_omenchat
+                            && complete.metadata.as_deref().is_some_and(|metadata| {
+                                !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
+                                    complete.data.len(),
+                                    metadata.len(),
+                                )
+                            })
+                        {
+                            let transfer_id = hex_encode(event.hash.as_slice());
+                            if let Some(link_id) = link_id {
+                                let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
+                                    ResourceLifecycleEvent {
+                                        transfer_id: transfer_id.clone(),
+                                        state: ResourceLifecycleState::Failed,
+                                        bytes: Some(complete.data.len() as u64),
+                                        reason: Some(
+                                            "metadata Resource exceeds safe Reticulum 0.9.7 boundary"
+                                                .into(),
+                                        ),
+                                        operation_id: None,
+                                        source: Some("omenchat".into()),
+                                        purpose: Some("omenchat-resource".into()),
+                                        direction: Some("inbound".into()),
+                                        peer: Some(hex_encode(&link_id)),
+                                    },
+                                ));
+                                let clean_link = clean_omenchat_links
+                                    .lock()
+                                    .expect("native clean OMENchat link lock")
+                                    .get(&link_id)
+                                    .cloned();
+                                if let Some(clean_link) = clean_link {
+                                    clean_close_link(&clean_link.transport, &clean_link.link).await;
+                                }
+                            }
+                            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
+                                "native Reticulum 0.9 OMENchat oversized metadata resource rejected resource={transfer_id} bytes={}",
+                                complete.data.len()
+                            )));
+                            continue;
+                        }
                         #[cfg(feature = "native-lxmf")]
                         if !is_metadata_omenchat {
                             let decoded = match decode_native_lxmf_payload_bounded(
@@ -13180,6 +13298,45 @@ mod tests {
                     < OMENCHAT_CLEAN_RESOURCE_MAX_BYTES
             );
         }
+    }
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[test]
+    fn clean_omenchat_split_resource_rejections_are_deduplicated_bounded_and_expire() {
+        let start = Instant::now();
+        let mut rejected = BTreeMap::new();
+        assert!(remember_omenchat_rejected_split_resource(
+            &mut rejected,
+            [0x01; 32],
+            start,
+        ));
+        assert!(!remember_omenchat_rejected_split_resource(
+            &mut rejected,
+            [0x01; 32],
+            start + Duration::from_secs(1),
+        ));
+
+        for index in 0..=OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&(index as u64 + 2).to_be_bytes());
+            assert!(remember_omenchat_rejected_split_resource(
+                &mut rejected,
+                hash,
+                start + Duration::from_secs(2 + index as u64),
+            ));
+            assert!(rejected.len() <= OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS);
+        }
+        assert!(!rejected.contains_key(&[0x01; 32]));
+
+        let expired_at = start + OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL + Duration::from_secs(600);
+        assert!(remember_omenchat_rejected_split_resource(
+            &mut rejected,
+            [0xff; 32],
+            expired_at,
+        ));
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected.remove(&[0xff; 32]).is_some());
+        assert!(rejected.remove(&[0xff; 32]).is_none());
     }
 
     #[cfg(feature = "native-lxmf")]

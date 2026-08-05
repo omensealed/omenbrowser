@@ -465,6 +465,10 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   uses fixed `quick-xml 0.41.0`, the standalone server does not resolve that
   crate, and the current audit policy accepts zero vulnerabilities. Historical
   0.6 live results remain migration baselines.
+- Reticulum 0.9.7 also has an upstream split-Resource metadata assembly defect
+  (#553; proposed correction #556). OMEN v0.9.7-6 fails closed before unsafe
+  outbound offers and rejects split inbound OMEN-owned Resources. The default
+  512 KiB upload limit remains unchanged; no retry or fragmentation is added.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when

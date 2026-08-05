@@ -1445,12 +1445,25 @@ pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -
         } else {
             human_bytes(config.upload_quota_bytes)
         },
-        upload_max_file = human_bytes(config.upload_max_file_bytes),
+        upload_max_file = upload_max_file_status(config.upload_max_file_bytes),
         upload_cache = config.upload_cache_path().display(),
         rooms = room_count,
         history_retention = history_retention,
         limits = limits,
     )
+}
+
+fn upload_max_file_status(configured: u64) -> String {
+    let effective = configured.min(crate::resource_compat::exact_train_upload_payload_max() as u64);
+    if effective == configured {
+        human_bytes(configured)
+    } else {
+        format!(
+            "{} configured; {} effective on Reticulum 0.9.7",
+            human_bytes(configured),
+            human_bytes(effective)
+        )
+    }
 }
 
 pub fn render_public_addresses(config: &ServerConfig) -> String {

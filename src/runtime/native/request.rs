@@ -495,6 +495,19 @@ impl Reticulum09LinkRequestAdapter {
                 resource = resource_events.recv() => match resource {
                     Ok(event) if event.link_id == prepared.link_id => match event.kind {
                         ResourceEventKind::Complete(complete) => {
+                            if resource_complete_exceeds_affected_train_boundary(&complete) {
+                                let _ = cancel_clean_page_response_resource(
+                                    transport,
+                                    prepared,
+                                    event.hash,
+                                    "oversized-metadata-resource-compatibility-rejection",
+                                )
+                                .await;
+                                return Err(AppError::from(NativeRuntimeError::InvalidResponse(
+                                    "metadata Resource response exceeds the safe Reticulum 0.9.7 boundary"
+                                        .into(),
+                                )));
+                            }
                             if let Some(response) =
                                 NativeLinkResponseFrame::parse_matching_response_resource(
                                     &complete,
@@ -535,6 +548,33 @@ impl Reticulum09LinkRequestAdapter {
                                 progress.total_bytes,
                                 prepared.operation_id.as_deref(),
                             );
+                        }
+                        ResourceEventKind::SegmentComplete(segment)
+                            if segment.total_segments > 1 =>
+                        {
+                            emit_clean_page_resource_lifecycle(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                ResourceLifecycleState::Failed,
+                                Some(segment.total_data_size),
+                                Some(
+                                    "split Resource rejected on affected Reticulum 0.9.7 train"
+                                        .into(),
+                                ),
+                                "inbound",
+                                prepared.operation_id.as_deref(),
+                            );
+                            let _ = cancel_clean_page_response_resource(
+                                transport,
+                                prepared,
+                                event.hash,
+                                "split-resource-compatibility-rejection",
+                            )
+                            .await;
+                            return Err(AppError::from(NativeRuntimeError::InvalidResponse(
+                                "split Resource response is unsupported on Reticulum 0.9.7"
+                                    .into(),
+                            )));
                         }
                         ResourceEventKind::InboundFailed(failure) => {
                             emit_clean_page_resource_lifecycle(
@@ -702,6 +742,26 @@ impl Reticulum09LinkRequestAdapter {
                     target_events += 1;
                     match event.kind {
                         ResourceEventKind::Complete(complete) => {
+                            if resource_complete_exceeds_affected_train_boundary(&complete) {
+                                let _ = cancel_clean_page_response_resource(
+                                    transport,
+                                    prepared,
+                                    event.hash,
+                                    "oversized-metadata-resource-compatibility-rejection",
+                                )
+                                .await;
+                                let _ = cancel_clean_page_request_resource(
+                                    transport,
+                                    prepared,
+                                    request_resource_hash,
+                                    "oversized-response-resource-compatibility-rejection",
+                                )
+                                .await;
+                                return Err(AppError::from(NativeRuntimeError::InvalidResponse(
+                                    "metadata Resource response exceeds the safe Reticulum 0.9.7 boundary"
+                                        .into(),
+                                )));
+                            }
                             match NativeLinkResponseFrame::parse_matching_response_resource(
                                 &complete,
                                 &frame.request_id,
@@ -771,6 +831,40 @@ impl Reticulum09LinkRequestAdapter {
                                 progress.total_bytes,
                                 prepared.operation_id.as_deref(),
                             );
+                        }
+                        ResourceEventKind::SegmentComplete(segment)
+                            if segment.total_segments > 1 =>
+                        {
+                            emit_clean_page_resource_lifecycle(
+                                prepared.event_tx.as_ref(),
+                                event.hash.to_string(),
+                                ResourceLifecycleState::Failed,
+                                Some(segment.total_data_size),
+                                Some(
+                                    "split Resource rejected on affected Reticulum 0.9.7 train"
+                                        .into(),
+                                ),
+                                "inbound",
+                                prepared.operation_id.as_deref(),
+                            );
+                            let _ = cancel_clean_page_response_resource(
+                                transport,
+                                prepared,
+                                event.hash,
+                                "split-resource-compatibility-rejection",
+                            )
+                            .await;
+                            let _ = cancel_clean_page_request_resource(
+                                transport,
+                                prepared,
+                                request_resource_hash,
+                                "split-response-resource-compatibility-rejection",
+                            )
+                            .await;
+                            return Err(AppError::from(NativeRuntimeError::InvalidResponse(
+                                "split Resource response is unsupported on Reticulum 0.9.7"
+                                    .into(),
+                            )));
                         }
                         ResourceEventKind::OutboundComplete
                             if event.hash == request_resource_hash =>
@@ -923,6 +1017,15 @@ impl Reticulum09LinkRequestAdapter {
             }
         }
     }
+}
+
+fn resource_complete_exceeds_affected_train_boundary(complete: &ResourceComplete) -> bool {
+    complete.metadata.as_deref().is_some_and(|metadata| {
+        !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
+            complete.data.len(),
+            metadata.len(),
+        )
+    })
 }
 
 pub fn native_reticulum09_capability_report() -> NativeReticulum09CapabilityReport {
@@ -2394,6 +2497,37 @@ mod tests {
             .expect("conflicting inner id is unrelated"),
             None
         );
+    }
+
+    #[test]
+    fn metadata_resource_completion_obeys_exact_affected_train_boundary() {
+        let metadata = b"nomadnet-response".to_vec();
+        let exact_payload =
+            crate::resource_compat::maximum_payload_for_metadata_len(metadata.len())
+                .expect("metadata fits the exact-train boundary");
+        let exact = ResourceComplete {
+            data: vec![0; exact_payload],
+            metadata: Some(metadata.clone()),
+            request_id: None,
+            is_request: false,
+            is_response: true,
+        };
+        assert!(!resource_complete_exceeds_affected_train_boundary(&exact));
+
+        let over = ResourceComplete {
+            data: vec![0; exact_payload + 1],
+            ..exact
+        };
+        assert!(resource_complete_exceeds_affected_train_boundary(&over));
+
+        let metadata_free = ResourceComplete {
+            data: vec![0; exact_payload + 1],
+            metadata: None,
+            ..over
+        };
+        assert!(!resource_complete_exceeds_affected_train_boundary(
+            &metadata_free
+        ));
     }
 
     #[test]

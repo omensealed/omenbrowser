@@ -180,23 +180,31 @@ fn omenchat_transport_bounds_all_payload_queues_and_releases_byte_accounting() {
     outbound.send_frame(vec![0]).expect("permit released");
 
     let mut resource_bytes = DesktopOmenChatTransport::new([0x77; 16], 1_000);
-    for index in 0..2 {
+    let resource_chunk_bytes = crate::resource_compat::exact_train_upload_payload_max();
+    let mut accepted_resources = 0;
+    while resource_bytes
+        .outgoing_resource_bytes
+        .saturating_add(resource_chunk_bytes)
+        <= crate::desktop::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_BYTES
+        && accepted_resources < crate::desktop::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_ITEMS
+    {
+        let index = accepted_resources;
         resource_bytes
             .send_resource(
                 &format!("resource:{index}"),
-                vec![index as u8; crate::desktop::OMENCHAT_RESOURCE_MAX_BYTES],
+                vec![index as u8; resource_chunk_bytes],
             )
-            .expect("exact outgoing Resource byte budget");
+            .expect("bounded outgoing Resource byte budget");
+        accepted_resources += 1;
     }
-    assert_eq!(
-        resource_bytes.outgoing_resource_bytes,
-        crate::desktop::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_BYTES
-    );
     assert!(resource_bytes
-        .send_resource("resource:overflow", vec![0])
+        .send_resource("resource:overflow", vec![0; resource_chunk_bytes])
         .is_err());
     assert_eq!(resource_bytes.rejected_outgoing_resources, 1);
-    assert_eq!(resource_bytes.take_outgoing_resources().len(), 2);
+    assert_eq!(
+        resource_bytes.take_outgoing_resources().len(),
+        accepted_resources
+    );
     assert_eq!(resource_bytes.outgoing_resource_bytes, 0);
 
     let mut resource_items = DesktopOmenChatTransport::new([0x78; 16], 1_000);
@@ -225,4 +233,25 @@ fn omenchat_transport_bounds_all_payload_queues_and_releases_byte_accounting() {
         .is_err());
     assert_eq!(invalid_resource.rejected_outgoing_resources, 2);
     assert_eq!(invalid_resource.outgoing_resource_bytes, 0);
+}
+
+#[test]
+fn omenchat_transport_enforces_exact_train_resource_boundary_before_queueing() {
+    let resource_id = "upload:4294967295:4294967295:4294967295:ffffffffffffffff";
+    assert_eq!(
+        resource_id.len(),
+        crate::resource_compat::maximum_upload_resource_id_bytes()
+    );
+    let maximum = crate::resource_compat::exact_train_upload_payload_max();
+    let mut transport = DesktopOmenChatTransport::new([0x7a; 16], 1_000);
+
+    transport
+        .send_resource(resource_id, vec![0x55; maximum])
+        .expect("exact safe Resource");
+    assert_eq!(transport.outgoing_resources.len(), 1);
+    assert!(transport
+        .send_resource(resource_id, vec![0x66; maximum + 1])
+        .is_err());
+    assert_eq!(transport.outgoing_resources.len(), 1);
+    assert_eq!(transport.rejected_outgoing_resources, 1);
 }

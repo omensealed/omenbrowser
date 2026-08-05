@@ -9,6 +9,7 @@ pub mod live;
 mod path_policy;
 mod private_fs;
 pub mod protocol;
+mod resource_compat;
 #[cfg(feature = "live-reticulum")]
 pub mod reticulum_live;
 #[cfg(feature = "live-reticulum")]

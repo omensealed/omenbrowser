@@ -3674,7 +3674,20 @@ fn overview_operator_summary_text_with_rooms(
         live_line,
         interface_summary: &interface_summary,
         room_count,
-        upload_max: human_bytes(config.upload_max_file_bytes),
+        upload_max: {
+            let effective = config
+                .upload_max_file_bytes
+                .min(crate::resource_compat::exact_train_upload_payload_max() as u64);
+            if effective == config.upload_max_file_bytes {
+                human_bytes(effective)
+            } else {
+                format!(
+                    "{} configured / {} effective",
+                    human_bytes(config.upload_max_file_bytes),
+                    human_bytes(effective)
+                )
+            }
+        },
         upload_quota,
     })
 }

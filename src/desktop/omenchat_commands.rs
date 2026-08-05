@@ -165,7 +165,20 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "upload file is empty".into());
             return OmenChatDraftCommandResult::HandledKeep;
         }
-        let server_max_file_bytes = self.omenchat_session_upload_max_file_bytes(session_id);
+        let exact_train_upload_max =
+            crate::resource_compat::exact_train_upload_payload_max() as u64;
+        if upload_byte_len > exact_train_upload_max {
+            self.set_omenchat_session_status(
+                session_id,
+                format!(
+                    "upload blocked: file exceeds the {exact_train_upload_max} byte Reticulum 0.9.7 compatibility limit"
+                ),
+            );
+            return OmenChatDraftCommandResult::HandledKeep;
+        }
+        let server_max_file_bytes = Some(effective_omenchat_upload_max_file_bytes(
+            self.omenchat_session_upload_max_file_bytes(session_id),
+        ));
         let room_upload_policy = room_id.and_then(|room_id| {
             self.omenchat
                 .chat_client
@@ -205,6 +218,15 @@ impl DesktopApp {
             }
         };
         let upload_byte_len = bytes.len() as u64;
+        if upload_byte_len > exact_train_upload_max {
+            self.set_omenchat_session_status(
+                session_id,
+                format!(
+                    "upload blocked: file exceeds the {exact_train_upload_max} byte Reticulum 0.9.7 compatibility limit"
+                ),
+            );
+            return OmenChatDraftCommandResult::HandledKeep;
+        }
         if let Some(reason) = omenchat_upload_policy_rejection(
             upload_byte_len,
             self.omenchat_session_upload_quota(session_id),
@@ -607,6 +629,32 @@ impl DesktopApp {
                     session.server.destination != "mockchatdestination"
                         && session.server.destination.len() >= 32
                 })
+    }
+}
+
+fn effective_omenchat_upload_max_file_bytes(peer_advertised: Option<u64>) -> u64 {
+    let exact_train_max = crate::resource_compat::exact_train_upload_payload_max() as u64;
+    peer_advertised
+        .unwrap_or(exact_train_max)
+        .min(exact_train_max)
+}
+
+#[cfg(test)]
+mod resource_compat_tests {
+    use super::effective_omenchat_upload_max_file_bytes;
+
+    #[test]
+    fn older_peer_larger_limit_is_locally_constrained() {
+        let local = crate::resource_compat::exact_train_upload_payload_max() as u64;
+        assert_eq!(effective_omenchat_upload_max_file_bytes(None), local);
+        assert_eq!(
+            effective_omenchat_upload_max_file_bytes(Some(10 * 1024 * 1024)),
+            local
+        );
+        assert_eq!(
+            effective_omenchat_upload_max_file_bytes(Some(256 * 1024)),
+            256 * 1024
+        );
     }
 }
 

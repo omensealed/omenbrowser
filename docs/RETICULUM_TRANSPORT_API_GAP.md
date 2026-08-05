@@ -11,6 +11,20 @@ This project intentionally uses the published crates as-is. Do not add a local
 the upstream transport maintainer and should not depend on private forked APIs
 for normal builds.
 
+## Split metadata Resource boundary on 0.9.7
+
+Official `reticulum-rs-transport 0.9.7` is affected by
+FreeTAKTeam/LXMF-rs#553 (proposed upstream correction #556). A split Resource
+with metadata can incorrectly strip application bytes from segment two and
+later. OMEN therefore treats `1_048_575` bytes as the maximum safe total for
+`3-byte metadata length + metadata + payload` on this exact train. Outbound
+OMENchat offers are rejected before their offer frame; inbound split NomadNet
+and OMENchat Resources fail closed without retry or primitive fallback.
+
+The ignored split-metadata interoperability sentinel is independent of the
+older maximum-UDP Resource sentinel. Remove the temporary guard only after an
+official fixed registry train is adopted and its unchanged sentinel passes.
+
 The OMENchat client and `omenchatd` `live-reticulum` server have a clean-stack
 transport path now: links are opened against `omenchat.node`, normal OMENchat
 frames are sent as context-zero encrypted link data with
@@ -286,7 +300,7 @@ comparison is constant-time without changing wire bytes or MTU.
 The 0.9.7 stamp/ticket decision remains unchanged: OMEN owns one authoritative
 decision and final stamp using authenticated relay-advertised cost, its existing
 safety ceiling, and reply-ticket precedence. Pinned/current Python and mixed
-0.6.0-1/0.9.7-5 propagation tests retain advertised cost and ticket wire checks.
+0.6.0-1/0.9.7-6 propagation tests retain advertised cost and ticket wire checks.
 The upstream default propagation cost is not substituted for a raised live
 relay cost.
 

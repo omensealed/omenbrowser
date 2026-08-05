@@ -5,6 +5,14 @@ event semantics for the Reticulum/LXMF 0.9 migration. Upstream SDK, RPC, and
 transport types remain inside runtime adapters; the UI, persistence services,
 and application event bus consume the stable types exported by `src/runtime`.
 
+## Reticulum 0.9.7 split-Resource evidence
+
+Resource progress is not delivery evidence. On the affected exact 0.9.7 train,
+`SegmentComplete` reporting more than one segment is terminal compatibility
+evidence for OMEN-owned metadata Resources. OMEN records a bounded failure,
+cancels owned transfer state where supported, and suppresses a later queued
+completion. It does not retry, replay, fragment, or claim peer delivery.
+
 ## Runtime lifecycle
 
 The application lifecycle states are:
