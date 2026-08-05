@@ -122,6 +122,16 @@ symlinked identity aborts startup without replacement. First-run publication is
 an owner-only same-directory atomic replacement; identity parse failures never
 silently change the server address.
 
+The selected server home is also the private-path trust anchor. Before parsing
+an existing `config.toml`, omenchatd requires a stable regular non-symlink file
+and performs a bounded handle read. Configured identity, database, and
+Reticulum paths reject `..`. Managed descendants are walked component by
+component from the canonical root and cannot cross an intermediate symlink.
+Clean custom paths remain supported, but their existing ancestors are not
+claimed or chmodded and must be controlled by the operator. Server SQLite
+source opens use SQLite `NOFOLLOW`; this does not change WAL mode, schema,
+migration, backup, timeout, or transaction behavior.
+
 Useful local TCP setup for testing:
 
 ```bash

@@ -117,6 +117,17 @@ replacement. Bounded malformed files are backed up from the admitted byte
 snapshot under `omen-message.corrupt.*.bak`; only the newest four recognized
 backups/32 MiB are retained. Legacy and ambiguous backup names are untouched.
 
+For standalone `omenchatd`, the selected home is resolved to a clean absolute
+policy root before an existing `config.toml` is parsed. The config must be a
+real regular file; symlinks and non-regular objects fail before path-bearing
+TOML is accepted. Config content is read through a stable bounded handle.
+`identity_path`, `database_path`, and `reticulum_config_path` reject every `..`
+component. Relative paths retain their existing current-working-directory
+meaning but are resolved deterministically for the managed/custom decision.
+Managed suffixes are walked without following symlinks. Clean custom paths are
+supported only under operator-controlled parents; `omenchatd` does not chmod or
+recursively create their unrelated ancestors.
+
 Native LXMF file attachments are stored below the identity-scoped
 `attachments` root. Outbound attachment sources must be regular non-symlink
 files and are capped at 64 items, 8 MiB per file, and 16 MiB in aggregate;

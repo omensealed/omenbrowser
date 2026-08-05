@@ -25,6 +25,7 @@ pub const MAX_HISTORY_RETENTION_EVENTS_PER_ROOM: u64 = 1_000_000;
 pub const MAX_HISTORY_RETENTION_BYTES_PER_ROOM: u64 = 10 * 1024 * 1024 * 1024;
 pub const RETICULUM_CONFIG_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const RETICULUM_CONFIG_MAX_INTERFACES: usize = 64;
+pub const SERVER_CONFIG_MAX_BYTES: usize = 2 * 1024 * 1024;
 static CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Default, Deserialize)]
@@ -358,11 +359,20 @@ max_bytes_per_room = {history_retention_max_bytes_per_room}
 
     pub fn load_or_default(root: PathBuf) -> ServerResult<Self> {
         let mut config = Self::for_root(root);
-        if !config.config_path.exists() {
-            return Ok(config);
+        let policy = crate::path_policy::PrivatePathPolicy::establish(&config.root_dir())?;
+        match std::fs::symlink_metadata(&config.config_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                config.validate_private_paths(&policy)?;
+                return Ok(config);
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
         }
-        let contents = std::fs::read_to_string(&config.config_path)?;
-        let document = parse_config_document(&contents, &config.config_path)?;
+        let contents =
+            crate::private_fs::read_private_bounded(&config.config_path, SERVER_CONFIG_MAX_BYTES)?;
+        let contents = std::str::from_utf8(&contents)
+            .map_err(|_| ServerError::Message("omenchatd config is not valid UTF-8".into()))?;
+        let document = parse_config_document(contents, &config.config_path)?;
         let server = document.server.as_ref();
         let limits = document.limits.as_ref();
         if let Some(value) = server
@@ -483,6 +493,7 @@ max_bytes_per_room = {history_retention_max_bytes_per_room}
         {
             config.upload_quota_bytes = DEFAULT_UPLOAD_QUOTA_BYTES;
         }
+        config.validate_private_paths(&policy)?;
         Ok(config)
     }
 
@@ -499,9 +510,19 @@ max_bytes_per_room = {history_retention_max_bytes_per_room}
         F: FnMut(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
     {
         let root = self.root_dir();
-        crate::private_fs::ensure_private_dir(&root)?;
-        if self.config_path.exists() {
-            let previous = std::fs::read(&self.config_path)?;
+        let policy = self.private_path_policy()?;
+        self.validate_private_paths(&policy)?;
+        policy.ensure_managed_path(&root)?;
+        policy.ensure_sensitive_parent(&self.config_path)?;
+        let previous = match std::fs::symlink_metadata(&self.config_path) {
+            Ok(_) => Some(crate::private_fs::read_private_bounded(
+                &self.config_path,
+                SERVER_CONFIG_MAX_BYTES,
+            )?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(previous) = previous {
             let previous_text = std::str::from_utf8(&previous).map_err(|error| {
                 ServerError::Message(format!(
                     "existing omenchatd config {} is not UTF-8: {error}",
@@ -535,6 +556,33 @@ max_bytes_per_room = {history_retention_max_bytes_per_room}
     pub fn nomadnet_index_page_path(&self) -> PathBuf {
         self.nomadnet_pages_path().join("index.mu")
     }
+
+    fn private_path_policy(&self) -> ServerResult<crate::path_policy::PrivatePathPolicy> {
+        crate::path_policy::PrivatePathPolicy::establish(&self.root_dir())
+    }
+
+    fn validate_private_paths(
+        &self,
+        policy: &crate::path_policy::PrivatePathPolicy,
+    ) -> ServerResult<()> {
+        policy.validate_sensitive_file(&self.config_path)?;
+        policy.validate_sensitive_file(&self.identity_path)?;
+        policy.validate_sensitive_file(&self.database_path)?;
+        policy.validate_sensitive_file(&self.reticulum_config_path)?;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_sensitive_file_parent(&self, path: &std::path::Path) -> ServerResult<()> {
+        let policy = self.private_path_policy()?;
+        self.validate_private_paths(&policy)?;
+        policy.ensure_sensitive_parent(path)
+    }
+
+    pub(crate) fn ensure_service_directory(&self, path: &std::path::Path) -> ServerResult<()> {
+        let policy = self.private_path_policy()?;
+        self.validate_private_paths(&policy)?;
+        policy.ensure_service_directory(path)
+    }
 }
 
 fn parse_config_document(contents: &str, path: &std::path::Path) -> ServerResult<ConfigDocument> {
@@ -562,6 +610,8 @@ where
 {
     use std::io::Write;
 
+    crate::private_fs::validate_private_target_if_exists(path)?;
+
     let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let filename = path
         .file_name()
@@ -570,18 +620,10 @@ where
     let temporary =
         path.with_file_name(format!(".{filename}.tmp-{}-{sequence}", std::process::id()));
     let result = (|| -> ServerResult<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
+        let mut file = crate::private_fs::create_private_new(&temporary)?;
         file.write_all(bytes)?;
         file.flush()?;
         file.sync_all()?;
-        enforce_private_file(&temporary)?;
         drop(file);
         rename(&temporary, path)?;
         Ok(())
@@ -717,17 +759,14 @@ fn toml_string(value: &str) -> String {
 }
 
 pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
-    crate::private_fs::ensure_private_dir(&config.root_dir())?;
-    if let Some(parent) = config.identity_path.parent() {
-        ensure_sensitive_parent(parent, &config.root_dir())?;
-    }
-    if let Some(parent) = config.database_path.parent() {
-        ensure_sensitive_parent(parent, &config.root_dir())?;
-    }
-    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
-    crate::private_fs::ensure_private_dir(&config.reticulum_storage_path())?;
-    crate::private_fs::ensure_private_dir(&config.nomadnet_pages_path())?;
-    crate::private_fs::ensure_private_dir(&config.upload_cache_path())?;
+    let policy = config.private_path_policy()?;
+    config.validate_private_paths(&policy)?;
+    policy.ensure_sensitive_parent(&config.identity_path)?;
+    policy.ensure_sensitive_parent(&config.database_path)?;
+    policy.ensure_service_directory(&config.reticulum_config_path)?;
+    policy.ensure_service_directory(&config.reticulum_storage_path())?;
+    policy.ensure_service_directory(&config.nomadnet_pages_path())?;
+    policy.ensure_managed_path(&config.upload_cache_path())?;
 
     write_if_missing(&config.config_path, config.render_toml().as_bytes())?;
     crate::private_fs::repair_private_file_if_exists(&config_backup_path(&config.config_path))?;
@@ -752,7 +791,7 @@ pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
             &config.database_path,
         )?);
     }
-    let connection = rusqlite::Connection::open(&config.database_path)?;
+    let connection = crate::sqlite::open(&config.database_path)?;
     connection.execute_batch(include_str!("../migrations/001_init.sql"))?;
     connection.execute(
         "INSERT OR IGNORE INTO server_config(key, value) VALUES (?1, ?2)",
@@ -767,24 +806,8 @@ pub fn init_files(config: &ServerConfig) -> ServerResult<()> {
 
 fn touch_log_file(config: &ServerConfig) -> ServerResult<()> {
     let path = config.log_path();
-    if let Some(parent) = path.parent() {
-        ensure_sensitive_parent(parent, &config.root_dir())?;
-    }
+    config.ensure_sensitive_file_parent(&path)?;
     crate::server_log::prepare_log_path(&path)?;
-    Ok(())
-}
-
-pub(crate) fn ensure_sensitive_parent(
-    parent: &std::path::Path,
-    managed_root: &std::path::Path,
-) -> ServerResult<()> {
-    if parent.starts_with(managed_root) {
-        crate::private_fs::ensure_private_dir(parent)?;
-        return Ok(());
-    }
-    crate::private_fs::ensure_private_parent_dir(parent).map_err(|_| {
-        ServerError::Message("configured private-state parent is not a real directory".into())
-    })?;
     Ok(())
 }
 
@@ -796,7 +819,7 @@ pub fn add_room(config: &ServerConfig, name: &str, topic: Option<&str>) -> Serve
             "room name must contain at least one ASCII letter, digit, '_' or '-'".into(),
         ));
     }
-    let connection = rusqlite::Connection::open(&config.database_path)?;
+    let connection = crate::sqlite::open(&config.database_path)?;
     connection.execute(
         "INSERT INTO rooms(name, topic, created_at) VALUES (?1, ?2, 0)
          ON CONFLICT(name) DO UPDATE SET
@@ -809,7 +832,7 @@ pub fn add_room(config: &ServerConfig, name: &str, topic: Option<&str>) -> Serve
 
 pub fn list_rooms(config: &ServerConfig) -> ServerResult<Vec<(i64, String, Option<String>)>> {
     init_files(config)?;
-    let connection = rusqlite::Connection::open(&config.database_path)?;
+    let connection = crate::sqlite::open(&config.database_path)?;
     let mut statement = connection
         .prepare("SELECT room_id, name, topic FROM rooms WHERE archived = 0 ORDER BY name")?;
     let rows = statement.query_map([], |row| {
@@ -878,9 +901,10 @@ pub fn ensure_nomadnet_portal(
     omenchat_destination_hash: &str,
 ) -> ServerResult<PathBuf> {
     let path = config.nomadnet_index_page_path();
-    if let Some(parent) = path.parent() {
-        crate::private_fs::ensure_private_dir(parent)?;
-    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| ServerError::Message("NomadNet page has no parent".into()))?;
+    config.ensure_service_directory(parent)?;
     if !path.exists() {
         let page = render_nomadnet_portal(config, omenchat_destination_hash)?;
         let mut file = crate::private_fs::create_private_new(&path)?;
@@ -920,7 +944,7 @@ pub fn update_room_topic(
     topic: Option<&str>,
 ) -> ServerResult<()> {
     init_files(config)?;
-    let connection = rusqlite::Connection::open(&config.database_path)?;
+    let connection = crate::sqlite::open(&config.database_path)?;
     let changed = connection.execute(
         "UPDATE rooms
          SET topic = ?1, room_revision = room_revision + 1
@@ -940,7 +964,7 @@ pub fn archive_room(config: &ServerConfig, room_id: i64) -> ServerResult<()> {
             "the lobby room cannot be archived".into(),
         ));
     }
-    let connection = rusqlite::Connection::open(&config.database_path)?;
+    let connection = crate::sqlite::open(&config.database_path)?;
     let changed = connection.execute(
         "UPDATE rooms
          SET archived = 1, room_revision = room_revision + 1
@@ -966,7 +990,7 @@ pub fn write_reticulum_tcp_server_config(
     config: &ServerConfig,
     tcp_server: &TcpServerOverride,
 ) -> ServerResult<()> {
-    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
+    config.ensure_service_directory(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let rendered = render_reticulum_tcp_server_config(config, tcp_server);
     write_private_atomic(&config_path, rendered.as_bytes())?;
@@ -977,7 +1001,7 @@ pub fn write_reticulum_tcp_client_config(
     config: &ServerConfig,
     tcp_client: &TcpClientOverride,
 ) -> ServerResult<()> {
-    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
+    config.ensure_service_directory(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let rendered = render_reticulum_tcp_client_config(config, tcp_client);
     write_private_atomic(&config_path, rendered.as_bytes())?;
@@ -989,7 +1013,7 @@ pub fn add_reticulum_tcp_client_config(
     tcp_client: &TcpClientOverride,
 ) -> ServerResult<String> {
     validate_tcp_client_override(tcp_client)?;
-    crate::private_fs::ensure_private_dir(&config.reticulum_config_path)?;
+    config.ensure_service_directory(&config.reticulum_config_path)?;
     let config_path = config.reticulum_config_file();
     let current = read_reticulum_config_bounded(&config_path)?;
     let blocks = reticulum_interface_blocks(&current);
@@ -1194,7 +1218,7 @@ struct ReticulumInterfaceBlock {
     passphrase_configured: bool,
 }
 
-fn read_reticulum_config_bounded(path: &std::path::Path) -> ServerResult<String> {
+pub(crate) fn read_reticulum_config_bounded(path: &std::path::Path) -> ServerResult<String> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(ServerError::Message(format!(
@@ -1207,13 +1231,9 @@ fn read_reticulum_config_bounded(path: &std::path::Path) -> ServerResult<String>
             "Reticulum configuration exceeds the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
         )));
     }
-    let contents = std::fs::read_to_string(path)?;
-    if contents.len() > RETICULUM_CONFIG_MAX_BYTES {
-        return Err(ServerError::Message(format!(
-            "Reticulum configuration exceeds the {RETICULUM_CONFIG_MAX_BYTES} byte limit"
-        )));
-    }
-    Ok(contents)
+    let contents = crate::private_fs::read_private_bounded(path, RETICULUM_CONFIG_MAX_BYTES)?;
+    String::from_utf8(contents)
+        .map_err(|_| ServerError::Message("Reticulum configuration is not valid UTF-8".into()))
 }
 
 fn reticulum_interface_blocks(contents: &str) -> Vec<ReticulumInterfaceBlock> {
@@ -1559,18 +1579,13 @@ fn write_if_missing(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()> {
 fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> ServerResult<()> {
     use std::io::Write;
 
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temporary)?;
+    crate::private_fs::validate_private_target_if_exists(path)?;
+
+    let sequence = CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    let mut file = crate::private_fs::create_private_new(&temporary)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    enforce_private_file(&temporary)?;
     drop(file);
     if let Err(error) = std::fs::rename(&temporary, path) {
         let _ = std::fs::remove_file(&temporary);
@@ -1639,6 +1654,200 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_database_path_is_rejected_before_external_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = temp_root("traversal-database");
+        let root = parent.join("home");
+        let outside = parent.join("outside");
+        std::fs::create_dir_all(&root).expect("managed root");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755))
+            .expect("outside mode");
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"outside-preserved").expect("outside sentinel");
+
+        let mut config = ServerConfig::for_root(root.clone());
+        config.database_path = root.join("..").join("outside").join("omen.sqlite");
+        let result = init_files(&config);
+
+        assert!(result.is_err(), "traversal must fail before initialization");
+        assert_eq!(
+            std::fs::metadata(&outside)
+                .expect("outside metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).expect("outside sentinel"),
+            b"outside-preserved"
+        );
+        assert!(!outside.join("omen.sqlite").exists());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_configured_private_path_rejects_parent_traversal_without_outside_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for field in ["identity", "database", "reticulum"] {
+            let parent = temp_root(field);
+            let root = parent.join("home");
+            let outside = parent.join("outside");
+            std::fs::create_dir_all(&root).expect("managed root");
+            std::fs::create_dir_all(&outside).expect("outside");
+            std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755))
+                .expect("outside mode");
+            let sentinel = outside.join("sentinel");
+            std::fs::write(&sentinel, b"preserved").expect("sentinel");
+            let traversal = root.join("nested/../../outside/state");
+            let mut config = ServerConfig::for_root(root.clone());
+            match field {
+                "identity" => config.identity_path = traversal,
+                "database" => config.database_path = traversal,
+                "reticulum" => config.reticulum_config_path = traversal,
+                _ => unreachable!(),
+            }
+
+            assert!(init_files(&config).is_err(), "{field} traversal must fail");
+            assert_eq!(std::fs::read(&sentinel).expect("sentinel"), b"preserved");
+            assert_eq!(
+                std::fs::metadata(&outside)
+                    .expect("outside metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            assert!(!outside.join("state").exists());
+            assert!(!root.join("identity").exists());
+            assert!(!root.join("omenchat.sqlite").exists());
+            assert!(!root.join("reticulum").exists());
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clean_external_paths_work_without_changing_external_parent_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = temp_root("external-clean");
+        let root = parent.join("home");
+        let outside = parent.join("outside");
+        std::fs::create_dir_all(&root).expect("managed root");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755))
+            .expect("outside mode");
+        let mut config = ServerConfig::for_root(root);
+        config.identity_path = outside.join("identity");
+        config.database_path = outside.join("omen.sqlite");
+        config.reticulum_config_path = outside.join("reticulum");
+
+        init_files(&config).expect("clean external paths");
+
+        assert_eq!(
+            std::fs::metadata(&outside)
+                .expect("outside metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert!(config.identity_path.is_file());
+        assert!(config.database_path.is_file());
+        assert!(config.reticulum_config_path.is_dir());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn missing_external_ancestor_is_not_recursively_created() {
+        let parent = temp_root("external-missing-ancestor");
+        let root = parent.join("home");
+        std::fs::create_dir_all(&root).expect("managed root");
+        let mut config = ServerConfig::for_root(root);
+        let missing = parent.join("outside/missing/identity");
+        config.identity_path = missing.clone();
+
+        assert!(init_files(&config).is_err());
+        assert!(!parent.join("outside").exists());
+        assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn config_directory_is_rejected_before_parsing_or_initialization() {
+        let parent = temp_root("config-directory");
+        let root = parent.join("home");
+        std::fs::create_dir_all(root.join("config.toml")).expect("config directory");
+
+        assert!(ServerConfig::load_or_default(root.clone()).is_err());
+        assert!(!root.join("identity").exists());
+        assert!(!root.join("omenchat.sqlite").exists());
+        assert!(!root.join("reticulum").exists());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_symlink_is_rejected_before_path_bearing_document_is_parsed() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_root("config-symlink");
+        let root = parent.join("home");
+        let outside = parent.join("outside");
+        std::fs::create_dir_all(&root).expect("managed root");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        let outside_config = outside.join("external.toml");
+        let outside_database = outside.join("external.sqlite");
+        let rendered = ServerConfig::for_root(root.clone()).render_toml().replace(
+            &toml_string(&root.join("omenchat.sqlite").to_string_lossy()),
+            &toml_string(&outside_database.to_string_lossy()),
+        );
+        std::fs::write(&outside_config, rendered).expect("external config");
+        symlink(&outside_config, root.join("config.toml")).expect("config symlink");
+
+        let result = ServerConfig::load_or_default(root.clone());
+
+        assert!(result.is_err(), "config symlink must fail before parsing");
+        assert!(!outside_database.exists());
+        assert!(!root.join("identity").exists());
+        assert!(!root.join("reticulum").exists());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_managed_symlink_is_rejected_before_recursive_creation() {
+        use std::os::unix::fs::symlink;
+
+        let parent = temp_root("managed-ancestor-symlink");
+        let root = parent.join("home");
+        let outside = parent.join("outside");
+        std::fs::create_dir_all(&root).expect("managed root");
+        std::fs::create_dir_all(&outside).expect("outside directory");
+        let sentinel = outside.join("sentinel");
+        std::fs::write(&sentinel, b"outside-preserved").expect("outside sentinel");
+        symlink(&outside, root.join("redirect")).expect("managed redirect");
+
+        let mut config = ServerConfig::for_root(root.clone());
+        config.identity_path = root.join("redirect").join("nested").join("identity");
+        let result = init_files(&config);
+
+        assert!(result.is_err(), "managed ancestor symlink must fail closed");
+        assert_eq!(
+            std::fs::read(&sentinel).expect("outside sentinel"),
+            b"outside-preserved"
+        );
+        assert!(!outside.join("nested").exists());
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[test]

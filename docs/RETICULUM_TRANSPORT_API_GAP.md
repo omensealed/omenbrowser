@@ -286,7 +286,7 @@ comparison is constant-time without changing wire bytes or MTU.
 The 0.9.7 stamp/ticket decision remains unchanged: OMEN owns one authoritative
 decision and final stamp using authenticated relay-advertised cost, its existing
 safety ceiling, and reply-ticket precedence. Pinned/current Python and mixed
-0.6.0-1/0.9.7-4 propagation tests retain advertised cost and ticket wire checks.
+0.6.0-1/0.9.7-5 propagation tests retain advertised cost and ticket wire checks.
 The upstream default propagation cost is not substituted for a raised live
 relay cost.
 

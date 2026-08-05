@@ -2537,7 +2537,7 @@ struct ReticulumInterface {
 }
 
 fn parse_reticulum_interfaces(path: &Path) -> ServerResult<Vec<ReticulumInterface>> {
-    let contents = std::fs::read_to_string(path)?;
+    let contents = crate::config::read_reticulum_config_bounded(path)?;
     let mut interfaces = Vec::new();
     let mut current: Option<ReticulumInterface> = None;
     for line in contents.lines() {
@@ -2608,9 +2608,15 @@ fn load_or_create_identity(config: &ServerConfig) -> ServerResult<PrivateIdentit
                     "omenchatd identity must be a regular non-symlink file".into(),
                 ));
             }
-            Some(std::fs::read(&config.identity_path).map_err(|error| {
-                ServerError::Message(format!("omenchatd identity could not be read: {error}"))
-            })?)
+            Some(
+                crate::private_fs::read_private_bounded(&config.identity_path, 4096).map_err(
+                    |error| {
+                        ServerError::Message(format!(
+                            "omenchatd identity could not be read: {error}"
+                        ))
+                    },
+                )?,
+            )
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
@@ -2633,9 +2639,7 @@ fn load_or_create_identity(config: &ServerConfig) -> ServerResult<PrivateIdentit
     }
 
     let identity = PrivateIdentity::new_from_rand(OsRng);
-    if let Some(parent) = config.identity_path.parent() {
-        crate::config::ensure_sensitive_parent(parent, &config.root_dir())?;
-    }
+    config.ensure_sensitive_file_parent(&config.identity_path)?;
     crate::config::replace_private_file(&config.identity_path, &identity.to_private_key_bytes())?;
     Ok(identity)
 }
