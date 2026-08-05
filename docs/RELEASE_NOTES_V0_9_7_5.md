@@ -21,6 +21,10 @@ Status: final
 - Every production file-backed SQLite source open is routed through a central
   wrapper that adds SQLite `NOFOLLOW` while preserving existing open modes,
   WAL/SHM behavior, timeouts, transactions, migrations, backups, and exports.
+  On Unix, the already validated parent is resolved to its stable filesystem
+  spelling before the final database name is opened. This supports system-owned
+  ancestor aliases such as macOS `/var` while leaving the final component
+  protected by `NOFOLLOW`.
 
 ## Compatibility boundaries
 

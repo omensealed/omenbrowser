@@ -34,7 +34,8 @@ central `NOFOLLOW` wrapper without changing connection policy.
   official registry Reticulum/LXMF `0.9.7` train.
 - Post-version `release-check.sh full` passed after the final fixes: the root
   suite reported 1,617 passing tests and 31 established ignores; the standalone
-  server suite reported 594 passing tests and 12 established ignores.
+  server suite reported 595 passing tests and 12 established ignores after the
+  hosted-macOS regression test was added.
 - The isolated current-upload lane passed with a second client Resource fetch;
   continuous reconnect passed with stable destination identity and post-restart
   message/reaction/revision/pin recovery; the current NomadNet page lane passed
@@ -53,6 +54,11 @@ central `NOFOLLOW` wrapper without changing connection policy.
   initial ARM run exposed an unsupported-headless-TUI ordering regression; the
   command now rejects before loading configuration or creating a selected home,
   and the native focused test plus the complete rerun passed.
+- The first hosted macOS run exposed SQLite `NOFOLLOW` rejecting the standard
+  `/var` system alias used by temporary directories. SQLite opens now resolve
+  only the already validated parent directory to its stable filesystem spelling
+  and retain the final filename for `NOFOLLOW`; focused ancestor-link and final
+  database-symlink tests cover both sides of that boundary.
 - The Linux package candidate passed archive checksum/extraction, required-file
   checks, isolated server init/status, support collection, and two-client
   OMENchat smoke.

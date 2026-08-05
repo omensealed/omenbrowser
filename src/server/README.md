@@ -129,8 +129,11 @@ Reticulum paths reject `..`. Managed descendants are walked component by
 component from the canonical root and cannot cross an intermediate symlink.
 Clean custom paths remain supported, but their existing ancestors are not
 claimed or chmodded and must be controlled by the operator. Server SQLite
-source opens use SQLite `NOFOLLOW`; this does not change WAL mode, schema,
-migration, backup, timeout, or transaction behavior.
+source opens use SQLite `NOFOLLOW`. On Unix, the validated parent is first
+resolved to its stable filesystem spelling so system aliases such as macOS
+`/var` remain usable, while the final database name remains unresolved and
+protected by `NOFOLLOW`. This does not change WAL mode, schema, migration,
+backup, timeout, or transaction behavior.
 
 Useful local TCP setup for testing:
 

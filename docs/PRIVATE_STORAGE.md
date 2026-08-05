@@ -66,7 +66,11 @@ inside an externally writable ancestor.
 
 Server-owned SQLite source connections add SQLite `NOFOLLOW` while preserving
 their existing read-only, read-write, create, URI, mutex, WAL, timeout,
-transaction, migration, and backup modes. Sensitive-file reads and append
-opens validate the path and opened handle, apply `0600` to that handle, and
-revalidate the path identity before use where the standard library exposes the
-required metadata.
+transaction, migration, and backup modes. On Unix, only the already validated
+parent is resolved to its stable filesystem spelling before open; the final
+database component remains unresolved so `NOFOLLOW` still rejects a database
+symlink. This permits system-owned aliases such as macOS `/var` without
+weakening the final-file boundary. Sensitive-file reads and append opens
+validate the path and opened handle, apply `0600` to that handle, and revalidate
+the path identity before use where the standard library exposes the required
+metadata.
