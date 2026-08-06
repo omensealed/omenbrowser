@@ -1,7 +1,7 @@
 use crate::error::ServerResult;
 use crate::protocol::batch::decode_resource_offer_body;
 use crate::protocol::codec::{decode_frame, encode_frame};
-use crate::protocol::{ChatOp, Frame};
+use crate::protocol::{ChatErrorCode, ChatOp, Frame, FrameBody, FrameValue};
 use crate::session::{ServerPeer, SessionEngine};
 
 pub type LinkId = [u8; 16];
@@ -168,12 +168,7 @@ pub fn send_response_frame<T: OmenchatTransport>(
     response: &Frame,
     transport: &mut T,
 ) -> ServerResult<()> {
-    let encoded = encode_frame(response).map_err(|error| {
-        crate::error::ServerError::Message(format!("OMENchat frame encode failed: {error}"))
-    })?;
-    transport.send_frame(link_id, encoded)?;
-    maybe_offer_resource(engine, link_id, response, transport)?;
-    Ok(())
+    send_preflighted_response(engine, link_id, response, transport, None)
 }
 
 pub fn send_response_frame_with_context<T: OmenchatTransport>(
@@ -183,52 +178,111 @@ pub fn send_response_frame_with_context<T: OmenchatTransport>(
     transport: &mut T,
     context: u8,
 ) -> ServerResult<()> {
-    let encoded = encode_frame(response).map_err(|error| {
-        crate::error::ServerError::Message(format!("OMENchat frame encode failed: {error}"))
-    })?;
-    transport.send_frame_with_context(link_id, encoded, context)?;
-    maybe_offer_resource(engine, link_id, response, transport)?;
-    Ok(())
+    send_preflighted_response(engine, link_id, response, transport, Some(context))
 }
 
-fn maybe_offer_resource<T: OmenchatTransport>(
+struct PreparedResponseResource {
+    resource_id: String,
+    payload: Vec<u8>,
+    metadata: Vec<u8>,
+}
+
+fn send_preflighted_response<T: OmenchatTransport>(
     engine: &SessionEngine,
     link_id: LinkId,
     response: &Frame,
     transport: &mut T,
+    context: Option<u8>,
 ) -> ServerResult<()> {
     if !response_carries_resource(response.op) {
-        return Ok(());
+        return send_encoded_frame(link_id, response, transport, context);
     }
-    if response.op == ChatOp::UploadResourceOffer {
-        let Some(resource_id) = upload_resource_id_from_offer(response) else {
-            return Ok(());
-        };
-        if let Some(payload) = engine.resource_payload(&resource_id)? {
-            transport.offer_resource(
-                link_id,
-                resource_id.clone(),
-                payload,
-                resource_metadata(&resource_id),
-            )?;
-        }
-        return Ok(());
+
+    let Some(prepared) = prepare_response_resource(engine, response)? else {
+        return send_resource_unavailable(link_id, response, transport, context);
+    };
+    if !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
+        prepared.payload.len(),
+        prepared.metadata.len(),
+    ) {
+        let _ = engine.take_resource_payload(&prepared.resource_id)?;
+        return send_resource_unavailable(link_id, response, transport, context);
     }
-    let offer = decode_resource_offer_body(&response.body).map_err(|error| {
-        crate::error::ServerError::Message(format!(
-            "OMENchat resource offer decode failed: {error}"
-        ))
+
+    send_encoded_frame(link_id, response, transport, context)?;
+    transport.offer_resource(
+        link_id,
+        prepared.resource_id,
+        prepared.payload,
+        prepared.metadata,
+    )
+}
+
+fn prepare_response_resource(
+    engine: &SessionEngine,
+    response: &Frame,
+) -> ServerResult<Option<PreparedResponseResource>> {
+    let resource_id = if response.op == ChatOp::UploadResourceOffer {
+        upload_resource_id_from_offer(response)
+    } else {
+        Some(
+            decode_resource_offer_body(&response.body)
+                .map_err(|error| {
+                    crate::error::ServerError::Message(format!(
+                        "OMENchat resource offer decode failed: {error}"
+                    ))
+                })?
+                .resource_id,
+        )
+    };
+    let Some(resource_id) = resource_id else {
+        return Ok(None);
+    };
+    let Some(payload) = engine.resource_payload(&resource_id)? else {
+        return Ok(None);
+    };
+    let metadata = resource_metadata(&resource_id);
+    Ok(Some(PreparedResponseResource {
+        resource_id,
+        payload,
+        metadata,
+    }))
+}
+
+fn send_encoded_frame<T: OmenchatTransport>(
+    link_id: LinkId,
+    frame: &Frame,
+    transport: &mut T,
+    context: Option<u8>,
+) -> ServerResult<()> {
+    let encoded = encode_frame(frame).map_err(|error| {
+        crate::error::ServerError::Message(format!("OMENchat frame encode failed: {error}"))
     })?;
-    if let Some(payload) = engine.resource_payload(&offer.resource_id)? {
-        let resource_id = offer.resource_id;
-        transport.offer_resource(
-            link_id,
-            resource_id.clone(),
-            payload,
-            resource_metadata(&resource_id),
-        )?;
+    if let Some(context) = context {
+        transport.send_frame_with_context(link_id, encoded, context)
+    } else {
+        transport.send_frame(link_id, encoded)
     }
-    Ok(())
+}
+
+fn send_resource_unavailable<T: OmenchatTransport>(
+    link_id: LinkId,
+    response: &Frame,
+    transport: &mut T,
+    context: Option<u8>,
+) -> ServerResult<()> {
+    let error = Frame::new(
+        ChatOp::Error,
+        response.seq,
+        response.room_id,
+        FrameBody::Fields(vec![
+            FrameValue::U64(ChatErrorCode::ResourceUnavailable as u16 as u64),
+            FrameValue::String(
+                "Resource unavailable on the current Reticulum compatibility train".into(),
+            ),
+        ]),
+    );
+    send_encoded_frame(link_id, &error, transport, context)
 }
 
 fn response_carries_resource(op: ChatOp) -> bool {
@@ -365,6 +419,73 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ResourceRejectingTransport {
+        captured: CapturedTransport,
+        offer_attempts: usize,
+    }
+
+    impl OmenchatTransport for ResourceRejectingTransport {
+        fn send_frame(&mut self, link_id: LinkId, frame_bytes: Vec<u8>) -> ServerResult<()> {
+            self.captured.send_frame(link_id, frame_bytes)
+        }
+
+        fn send_frame_with_context(
+            &mut self,
+            link_id: LinkId,
+            frame_bytes: Vec<u8>,
+            context: u8,
+        ) -> ServerResult<()> {
+            self.captured
+                .send_frame_with_context(link_id, frame_bytes, context)
+        }
+
+        fn offer_resource(
+            &mut self,
+            _link_id: LinkId,
+            _resource_id: String,
+            _payload: Vec<u8>,
+            _metadata: Vec<u8>,
+        ) -> ServerResult<()> {
+            self.offer_attempts = self.offer_attempts.saturating_add(1);
+            Err(ServerError::Message("injected resource rejection".into()))
+        }
+
+        fn sent_frame_count(&self) -> u64 {
+            self.captured.sent_frame_count()
+        }
+
+        fn offered_resource_count(&self) -> u64 {
+            0
+        }
+
+        fn sent_frame_bytes(&self) -> u64 {
+            self.captured.sent_frame_bytes()
+        }
+
+        fn offered_resource_bytes(&self) -> u64 {
+            0
+        }
+    }
+
+    fn test_resource_offer(resource_id: String, payload_len: usize) -> Frame {
+        use crate::protocol::batch::{resource_offer_body, ResourceOffer};
+        use crate::protocol::Compression;
+
+        Frame::new(
+            ChatOp::HistoryResourceOffer,
+            99,
+            Some(1),
+            resource_offer_body(&ResourceOffer {
+                resource_id,
+                compression: Compression::None,
+                uncompressed_len: payload_len as u64,
+                compressed_len: payload_len as u64,
+                purpose: "history".into(),
+            }),
+        )
+    }
+
     #[test]
     fn link_bridge_emits_frames_and_resource_payloads() {
         let store = OmenchatStore::in_memory().expect("store");
@@ -477,6 +598,106 @@ mod tests {
         .expect_err("transport rejection");
 
         assert!(error.to_string().contains("injected frame rejection"));
+        assert_eq!(
+            engine
+                .pending_resource_metrics()
+                .expect("pending resource metrics"),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn oversized_metadata_resource_is_rejected_before_offer_frame() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let resource_id = "history:split-exposure".to_owned();
+        let metadata = resource_metadata(&resource_id);
+        let payload_len = 1_048_575usize
+            .checked_sub(3 + metadata.len())
+            .expect("metadata fits")
+            + 1;
+        engine
+            .store_test_pending_resource(resource_id.clone(), vec![0x5a; payload_len])
+            .expect("retain exposure payload");
+        let frame = test_resource_offer(resource_id, payload_len);
+        let mut transport = CapturedTransport::default();
+
+        send_response_frame(&engine, [0x99; 16], &frame, &mut transport)
+            .expect("bounded compatibility rejection");
+
+        assert_eq!(
+            transport.resources.len(),
+            0,
+            "unsafe Resource must not dispatch"
+        );
+        assert_eq!(
+            transport.frames.len(),
+            1,
+            "one bounded error frame is returned"
+        );
+        let returned = decode_frame(&transport.frames[0].bytes).expect("decode returned frame");
+        assert_eq!(returned.op, ChatOp::Error);
+        assert_eq!(
+            engine
+                .pending_resource_metrics()
+                .expect("pending resource metrics"),
+            (0, 0, 0),
+            "unsafe retained payload is released"
+        );
+    }
+
+    #[test]
+    fn exact_boundary_resource_dispatches_once_with_context() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let resource_id = "history:exact-boundary".to_owned();
+        let metadata = resource_metadata(&resource_id);
+        let payload_len = crate::resource_compat::maximum_payload_for_metadata_len(metadata.len())
+            .expect("metadata fits");
+        engine
+            .store_test_pending_resource(resource_id.clone(), vec![0x33; payload_len])
+            .expect("retain boundary payload");
+        let frame = test_resource_offer(resource_id, payload_len);
+        let mut transport = CapturedTransport::default();
+
+        send_response_frame_with_context(&engine, [0x42; 16], &frame, &mut transport, 0x7a)
+            .expect("dispatch exact boundary");
+
+        assert_eq!(transport.frames.len(), 1);
+        assert_eq!(transport.frames[0].context, 0x7a);
+        assert_eq!(transport.resources.len(), 1);
+        assert_eq!(transport.resources[0].payload.len(), payload_len);
+        assert_eq!(
+            engine
+                .pending_resource_metrics()
+                .expect("pending resource metrics"),
+            (1, payload_len, 0)
+        );
+        release_response_resource(&engine, &frame).expect("release boundary payload");
+        assert_eq!(
+            engine
+                .pending_resource_metrics()
+                .expect("released pending resource metrics"),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn resource_dispatch_failure_does_not_retain_or_retry_payload() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let resource_id = "history:dispatch-failure".to_owned();
+        engine
+            .store_test_pending_resource(resource_id.clone(), vec![0x44; 32])
+            .expect("retain payload");
+        let frame = test_resource_offer(resource_id, 32);
+        let mut transport = ResourceRejectingTransport::default();
+
+        let error = send_response_frame(&engine, [0x43; 16], &frame, &mut transport)
+            .expect_err("injected dispatch failure");
+
+        assert!(error.to_string().contains("injected resource rejection"));
+        assert_eq!(transport.captured.frames.len(), 1);
+        assert_eq!(transport.offer_attempts, 1);
+        assert_eq!(transport.offered_resource_count(), 0);
+        release_response_resource(&engine, &frame).expect("release failed payload");
         assert_eq!(
             engine
                 .pending_resource_metrics()

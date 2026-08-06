@@ -36,6 +36,7 @@ pub mod plugins;
 mod private_fs;
 pub mod product_identity;
 mod protocol_limits;
+mod resource_compat;
 pub mod runtime;
 pub mod storage;
 pub mod structured_log_reader;

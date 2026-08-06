@@ -250,6 +250,7 @@ bash -n scripts/package-linux-arm64-omenchatd.sh
 bash -n scripts/test-linux-arm64-headless.sh
 bash -n scripts/test-omenchatd-private-service.sh
 bash -n scripts/verify-private-storage-policy.sh
+bash -n scripts/verify-reticulum-resource-compat.sh
 
 echo "== Private storage policy =="
 bash scripts/verify-private-storage-policy.sh
@@ -267,6 +268,9 @@ bash scripts/verify-release-version.sh
 
 echo "== Reticulum/LXMF dependency train =="
 bash scripts/verify-reticulum-train.sh
+
+echo "== Reticulum 0.9.7 Resource compatibility =="
+bash scripts/verify-reticulum-resource-compat.sh
 
 echo "== Accepted build-time advisory boundary =="
 bash scripts/verify-accepted-advisories.sh --no-fetch

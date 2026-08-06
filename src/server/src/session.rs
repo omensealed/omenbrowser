@@ -108,6 +108,13 @@ impl Default for SessionLimits {
     }
 }
 
+impl SessionLimits {
+    pub fn effective_upload_max_file_bytes(&self) -> u64 {
+        self.upload_max_file_bytes
+            .min(crate::resource_compat::exact_train_upload_payload_max() as u64)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RateKind {
     Message,
@@ -1125,7 +1132,7 @@ impl SessionEngine {
                 .unwrap_or(FrameValue::Nil),
             FrameValue::U64(self.limits.upload_quota_bytes),
             FrameValue::U64(self.limits.ping_interval_seconds.clamp(5, 600)),
-            FrameValue::U64(self.limits.upload_max_file_bytes),
+            FrameValue::U64(self.limits.effective_upload_max_file_bytes()),
         ]);
         let moderation_audit_requested = self.moderation_audit_enabled
             && negotiation.as_ref().is_some_and(|negotiation| {
@@ -4413,14 +4420,6 @@ impl SessionEngine {
                 0,
             )]);
         }
-        if let Some(rejection) = self.reject_room_upload_policy(
-            seq,
-            room_id,
-            offer.incoming_bytes,
-            room_media_policy_negotiated,
-        )? {
-            return Ok(vec![rejection]);
-        }
         if offer.incoming_bytes > self.limits.upload_max_file_bytes {
             return Ok(vec![self.upload_reject_frame(
                 seq,
@@ -4429,6 +4428,24 @@ impl SessionEngine {
                 self.limits.upload_max_file_bytes,
                 offer.incoming_bytes,
             )]);
+        }
+        let effective_upload_max = self.limits.effective_upload_max_file_bytes();
+        if offer.incoming_bytes > effective_upload_max {
+            return Ok(vec![self.upload_reject_frame(
+                seq,
+                Some(room_id),
+                "upload exceeds effective Reticulum compatibility limit",
+                effective_upload_max,
+                offer.incoming_bytes,
+            )]);
+        }
+        if let Some(rejection) = self.reject_room_upload_policy(
+            seq,
+            room_id,
+            offer.incoming_bytes,
+            room_media_policy_negotiated,
+        )? {
+            return Ok(vec![rejection]);
         }
         let Some(cache_root) = self.limits.upload_cache_root.clone() else {
             return Ok(vec![self.upload_reject_frame(
@@ -4574,6 +4591,17 @@ impl SessionEngine {
                 )]);
             }
         };
+        let effective_upload_max = self.limits.effective_upload_max_file_bytes();
+        if upload.incoming_bytes > effective_upload_max || data.len() as u64 > effective_upload_max
+        {
+            return Ok(vec![self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "upload exceeds effective Reticulum compatibility limit",
+                effective_upload_max,
+                data.len() as u64,
+            )]);
+        }
         if data.len() as u64 != upload.incoming_bytes {
             return Ok(vec![self.upload_reject_frame(
                 0,
@@ -5037,7 +5065,7 @@ impl SessionEngine {
         }
         let Some(policy) = self
             .store
-            .effective_room_upload_policy(room_id, self.limits.upload_max_file_bytes)?
+            .effective_room_upload_policy(room_id, self.limits.effective_upload_max_file_bytes())?
         else {
             return Ok(Some(self.upload_reject_frame(
                 seq,
@@ -5297,6 +5325,15 @@ impl SessionEngine {
             .lock()
             .map_err(|_| ServerError::Message("pending resource lock poisoned".into()))?
             .insert(resource_id, payload)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store_test_pending_resource(
+        &self,
+        resource_id: String,
+        payload: Vec<u8>,
+    ) -> ServerResult<()> {
+        self.store_pending_resource(resource_id, payload)
     }
 }
 
@@ -6406,6 +6443,111 @@ mod tests {
                 .expect("resource payload")
                 .as_deref(),
             Some(payload.as_slice())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn configured_upload_limit_is_retained_but_negotiated_and_admitted_effectively() {
+        let root = temp_upload_root("effective-resource-limit");
+        let _ = std::fs::remove_dir_all(&root);
+        let configured = 10 * 1024 * 1024;
+        let effective = crate::resource_compat::exact_train_upload_payload_max() as u64;
+        assert_eq!(
+            SessionLimits::default().effective_upload_max_file_bytes(),
+            512 * 1024,
+            "the default upload limit remains unchanged"
+        );
+        let limits = SessionLimits {
+            upload_quota_bytes: 20 * 1024 * 1024,
+            upload_max_file_bytes: configured,
+            upload_cache_root: Some(root.clone()),
+            ..SessionLimits::default()
+        };
+        assert_eq!(limits.upload_max_file_bytes, configured);
+        assert_eq!(limits.effective_upload_max_file_bytes(), effective);
+        assert_eq!(
+            crate::store::EffectiveRoomUploadPolicy::resolve(Some(effective + 1), effective)
+                .expect("larger room policy resolves"),
+            crate::store::EffectiveRoomUploadPolicy::MaximumFileBytes(effective)
+        );
+        assert_eq!(
+            crate::store::EffectiveRoomUploadPolicy::resolve(Some(256 * 1024), effective)
+                .expect("smaller room policy resolves"),
+            crate::store::EffectiveRoomUploadPolicy::MaximumFileBytes(256 * 1024)
+        );
+        let engine = SessionEngine::with_limits(OmenchatStore::in_memory().expect("store"), limits);
+        let peer = peer();
+
+        let opened = engine
+            .handle_frame(
+                &peer,
+                Frame::new(ChatOp::SessionOpen, 1, None, FrameBody::Empty),
+            )
+            .expect("session open");
+        let FrameBody::Fields(opened_fields) = &opened[0].body else {
+            panic!("session accept fields");
+        };
+        assert_eq!(opened_fields.get(5), Some(&FrameValue::U64(effective)));
+        join_lobby(&engine, &peer);
+
+        let rejected = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    2,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("too-large.bin".into()),
+                        FrameValue::U64(effective + 1),
+                    ]),
+                ),
+            )
+            .expect("compatibility rejection");
+        assert_eq!(rejected[0].op, ChatOp::UploadReject);
+        assert!(matches!(
+            &rejected[0].body,
+            FrameBody::Fields(fields)
+                if fields.first() == Some(&FrameValue::String(
+                    "upload exceeds effective Reticulum compatibility limit".into()
+                ))
+                    && fields.get(1) == Some(&FrameValue::U64(effective))
+                    && fields.get(2) == Some(&FrameValue::U64(effective + 1))
+        ));
+        assert_eq!(
+            engine
+                .pending_upload_metrics()
+                .expect("pending upload metrics"),
+            (0, 0, 0, 0)
+        );
+
+        let accepted = engine
+            .handle_frame(
+                &peer,
+                Frame::new(
+                    ChatOp::UploadOffer,
+                    u32::MAX,
+                    Some(1),
+                    FrameBody::Fields(vec![
+                        FrameValue::String("boundary.bin".into()),
+                        FrameValue::U64(effective),
+                    ]),
+                ),
+            )
+            .expect("boundary admission");
+        assert_eq!(accepted[0].op, ChatOp::UploadAccept);
+        let FrameBody::Fields(fields) = &accepted[0].body else {
+            panic!("upload accept fields");
+        };
+        let FrameValue::String(resource_id) = &fields[0] else {
+            panic!("resource id");
+        };
+        assert!(
+            crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
+                effective as usize,
+                crate::transport::resource_metadata(resource_id).len()
+            )
         );
         let _ = std::fs::remove_dir_all(root);
     }

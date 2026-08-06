@@ -3686,6 +3686,24 @@ and remains a separate multi-process/pinned-Python gate.
 
 ## omenchatd two-process Resource completion gate
 
+### Reticulum 0.9.7 split-metadata sentinel and OMEN guards
+
+The deliberately ignored
+`reticulum_split_metadata_assembly_preserves_segment_two_payload` test sends a
+real two-segment metadata Resource through the unmodified registry transport.
+It documents upstream issue #553 and proposed fix #556 and is expected to fail
+on 0.9.7. It is separate from
+`reticulum_udp_tx_buffer_covers_max_resource_wire_packet`.
+
+Non-ignored product tests cover exact-boundary acceptance, plus-one rejection
+before the offer frame, retained-payload cleanup, one dispatch only, effective
+upload negotiation, and suppression of a later completion after split evidence.
+Run the source/release guard with:
+
+```bash
+bash scripts/verify-reticulum-resource-compat.sh
+```
+
 The explicit two-process gate re-executes only its own ignored test in separate
 receiver and sender processes. It uses deterministic test-only identities,
 dynamically reserved point-to-point UDP ports, bounded child lifetimes, and an
@@ -4208,7 +4226,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-5` must report
+therefore exits with the expected signal status; current `0.9.7-6` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

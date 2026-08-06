@@ -4430,6 +4430,17 @@ fn apply_upload_accept(
         return;
     }
     let byte_len = upload.bytes.len() as u64;
+    let metadata_len = crate::chat::rns::resource_metadata(&resource_id).len();
+    if !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
+        upload.bytes.len(),
+        metadata_len,
+    ) {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "OMENchat upload exceeds the safe Reticulum 0.9.7 single-segment limit".into(),
+        });
+        return;
+    }
     if let Err(error) = transport.send_resource(&resource_id, upload.bytes) {
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
