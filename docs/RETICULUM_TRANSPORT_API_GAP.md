@@ -25,7 +25,7 @@ The ignored split-metadata interoperability sentinel is independent of the
 older maximum-UDP Resource sentinel. Remove the temporary guard only after an
 official fixed registry train is adopted and its unchanged sentinel passes.
 
-Post-release v0.9.7-6 maintenance applies the same derived ceiling at the
+The v0.9.7-7 maintenance revision applies the same derived ceiling at the
 reusable OMENchat client boundary, before sequence reservation, pending state,
 an offer frame, or Resource dispatch. Native NomadNet timeout details now
 distinguish observed-but-incomplete Resource assembly and state explicitly that
@@ -309,7 +309,7 @@ comparison is constant-time without changing wire bytes or MTU.
 The 0.9.7 stamp/ticket decision remains unchanged: OMEN owns one authoritative
 decision and final stamp using authenticated relay-advertised cost, its existing
 safety ceiling, and reply-ticket precedence. Pinned/current Python and mixed
-0.6.0-1/0.9.7-6 propagation tests retain advertised cost and ticket wire checks.
+0.6.0-1/0.9.7-7 propagation tests retain advertised cost and ticket wire checks.
 The upstream default propagation cost is not substituted for a raised live
 relay cost.
 

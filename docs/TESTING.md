@@ -4226,7 +4226,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-6` must report
+therefore exits with the expected signal status; current `0.9.7-7` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -5970,10 +5970,10 @@ The maximum-UDP Resource sentinel remains deliberately ignored and visible. It
 must not be weakened or relabeled as passing while the locked upstream transmit
 buffer remains smaller than the maximum serialized Resource packet.
 
-## v0.9.7-6 post-release Resource maintenance
+## v0.9.7-7 Resource maintenance
 
-The current release remains v0.9.7-6; this maintenance does not prepare a
-v0.9.7-7 version. Focused gates cover reusable upload rejection before any
+The v0.9.7-7 revision packages the qualified post-v0.9.7-6 maintenance.
+Focused gates cover reusable upload rejection before any
 sequence/pending/frame/Resource state, observed Resource activity that reaches
 the existing deadline without completion, bounded lag evidence, and ephemeral
 split-safeguard counters:
