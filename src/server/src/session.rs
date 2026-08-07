@@ -111,7 +111,6 @@ impl Default for SessionLimits {
 impl SessionLimits {
     pub fn effective_upload_max_file_bytes(&self) -> u64 {
         self.upload_max_file_bytes
-            .min(crate::resource_compat::exact_train_upload_payload_max() as u64)
     }
 }
 
@@ -4429,16 +4428,6 @@ impl SessionEngine {
                 offer.incoming_bytes,
             )]);
         }
-        let effective_upload_max = self.limits.effective_upload_max_file_bytes();
-        if offer.incoming_bytes > effective_upload_max {
-            return Ok(vec![self.upload_reject_frame(
-                seq,
-                Some(room_id),
-                "upload exceeds effective Reticulum compatibility limit",
-                effective_upload_max,
-                offer.incoming_bytes,
-            )]);
-        }
         if let Some(rejection) = self.reject_room_upload_policy(
             seq,
             room_id,
@@ -4591,17 +4580,6 @@ impl SessionEngine {
                 )]);
             }
         };
-        let effective_upload_max = self.limits.effective_upload_max_file_bytes();
-        if upload.incoming_bytes > effective_upload_max || data.len() as u64 > effective_upload_max
-        {
-            return Ok(vec![self.upload_reject_frame(
-                0,
-                Some(upload.room_id),
-                "upload exceeds effective Reticulum compatibility limit",
-                effective_upload_max,
-                data.len() as u64,
-            )]);
-        }
         if data.len() as u64 != upload.incoming_bytes {
             return Ok(vec![self.upload_reject_frame(
                 0,
@@ -6448,11 +6426,11 @@ mod tests {
     }
 
     #[test]
-    fn configured_upload_limit_is_retained_but_negotiated_and_admitted_effectively() {
+    fn configured_upload_limit_is_retained_negotiated_and_room_bounded() {
         let root = temp_upload_root("effective-resource-limit");
         let _ = std::fs::remove_dir_all(&root);
         let configured = 10 * 1024 * 1024;
-        let effective = crate::resource_compat::exact_train_upload_payload_max() as u64;
+        let effective = configured;
         assert_eq!(
             SessionLimits::default().effective_upload_max_file_bytes(),
             512 * 1024,
@@ -6491,37 +6469,6 @@ mod tests {
         assert_eq!(opened_fields.get(5), Some(&FrameValue::U64(effective)));
         join_lobby(&engine, &peer);
 
-        let rejected = engine
-            .handle_frame(
-                &peer,
-                Frame::new(
-                    ChatOp::UploadOffer,
-                    2,
-                    Some(1),
-                    FrameBody::Fields(vec![
-                        FrameValue::String("too-large.bin".into()),
-                        FrameValue::U64(effective + 1),
-                    ]),
-                ),
-            )
-            .expect("compatibility rejection");
-        assert_eq!(rejected[0].op, ChatOp::UploadReject);
-        assert!(matches!(
-            &rejected[0].body,
-            FrameBody::Fields(fields)
-                if fields.first() == Some(&FrameValue::String(
-                    "upload exceeds effective Reticulum compatibility limit".into()
-                ))
-                    && fields.get(1) == Some(&FrameValue::U64(effective))
-                    && fields.get(2) == Some(&FrameValue::U64(effective + 1))
-        ));
-        assert_eq!(
-            engine
-                .pending_upload_metrics()
-                .expect("pending upload metrics"),
-            (0, 0, 0, 0)
-        );
-
         let accepted = engine
             .handle_frame(
                 &peer,
@@ -6543,12 +6490,7 @@ mod tests {
         let FrameValue::String(resource_id) = &fields[0] else {
             panic!("resource id");
         };
-        assert!(
-            crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
-                effective as usize,
-                crate::transport::resource_metadata(resource_id).len()
-            )
-        );
+        assert!(resource_id.starts_with("upload:"));
         let _ = std::fs::remove_dir_all(root);
     }
 

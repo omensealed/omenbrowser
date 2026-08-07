@@ -5,6 +5,8 @@ use std::process::{Child, Command, Output, Stdio};
 
 use rns_transport::delivery::await_link_activation;
 use rns_transport::destination::link::LinkStatus;
+use rns_transport::iface::tcp_client::TcpClient;
+use rns_transport::iface::tcp_server::TcpServer;
 use rns_transport::iface::udp::UdpInterface;
 use rns_transport::packet::PacketDataBuffer;
 use rns_transport::resource::ResourceRequest;
@@ -111,6 +113,22 @@ async fn attach_plain_udp(transport: &Transport, bind_port: u16, peer_port: u16)
         UdpInterface::spawn,
     );
     tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+async fn attach_plain_tcp_server(transport: &Transport, port: u16) {
+    let manager = transport.iface_manager();
+    let server = TcpServer::new(format!("127.0.0.1:{port}"), manager.clone());
+    let context = manager.lock().await.new_context(server);
+    tokio::spawn(TcpServer::spawn(context));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+async fn attach_plain_tcp_client(transport: &Transport, port: u16) {
+    let manager = transport.iface_manager();
+    let client = TcpClient::new(format!("127.0.0.1:{port}"));
+    let context = manager.lock().await.new_context(client);
+    tokio::spawn(TcpClient::spawn(context));
+    tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
 async fn receiver_child(root: &Path, nonce: &str, server_port: u16, client_port: u16) {
@@ -432,7 +450,6 @@ fn spawn_split_sentinel_role(
         .args([
             "--exact",
             SPLIT_SENTINEL_TEST_NAME,
-            "--ignored",
             "--nocapture",
             "--test-threads=1",
         ])
@@ -528,7 +545,7 @@ async fn split_sentinel_receiver_child(
     root: &Path,
     nonce: &str,
     server_port: u16,
-    client_port: u16,
+    _client_port: u16,
 ) {
     let server_identity =
         PrivateIdentity::new_from_name(&format!("omenchatd-split-sentinel-server-{nonce}"));
@@ -543,7 +560,7 @@ async fn split_sentinel_receiver_child(
         )
         .await;
     let transport = Arc::new(transport);
-    attach_plain_udp(&transport, server_port, client_port).await;
+    attach_plain_tcp_server(&transport, server_port).await;
     let announce_shutdown = CancellationToken::new();
     let announce_task = {
         let transport = transport.clone();
@@ -558,12 +575,16 @@ async fn split_sentinel_receiver_child(
     publish_marker(&marker(root, "split-receiver-ready"));
 
     let expected = std::fs::read(root.join("split-expected.bin")).expect("read split fixture");
-    let complete = tokio::time::timeout(Duration::from_secs(30), async {
+    let (complete, saw_split) = tokio::time::timeout(Duration::from_secs(30), async {
         let mut events = transport.resource_events();
+        let mut saw_split = false;
         loop {
             let event = events.recv().await.expect("split Resource stream open");
             match event.kind {
-                ResourceEventKind::Complete(complete) => break complete,
+                ResourceEventKind::SegmentComplete(segment) => {
+                    saw_split |= segment.total_segments > 1;
+                }
+                ResourceEventKind::Complete(complete) => break (complete, saw_split),
                 ResourceEventKind::InboundFailed(failure) => {
                     panic!("split Resource failed before assembly: {}", failure.reason)
                 }
@@ -574,9 +595,9 @@ async fn split_sentinel_receiver_child(
     .await
     .expect("split Resource completion timeout");
 
-    // This assertion intentionally fails with official 0.9.7 and becomes the
-    // removal proof after an official fixed train replaces it (issue #553,
-    // upstream PR #556). It exercises the unmodified transport crate.
+    // This is the retained regression proof for issue #553 and PR #556. It
+    // exercises the unmodified official 0.9.8 transport crate.
+    assert!(saw_split, "fixture must exercise multi-segment assembly");
     assert_eq!(complete.metadata, Some(b"split-sentinel".to_vec()));
     assert_eq!(complete.data, expected);
     announce_shutdown.cancel();
@@ -597,7 +618,8 @@ async fn split_sentinel_sender_child(root: &Path, nonce: &str, server_port: u16,
         "omenchatd-split-sentinel-client",
         &client_identity,
     )));
-    attach_plain_udp(&transport, client_port, server_port).await;
+    let _ = client_port;
+    attach_plain_tcp_client(&transport, server_port).await;
     assert!(
         transport
             .await_path(&destination.address_hash, Duration::from_secs(5), None)
@@ -621,7 +643,6 @@ async fn split_sentinel_sender_child(root: &Path, nonce: &str, server_port: u16,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "known upstream Reticulum 0.9.7 split-Resource metadata assembly defect (#553; fix proposed in #556)"]
 async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
     if std::env::var_os(SPLIT_SENTINEL_ENV).is_some() {
         install_resource_diagnostic_logger();
@@ -644,10 +665,16 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
     let root = std::env::temp_dir().join(format!("omenchatd-split-sentinel-{nonce}"));
     std::fs::create_dir_all(&root).expect("create split sentinel root");
     let metadata_len = b"split-sentinel".len();
-    let second_segment_offset = crate::resource_compat::RETICULUM_0_9_7_MAX_EFFICIENT_RESOURCE_BYTES
-        - crate::resource_compat::RETICULUM_RESOURCE_METADATA_LENGTH_PREFIX_BYTES
-        - metadata_len;
-    let mut payload = vec![0x5a; second_segment_offset + 4096];
+    let second_segment_offset = rns_transport::resource::MAX_EFFICIENT_SIZE - 3 - metadata_len;
+    let mut state = 0x9e37_79b9_u32;
+    let mut payload = (0..(second_segment_offset + 4096))
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect::<Vec<_>>();
     payload[second_segment_offset..second_segment_offset + 3].copy_from_slice(&[0, 0, 8]);
     std::fs::write(root.join("split-expected.bin"), payload).expect("write split fixture");
     let (server_port, client_port) = reserve_udp_ports();
@@ -667,7 +694,7 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
             && !receiver_timed_out
             && sender_output.status.success()
             && receiver_output.status.success(),
-        "upstream split-metadata sentinel failed as expected on affected 0.9.7\n\
+        "upstream split-metadata regression sentinel failed on official 0.9.8\n\
          sender status={} timed_out={} stdout={} stderr={}\n\
          receiver status={} timed_out={} stdout={} stderr={}",
         sender_output.status,
@@ -683,9 +710,9 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
 }
 
 #[test]
-#[ignore = "known upstream Reticulum 0.9.7 UDP maximum-Resource serialization regression"]
+#[ignore = "known upstream Reticulum 0.9.8 UDP maximum-Resource serialization regression"]
 fn reticulum_udp_tx_buffer_covers_max_resource_wire_packet() {
-    // reticulum-rs-transport 0.9.7 still sizes both buffers as
+    // reticulum-rs-transport 0.9.8 still sizes both buffers as
     // `size_of::<Packet>() * 3`. Packet payload storage is heap-backed, so
     // that Rust layout size is unrelated to the largest serialized packet.
     let upstream_udp_buffer = std::mem::size_of::<rns_transport::packet::Packet>() * 3;

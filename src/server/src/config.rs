@@ -1454,16 +1454,7 @@ pub fn render_status_with_room_count(config: &ServerConfig, room_count: usize) -
 }
 
 fn upload_max_file_status(configured: u64) -> String {
-    let effective = configured.min(crate::resource_compat::exact_train_upload_payload_max() as u64);
-    if effective == configured {
-        human_bytes(configured)
-    } else {
-        format!(
-            "{} configured; {} effective on Reticulum 0.9.7",
-            human_bytes(configured),
-            human_bytes(effective)
-        )
-    }
+    human_bytes(configured)
 }
 
 pub fn render_public_addresses(config: &ServerConfig) -> String {

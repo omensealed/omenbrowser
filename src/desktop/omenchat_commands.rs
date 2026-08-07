@@ -165,13 +165,12 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, "upload file is empty".into());
             return OmenChatDraftCommandResult::HandledKeep;
         }
-        let exact_train_upload_max =
-            crate::resource_compat::exact_train_upload_payload_max() as u64;
-        if upload_byte_len > exact_train_upload_max {
+        let local_resource_max = super::OMENCHAT_RESOURCE_MAX_BYTES as u64;
+        if upload_byte_len > local_resource_max {
             self.set_omenchat_session_status(
                 session_id,
                 format!(
-                    "upload blocked: file exceeds the {exact_train_upload_max} byte Reticulum 0.9.7 compatibility limit"
+                    "upload blocked: file exceeds the {local_resource_max} byte OMENchat Resource limit"
                 ),
             );
             return OmenChatDraftCommandResult::HandledKeep;
@@ -218,11 +217,11 @@ impl DesktopApp {
             }
         };
         let upload_byte_len = bytes.len() as u64;
-        if upload_byte_len > exact_train_upload_max {
+        if upload_byte_len > local_resource_max {
             self.set_omenchat_session_status(
                 session_id,
                 format!(
-                    "upload blocked: file exceeds the {exact_train_upload_max} byte Reticulum 0.9.7 compatibility limit"
+                    "upload blocked: file exceeds the {local_resource_max} byte OMENchat Resource limit"
                 ),
             );
             return OmenChatDraftCommandResult::HandledKeep;
@@ -633,19 +632,19 @@ impl DesktopApp {
 }
 
 fn effective_omenchat_upload_max_file_bytes(peer_advertised: Option<u64>) -> u64 {
-    let exact_train_max = crate::resource_compat::exact_train_upload_payload_max() as u64;
+    let local_resource_max = super::OMENCHAT_RESOURCE_MAX_BYTES as u64;
     peer_advertised
-        .unwrap_or(exact_train_max)
-        .min(exact_train_max)
+        .unwrap_or(local_resource_max)
+        .min(local_resource_max)
 }
 
 #[cfg(test)]
-mod resource_compat_tests {
+mod resource_limit_tests {
     use super::effective_omenchat_upload_max_file_bytes;
 
     #[test]
     fn older_peer_larger_limit_is_locally_constrained() {
-        let local = crate::resource_compat::exact_train_upload_payload_max() as u64;
+        let local = super::super::OMENCHAT_RESOURCE_MAX_BYTES as u64;
         assert_eq!(effective_omenchat_upload_max_file_bytes(None), local);
         assert_eq!(
             effective_omenchat_upload_max_file_bytes(Some(10 * 1024 * 1024)),

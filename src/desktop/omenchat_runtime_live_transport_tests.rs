@@ -180,7 +180,7 @@ fn omenchat_transport_bounds_all_payload_queues_and_releases_byte_accounting() {
     outbound.send_frame(vec![0]).expect("permit released");
 
     let mut resource_bytes = DesktopOmenChatTransport::new([0x77; 16], 1_000);
-    let resource_chunk_bytes = crate::resource_compat::exact_train_upload_payload_max();
+    let resource_chunk_bytes = rns_transport::resource::MAX_EFFICIENT_SIZE + 1;
     let mut accepted_resources = 0;
     while resource_bytes
         .outgoing_resource_bytes
@@ -236,21 +236,20 @@ fn omenchat_transport_bounds_all_payload_queues_and_releases_byte_accounting() {
 }
 
 #[test]
-fn omenchat_transport_enforces_exact_train_resource_boundary_before_queueing() {
+fn omenchat_transport_accepts_split_resources_within_product_bound() {
     let resource_id = "upload:4294967295:4294967295:4294967295:ffffffffffffffff";
-    assert_eq!(
-        resource_id.len(),
-        crate::resource_compat::maximum_upload_resource_id_bytes()
-    );
-    let maximum = crate::resource_compat::exact_train_upload_payload_max();
+    let split_payload = rns_transport::resource::MAX_EFFICIENT_SIZE + 1;
     let mut transport = DesktopOmenChatTransport::new([0x7a; 16], 1_000);
 
     transport
-        .send_resource(resource_id, vec![0x55; maximum])
-        .expect("exact safe Resource");
+        .send_resource(resource_id, vec![0x55; split_payload])
+        .expect("split Resource within product bound");
     assert_eq!(transport.outgoing_resources.len(), 1);
     assert!(transport
-        .send_resource(resource_id, vec![0x66; maximum + 1])
+        .send_resource(
+            resource_id,
+            vec![0x66; crate::desktop::OMENCHAT_RESOURCE_MAX_BYTES + 1],
+        )
         .is_err());
     assert_eq!(transport.outgoing_resources.len(), 1);
     assert_eq!(transport.rejected_outgoing_resources, 1);

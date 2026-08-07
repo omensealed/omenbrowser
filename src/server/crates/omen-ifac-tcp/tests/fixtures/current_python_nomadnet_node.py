@@ -20,7 +20,7 @@ PASSPHRASE = "public-test-fixture"
 INDEX_PAGE = ">Current Python NomadNet\nempty request passed\n"
 FORM_PAGE = ">Current Python Form\nfield=omen\nnext=/page/index.mu\n"
 OVERSIZED_FORM_PAGE = ">Current Python Form\nfield_size=2048\nnext=/page/index.mu\n"
-LARGE_PAGE = ">Current Python Large Response\n" + ("resource-response-line\n" * 256)
+LARGE_PAGE = ">Current Python Large Response\n" + ("resource-response-line\n" * 16_384)
 SLOW_RESPONSE_DELAY_SECONDS = 3
 SOAK_REQUESTS_PER_LINK = 16
 SOAK_TOTAL_REQUESTS = SOAK_REQUESTS_PER_LINK * 2
