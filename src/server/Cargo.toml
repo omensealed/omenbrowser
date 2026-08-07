@@ -3,7 +3,7 @@ members = ["crates/omen-ifac-tcp", "crates/omenchat-protocol"]
 
 [package]
 name = "omenchatd"
-version = "0.9.7-7"
+version = "0.9.8-1"
 edition = "2021"
 rust-version = "1.85"
 description = "Standalone OMENchat server"
@@ -58,8 +58,8 @@ rpassword = "=7.5.4"
 rand_core = { version = "0.6.4", optional = true, features = ["getrandom"] }
 omen-ifac-tcp = { path = "crates/omen-ifac-tcp", version = "=0.9.5-1", optional = true }
 omenchat-protocol = { path = "crates/omenchat-protocol", version = "=0.1.0" }
-reticulum-rs = { version = "=0.9.7", optional = true, default-features = false, features = ["core", "transport"] }
-rns_transport = { package = "reticulum-rs-transport", version = "=0.9.7", optional = true }
+reticulum-rs = { version = "=0.9.8", optional = true, default-features = false, features = ["core", "transport"] }
+rns_transport = { package = "reticulum-rs-transport", version = "=0.9.8", optional = true }
 rusqlite = { version = "0.37", features = ["backup", "bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

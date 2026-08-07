@@ -9,7 +9,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-expected_version="0.9.7"
+expected_version="0.9.8"
 expected_source="registry+https://github.com/rust-lang/crates.io-index"
 family_regex='^(lxmf|lxmf-sdk|lxmf-wire|lxmf-runtime|lxmf-embedded-mini|reticulum-rs|reticulum-rs-core|reticulum-rs-transport|reticulum-rs-rpc|rns-embedded-core|rns-embedded-runtime|rns-embedded-ffi|rns-embedded-mininode)$'
 

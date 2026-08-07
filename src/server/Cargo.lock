@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "omenchatd"
-version = "0.9.7-7"
+version = "0.9.8-1"
 dependencies = [
  "bzip2 0.5.2",
  "crossterm",
@@ -1093,9 +1093,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de1f0176024dce9a839a4547f8804d10ccb67cb592a9079bf38d331248a0334e"
+checksum = "8b101c3c0f791be52c8a15953d9c76fc62575067fdefa6ba92848d94a23a1d07"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -1103,9 +1103,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd8cbe1a795979d690675e471b4c6e9dc939d07969eafb1c216666f5035548a9"
+checksum = "6cc43b415060766669b1cda791496b1dd8a1a915715e83c96e07e9530d1d4103"
 dependencies = [
  "aes",
  "atomicwrites",
@@ -1125,9 +1125,9 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.9.7"
+version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a8a7c35cb43f211d42bd682982d1c8b142855448f1a3129b7d6fe0f26c902c8"
+checksum = "f3c3598fd1fe48b500b65f42b6686697551ef234cde131353944368d11415288"
 dependencies = [
  "aes",
  "base64",
