@@ -5,19 +5,15 @@ event semantics for the Reticulum/LXMF 0.9 migration. Upstream SDK, RPC, and
 transport types remain inside runtime adapters; the UI, persistence services,
 and application event bus consume the stable types exported by `src/runtime`.
 
-## Reticulum 0.9.7 split-Resource evidence
+## Reticulum 0.9.8 split-Resource evidence
 
-Resource progress is not delivery evidence. On the affected exact 0.9.7 train,
-`SegmentComplete` reporting more than one segment is terminal compatibility
-evidence for OMEN-owned metadata Resources. OMEN records a bounded failure,
-cancels owned transfer state where supported, and suppresses a later queued
-completion. It does not retry, replay, fragment, or claim peer delivery.
-
-The safeguard diagnostics expose counters only: unique split Resources
-rejected, late completions suppressed, and rejected-transfer markers removed by
-TTL. They are bounded by integer saturation, redacted, ephemeral, and displayed
-through existing status surfaces without network polling. They retain no
-payload, metadata, transfer identity, peer, room, filename, or message data.
+Resource progress is not delivery evidence. Official 0.9.8 passes both the
+unchanged issue-#553 sentinel and a strengthened incompressible, real
+multi-segment TCP regression that verifies exact metadata and application
+bytes. `SegmentComplete` is therefore progress again; only `Complete` is
+application completion. The exact-0.9.7 rejection markers and counters are
+removed. Existing terminal failure, cancellation, deadline, correlation, and
+bounded Resource lifecycle handling remains unchanged.
 
 ## Runtime lifecycle
 
@@ -266,7 +262,7 @@ retry, path request, propagation sync, or stamp expenditure.
 Each peer also has a fallback policy. `Ask before fallback` is the migration
 default and retains the explicit `Retry via propagation` action after a direct
 failure. `Automatic safe fallback` is opt-in and is copied into the durable
-operation metadata before dispatch. It enables the upstream 0.9.7 typed
+operation metadata before dispatch. It enables the upstream 0.9.8 typed
 `try_propagation_on_fail` option for direct delivery only. In the integrated
 clean runtime, automatic fallback is restricted to failures before the
 transport observes packet or Resource submission. The same signed LXMF message
@@ -335,7 +331,7 @@ The first dormant Resource-reference envelope is now defined under the proposed
 `omen-lxmf-resource-reference-v1` capability. It permits no automatic transfer,
 decode, or launch and has no runtime caller. Its application reference is a
 random offer/correlation identifier, not a Reticulum Resource hash: the locked
-0.9.7 public Resource API binds hashes and part requests to an active Link
+0.9.8 public Resource API binds hashes and part requests to an active Link
 transfer rather than exposing a durable object fetch. A future authenticated
 accept exchange must start the actual Resource and bind its observed hash to
 the accepted offer. The detailed activation and storage gates are recorded in
@@ -433,13 +429,13 @@ without adding a per-message redraw timer. Legacy rows that already have both
 operation identifiers but no deadline receive one 24-hour migration window on
 their next explicit retry.
 
-The registry 0.9.7 `RpcBackendClient` still removes `ttl_ms`, idempotency, correlation,
+The registry 0.9.8 `RpcBackendClient` still removes `ttl_ms`, idempotency, correlation,
 and extensions when translating its SDK request to `sdk_send_v2`. Its public
 daemon request contract also has no field for an explicit reply ticket.
 OMEN's deterministic loopback capture test exercises the real published client
 and proves the following boundary:
 
-| External RPC send property | 0.9.7 result |
+| External RPC send property | 0.9.8 result |
 |---|---|
 | source, destination, payload fields | preserved |
 | direct/propagated method | preserved |
@@ -468,7 +464,7 @@ typed propagation status and summarizes the existing bounded operation history
 into queued, in-flight, settled, failed, expired, cancelled, and uncertain
 counts. Managed mode labels application TTL/idempotency/correlation separately
 from authoritative peer-delivery evidence. External mode explicitly labels the
-published 0.9.7 send guarantees unsupported and repeats the no-automatic-retry rule. The
+published 0.9.8 send guarantees unsupported and repeats the no-automatic-retry rule. The
 panel adds no worker, polling subscription, or retained status history.
 
 `authenticated_lxmf_source_evidence` is a separate runtime capability. The
