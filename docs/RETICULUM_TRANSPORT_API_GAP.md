@@ -25,6 +25,15 @@ The ignored split-metadata interoperability sentinel is independent of the
 older maximum-UDP Resource sentinel. Remove the temporary guard only after an
 official fixed registry train is adopted and its unchanged sentinel passes.
 
+Post-release v0.9.7-6 maintenance applies the same derived ceiling at the
+reusable OMENchat client boundary, before sequence reservation, pending state,
+an offer frame, or Resource dispatch. Native NomadNet timeout details now
+distinguish observed-but-incomplete Resource assembly and state explicitly that
+no retry was attempted. Desktop and server bridges expose saturating,
+redacted, ephemeral counts for unique split rejection, suppressed late
+completion, and actual marker expiry. Marker item/TTL bounds and both upstream
+sentinels are unchanged. This maintenance does not prepare v0.9.7-7.
+
 The OMENchat client and `omenchatd` `live-reticulum` server have a clean-stack
 transport path now: links are opened against `omenchat.node`, normal OMENchat
 frames are sent as context-zero encrypted link data with

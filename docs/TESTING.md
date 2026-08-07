@@ -5969,3 +5969,25 @@ cargo test --locked --no-default-features --features desktop-product \
 The maximum-UDP Resource sentinel remains deliberately ignored and visible. It
 must not be weakened or relabeled as passing while the locked upstream transmit
 buffer remains smaller than the maximum serialized Resource packet.
+
+## v0.9.7-6 post-release Resource maintenance
+
+The current release remains v0.9.7-6; this maintenance does not prepare a
+v0.9.7-7 version. Focused gates cover reusable upload rejection before any
+sequence/pending/frame/Resource state, observed Resource activity that reaches
+the existing deadline without completion, bounded lag evidence, and ephemeral
+split-safeguard counters:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product reusable_upload_
+cargo test --locked --no-default-features --features desktop-product resource_activity_timeout_
+cargo test --locked --no-default-features --features desktop-product \
+  clean_omenchat_split_resource_rejections_are_deduplicated_bounded_and_expire
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full split_resource_
+```
+
+The tests assert one outbound request/offer at most, no fallback or replay,
+unchanged cancellation cleanup, deduplicated rejection counts, late-completion
+suppression, and expiry counting only when TTL cleanup actually removes a
+marker. The separate split-metadata and maximum-UDP sentinels remain visible.

@@ -5,7 +5,8 @@ use std::path::Path;
 #[cfg(feature = "native-lxmf")]
 use std::path::PathBuf;
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "native-lxmf")]
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -75,10 +76,13 @@ fn remember_omenchat_rejected_split_resource(
     rejected: &mut BTreeMap<[u8; 32], Instant>,
     resource_hash: [u8; 32],
     now: Instant,
+    metrics: &SplitResourceSafeguardMetrics,
 ) -> bool {
+    let before_purge = rejected.len();
     rejected.retain(|_, inserted| {
         now.duration_since(*inserted) <= OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL
     });
+    metrics.add_expired(before_purge.saturating_sub(rejected.len()));
     if rejected.contains_key(&resource_hash) {
         return false;
     }
@@ -92,7 +96,64 @@ fn remember_omenchat_rejected_split_resource(
         }
     }
     rejected.insert(resource_hash, now);
+    metrics.increment_rejected();
     true
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SplitResourceSafeguardMetricsSnapshot {
+    split_resources_rejected: u64,
+    late_split_completions_suppressed: u64,
+    split_rejection_markers_expired: u64,
+}
+
+#[derive(Debug, Default)]
+struct SplitResourceSafeguardMetrics {
+    split_resources_rejected: AtomicU64,
+    late_split_completions_suppressed: AtomicU64,
+    split_rejection_markers_expired: AtomicU64,
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
+#[derive(Clone)]
+struct CleanOmenchatResourceGuard {
+    active_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    metrics: Arc<SplitResourceSafeguardMetrics>,
+}
+
+impl SplitResourceSafeguardMetrics {
+    fn saturating_increment(counter: &AtomicU64, amount: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(amount))
+        });
+    }
+
+    fn increment_rejected(&self) {
+        Self::saturating_increment(&self.split_resources_rejected, 1);
+    }
+
+    fn increment_late_suppressed(&self) {
+        Self::saturating_increment(&self.late_split_completions_suppressed, 1);
+    }
+
+    fn add_expired(&self, count: usize) {
+        Self::saturating_increment(
+            &self.split_rejection_markers_expired,
+            u64::try_from(count).unwrap_or(u64::MAX),
+        );
+    }
+
+    fn snapshot(&self) -> SplitResourceSafeguardMetricsSnapshot {
+        SplitResourceSafeguardMetricsSnapshot {
+            split_resources_rejected: self.split_resources_rejected.load(Ordering::Relaxed),
+            late_split_completions_suppressed: self
+                .late_split_completions_suppressed
+                .load(Ordering::Relaxed),
+            split_rejection_markers_expired: self
+                .split_rejection_markers_expired
+                .load(Ordering::Relaxed),
+        }
+    }
 }
 #[cfg(feature = "native-lxmf")]
 const PROPAGATION_STAMP_BLOCKING_JOBS: usize = 2;
@@ -248,6 +309,7 @@ pub struct NativeNetworkRuntime {
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
     pending_propagated_lxmf: PendingPropagatedLxmf,
     active_omenchat_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    split_resource_safeguard_metrics: Arc<SplitResourceSafeguardMetrics>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_omenchat_links: Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1096,6 +1158,7 @@ impl NativeNetworkRuntime {
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_propagated_lxmf: Arc::new(Mutex::new(BTreeMap::new())),
             active_omenchat_links: Arc::new(Mutex::new(BTreeSet::new())),
+            split_resource_safeguard_metrics: Arc::new(SplitResourceSafeguardMetrics::default()),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1143,6 +1206,7 @@ impl NativeNetworkRuntime {
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_propagated_lxmf: Arc::new(Mutex::new(BTreeMap::new())),
             active_omenchat_links: Arc::new(Mutex::new(BTreeSet::new())),
+            split_resource_safeguard_metrics: Arc::new(SplitResourceSafeguardMetrics::default()),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1549,7 +1613,10 @@ impl NativeNetworkRuntime {
         #[cfg(not(all(feature = "native-rns-net", any())))]
         spawn_clean_omenchat_event_bridge(
             transport.clone(),
-            self.active_omenchat_links.clone(),
+            CleanOmenchatResourceGuard {
+                active_links: self.active_omenchat_links.clone(),
+                metrics: self.split_resource_safeguard_metrics.clone(),
+            },
             self.clean_omenchat_links.clone(),
             self.clean_destination_identities.clone(),
             self.config.attachments_dir.clone(),
@@ -7160,6 +7227,13 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 ));
             }
         }
+        let split_metrics = self.split_resource_safeguard_metrics.snapshot();
+        interfaces.push(format!(
+            "resource safeguards: split_rejected={} late_suppressed={} markers_expired={}",
+            split_metrics.split_resources_rejected,
+            split_metrics.late_split_completions_suppressed,
+            split_metrics.split_rejection_markers_expired
+        ));
 
         Ok(InterfaceStats {
             available: matches!(state.lifecycle, NativeRuntimeLifecycle::Running),
@@ -9738,13 +9812,15 @@ async fn clean_request_omenchat_paths_on_attached_interfaces(
 #[cfg(not(all(feature = "native-rns-net", any())))]
 fn spawn_clean_omenchat_event_bridge(
     transport: Arc<reticulum_rs::runtime::Transport>,
-    active_omenchat_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    resource_guard: CleanOmenchatResourceGuard,
     clean_omenchat_links: Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
     clean_destination_identities: Arc<Mutex<BTreeMap<String, rns_transport::identity::Identity>>>,
     attachments_dir: std::path::PathBuf,
     event_tx: broadcast::Sender<RuntimeBusEvent>,
     #[cfg(feature = "native-lxmf")] pending_lxmf_proofs: PendingLxmfProofs,
 ) {
+    let active_omenchat_links = resource_guard.active_links;
+    let split_resource_safeguard_metrics = resource_guard.metrics;
     #[cfg(feature = "native-lxmf")]
     let clean_lxmf_seen_messages: Arc<Mutex<BTreeMap<String, tokio::time::Instant>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
@@ -10154,6 +10230,7 @@ fn spawn_clean_omenchat_event_bridge(
     }
     {
         let mut resource_events = transport.resource_events();
+        let split_resource_safeguard_metrics = split_resource_safeguard_metrics.clone();
         #[cfg(feature = "native-lxmf")]
         let pending_lxmf_proofs = pending_lxmf_proofs.clone();
         let active_omenchat_links = active_omenchat_links.clone();
@@ -10233,6 +10310,7 @@ fn spawn_clean_omenchat_event_bridge(
                                     &mut rejected_split_resources,
                                     resource_hash,
                                     now,
+                                    &split_resource_safeguard_metrics,
                                 );
                                 if first_rejection {
                                     let transfer_id = hex_encode(event.hash.as_slice());
@@ -10278,6 +10356,7 @@ fn spawn_clean_omenchat_event_bridge(
                                     .remove(&event.hash.to_bytes())
                                     .is_some()
                                 {
+                                    split_resource_safeguard_metrics.increment_late_suppressed();
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
                                         "native Reticulum 0.9 OMENchat rejected split resource completion suppressed resource={}",
                                         hex_encode(event.hash.as_slice())
@@ -13305,15 +13384,18 @@ mod tests {
     fn clean_omenchat_split_resource_rejections_are_deduplicated_bounded_and_expire() {
         let start = Instant::now();
         let mut rejected = BTreeMap::new();
+        let metrics = SplitResourceSafeguardMetrics::default();
         assert!(remember_omenchat_rejected_split_resource(
             &mut rejected,
             [0x01; 32],
             start,
+            &metrics,
         ));
         assert!(!remember_omenchat_rejected_split_resource(
             &mut rejected,
             [0x01; 32],
             start + Duration::from_secs(1),
+            &metrics,
         ));
 
         for index in 0..=OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
@@ -13323,6 +13405,7 @@ mod tests {
                 &mut rejected,
                 hash,
                 start + Duration::from_secs(2 + index as u64),
+                &metrics,
             ));
             assert!(rejected.len() <= OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS);
         }
@@ -13333,10 +13416,17 @@ mod tests {
             &mut rejected,
             [0xff; 32],
             expired_at,
+            &metrics,
         ));
         assert_eq!(rejected.len(), 1);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.split_resources_rejected, 259);
+        assert_eq!(snapshot.late_split_completions_suppressed, 0);
+        assert_eq!(snapshot.split_rejection_markers_expired, 258);
         assert!(rejected.remove(&[0xff; 32]).is_some());
         assert!(rejected.remove(&[0xff; 32]).is_none());
+        metrics.increment_late_suppressed();
+        assert_eq!(metrics.snapshot().late_split_completions_suppressed, 1);
     }
 
     #[cfg(feature = "native-lxmf")]

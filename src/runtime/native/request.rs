@@ -348,6 +348,14 @@ impl RequestEventLagEvidence {
     }
 }
 
+fn resource_assembly_timeout_suffix(resource_activity_observed: bool) -> &'static str {
+    if resource_activity_observed {
+        "; Resource assembly did not complete on the current Reticulum 0.9.7 train; no retry was attempted"
+    } else {
+        ""
+    }
+}
+
 #[async_trait]
 impl NativeLinkRequestAdapter for Reticulum09LinkRequestAdapter {
     fn adapter_name(&self) -> &'static str {
@@ -425,6 +433,7 @@ impl Reticulum09LinkRequestAdapter {
 
         let deadline = tokio::time::Instant::now() + timeout;
         let mut active_response_resource = None;
+        let mut response_resource_activity_observed = false;
         let mut lag_evidence = RequestEventLagEvidence::default();
         loop {
             if cancel.is_cancelled() {
@@ -451,7 +460,8 @@ impl Reticulum09LinkRequestAdapter {
                     .await;
                 }
                 return Err(AppError::from(NativeRuntimeError::Timeout(format!(
-                    "NomadNet direct request response{}",
+                    "NomadNet direct request response{}{}",
+                    resource_assembly_timeout_suffix(response_resource_activity_observed),
                     lag_evidence.timeout_suffix()
                 ))));
             }
@@ -495,6 +505,7 @@ impl Reticulum09LinkRequestAdapter {
                 resource = resource_events.recv() => match resource {
                     Ok(event) if event.link_id == prepared.link_id => match event.kind {
                         ResourceEventKind::Complete(complete) => {
+                            response_resource_activity_observed = true;
                             if resource_complete_exceeds_affected_train_boundary(&complete) {
                                 let _ = cancel_clean_page_response_resource(
                                     transport,
@@ -540,6 +551,7 @@ impl Reticulum09LinkRequestAdapter {
                             }
                         }
                         ResourceEventKind::Progress(progress) => {
+                            response_resource_activity_observed = true;
                             active_response_resource = Some(event.hash);
                             emit_clean_page_resource_progress(
                                 prepared.event_tx.as_ref(),
@@ -576,7 +588,12 @@ impl Reticulum09LinkRequestAdapter {
                                     .into(),
                             )));
                         }
+                        ResourceEventKind::SegmentComplete(_) => {
+                            response_resource_activity_observed = true;
+                            active_response_resource = Some(event.hash);
+                        }
                         ResourceEventKind::InboundFailed(failure) => {
+                            response_resource_activity_observed = true;
                             emit_clean_page_resource_lifecycle(
                                 prepared.event_tx.as_ref(),
                                 event.hash.to_string(),
@@ -679,6 +696,7 @@ impl Reticulum09LinkRequestAdapter {
         let mut unrelated_events = 0usize;
         let mut outbound_complete = false;
         let mut active_response_resource = None;
+        let mut response_resource_activity_observed = false;
         let mut last_error = String::from("none");
         let mut lag_evidence = RequestEventLagEvidence::default();
         loop {
@@ -722,7 +740,7 @@ impl Reticulum09LinkRequestAdapter {
                 return Err(AppError::from(NativeRuntimeError::Timeout(format!(
                     "NomadNet request-resource response; link_iface={:?}; destination_path={}; \
                          link_path={}; request_resource={}; target_events={}; progress_events={}; \
-                         unrelated_events={}; outbound_complete={}; last_error={}{}",
+                         unrelated_events={}; outbound_complete={}; last_error={}{}{}",
                     link_ingress_iface,
                     transport_path_status_summary(&destination_path),
                     transport_path_status_summary(&link_path),
@@ -732,6 +750,7 @@ impl Reticulum09LinkRequestAdapter {
                     unrelated_events,
                     outbound_complete,
                     last_error,
+                    resource_assembly_timeout_suffix(response_resource_activity_observed),
                     lag_evidence.timeout_suffix()
                 ))));
             }
@@ -742,6 +761,7 @@ impl Reticulum09LinkRequestAdapter {
                     target_events += 1;
                     match event.kind {
                         ResourceEventKind::Complete(complete) => {
+                            response_resource_activity_observed = true;
                             if resource_complete_exceeds_affected_train_boundary(&complete) {
                                 let _ = cancel_clean_page_response_resource(
                                     transport,
@@ -822,6 +842,7 @@ impl Reticulum09LinkRequestAdapter {
                             }
                         }
                         ResourceEventKind::Progress(progress) => {
+                            response_resource_activity_observed = true;
                             active_response_resource = Some(event.hash);
                             progress_events += 1;
                             emit_clean_page_resource_progress(
@@ -896,7 +917,12 @@ impl Reticulum09LinkRequestAdapter {
                                 "native Reticulum 0.9 request-resource transfer failed".into(),
                             )));
                         }
+                        ResourceEventKind::SegmentComplete(_) => {
+                            response_resource_activity_observed = true;
+                            active_response_resource = Some(event.hash);
+                        }
                         ResourceEventKind::InboundFailed(failure) => {
+                            response_resource_activity_observed = true;
                             emit_clean_page_resource_lifecycle(
                                 prepared.event_tx.as_ref(),
                                 event.hash.to_string(),
@@ -2429,6 +2455,38 @@ mod tests {
         assert!(RequestEventLagEvidence::default()
             .timeout_suffix()
             .is_empty());
+    }
+
+    #[test]
+    fn resource_activity_timeout_evidence_is_bounded_and_does_not_claim_retry() {
+        let ordinary = resource_assembly_timeout_suffix(false);
+        let incomplete = resource_assembly_timeout_suffix(true);
+
+        assert!(ordinary.is_empty());
+        assert!(incomplete.contains("Resource assembly did not complete"));
+        assert!(incomplete.contains("Reticulum 0.9.7"));
+        assert!(incomplete.contains("no retry was attempted"));
+        assert!(incomplete.len() < 128);
+        assert!(!incomplete.contains("destination"));
+        assert!(!incomplete.contains("payload"));
+    }
+
+    #[test]
+    fn resource_activity_timeout_retains_bounded_lag_evidence() {
+        let mut lag = RequestEventLagEvidence::default();
+        lag.record_direct(2);
+        lag.record_resource(3);
+        let detail = format!(
+            "NomadNet response{}{}",
+            resource_assembly_timeout_suffix(true),
+            lag.timeout_suffix()
+        );
+
+        assert!(detail.contains("assembly did not complete"));
+        assert!(detail.contains("skipped_direct_response_events=2"));
+        assert!(detail.contains("skipped_resource_events=3"));
+        assert!(detail.contains("remote outcome may be uncertain"));
+        assert!(detail.len() < 320);
     }
 
     #[test]

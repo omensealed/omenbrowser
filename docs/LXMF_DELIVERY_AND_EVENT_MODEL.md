@@ -13,6 +13,12 @@ evidence for OMEN-owned metadata Resources. OMEN records a bounded failure,
 cancels owned transfer state where supported, and suppresses a later queued
 completion. It does not retry, replay, fragment, or claim peer delivery.
 
+The safeguard diagnostics expose counters only: unique split Resources
+rejected, late completions suppressed, and rejected-transfer markers removed by
+TTL. They are bounded by integer saturation, redacted, ephemeral, and displayed
+through existing status surfaces without network polling. They retain no
+payload, metadata, transfer identity, peer, room, filename, or message data.
+
 ## Runtime lifecycle
 
 The application lifecycle states are:
