@@ -143,3 +143,11 @@ smoke, two-client upload, reconnect, and live Python lanes cover the changed
 source boundaries. The two deliberately ignored upstream sentinels remain
 visible and separate: maximum-UDP Resource transmission and split-metadata
 Resource assembly on Reticulum 0.9.7.
+
+## Subsequent release decision
+
+This record describes the original unversioned maintenance decision. The
+maintainer subsequently authorized packaging the same qualified scope as
+v0.9.7-7. The implementation and compatibility boundaries above remain the
+source of that release revision; this historical baseline is not rewritten to
+pretend the earlier decision did not occur.

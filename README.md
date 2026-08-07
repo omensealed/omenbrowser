@@ -466,7 +466,7 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   crate, and the current audit policy accepts zero vulnerabilities. Historical
   0.6 live results remain migration baselines.
 - Reticulum 0.9.7 also has an upstream split-Resource metadata assembly defect
-  (#553; proposed correction #556). OMEN v0.9.7-6 fails closed before unsafe
+  (#553; proposed correction #556). OMEN v0.9.7-7 fails closed before unsafe
   outbound offers and rejects split inbound OMEN-owned Resources. The default
   512 KiB upload limit remains unchanged; no retry or fragmentation is added.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
