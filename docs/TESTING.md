@@ -4213,7 +4213,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.8-1` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.8-2` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -4228,7 +4228,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.8-1` must report
+therefore exits with the expected signal status; current `0.9.8-2` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -6016,3 +6016,29 @@ transmit-buffer boundary and must remain ignored but explicit. OMEN keeps its
 default 512 KiB upload behavior and all independent 8 MiB/16 MiB Resource and
 queue ceilings. There is no request replay, primitive fallback, or second
 dispatch.
+
+## Native NomadNet stale-path recovery
+
+A v0.9.8-2 field smoke compared an isolated client carrying a persisted stale
+path with a fresh isolated client using the same configured interfaces. The
+stale path repeatedly failed Link setup; fresh discovery selected a working
+two-hop route, activated the Link, and returned the exact 33,277-byte page over
+a compressed response Resource. Identify-on-connect did not affect the result.
+
+On a pre-dispatch Link-setup timeout, OMEN now closes and removes the failed
+Link, expires that destination's cached path, and sends one path-discovery
+request. The existing single bounded Link-setup retry may then use new path
+evidence. Once request construction/send or response waiting has begun, the
+outcome is uncertain and OMEN requires the user to press Retry; it does not
+automatically dispatch a second executable NomadNet request.
+
+Focused regressions:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product \
+  link_setup_timeout_expires_route_and_requests_discovery_without_request_replay
+cargo test --locked --no-default-features --features desktop-product \
+  automatic_retry_stops_before_uncertain_request_dispatch
+cargo test --locked --no-default-features --features desktop-product \
+  transient_native_browser_timeout_requires_explicit_retry
+```

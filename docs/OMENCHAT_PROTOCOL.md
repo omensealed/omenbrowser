@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.8-1 compatibility boundary
+### v0.6.0-1 / v0.9.8-2 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.8-1 release retains protocol version `1`, protocol name
+The v0.9.8-2 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -203,7 +203,7 @@ inbound frame carrying the `SessionOpen` operation number.
 ### Authoritative production capability matrix
 
 This table describes the canonical `desktop-product` client and
-`server-headless`/`server-full` server at 0.9.8-1. Capability names come from
+`server-headless`/`server-full` server at 0.9.8-2. Capability names come from
 `omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
 shared vocabulary, the client's request, and the canonical server's acceptance.
 Definition alone never activates a capability: each Link must request it and
