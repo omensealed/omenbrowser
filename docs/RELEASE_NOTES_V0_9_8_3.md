@@ -39,8 +39,28 @@ Status: final
 - An outbound OMENchat Resource failure applies the same route-scoped recovery:
   the affected Link is closed, its ownership is removed, and alternate path
   discovery is prepared without resending the attachment. Isolated two-client
-  local-gateway smokes transferred and fetched exact 873-byte and 54,427-byte
-  attachments.
+  direct/local-gateway smokes transferred and fetched exact 873-byte and
+  54,427-byte attachments.
+
+## Routed Resource limitation
+
+- A fresh isolated client using a multi-hop TCP-gateway route completed the
+  873-byte attachment fixture, but a 13,613-byte incompressible attachment did
+  not complete. The sender received repeated Resource requests and eventually
+  reached the bounded retry limit; no automatic attachment replay occurred.
+- Source review found an evidence-bound Reticulum parity gap in the exact
+  registry `reticulum-rs-transport 0.9.8` train: its transport duplicate filter
+  permits repeated Resource-request packets but not repeated Resource-data
+  packets, while Python Reticulum permits both. A forwarding gateway can
+  therefore discard a repeated Resource fragment that is required after a
+  downstream loss.
+- Route-scoped recovery prevents a failed route from pinning a later explicit
+  attempt, but it cannot repair an in-progress Resource transfer and does not
+  resend uncertain application work. Routed OMENchat attachments are therefore
+  not qualified by the direct/local upload smoke in this candidate.
+- No upstream fork, crate patch, unnegotiated fragmentation, or automatic retry
+  is included. Release publication remains blocked pending an official train
+  correction or another separately reviewed, wire-compatible solution.
 
 ## Compatibility boundaries
 

@@ -43,5 +43,22 @@ logged. The Reticulum/LXMF train remains exact registry 0.9.8.
 - The deliberately ignored maximum-UDP sentinel remains failing at the known
   456-byte transmit-buffer versus 483-byte wire-packet boundary.
 
+## Post-candidate routed Resource finding
+
+After the responder and route-recovery changes passed hosted CI, isolated
+attachment smokes separated direct/local behavior from routed behavior. Direct
+transfers completed at 873 and 54,427 bytes. A fresh client over a multi-hop
+TCP-gateway route completed 873 bytes but a 13,613-byte incompressible Resource
+stalled after repeated Resource requests and reached the bounded retry limit.
+The same failure occurred through either available gateway route, so route
+selection alone was not the remaining cause.
+
+The pinned Rust transport duplicate filter permits repeated Resource-request
+packets but not repeated Resource-data packets; the installed Python Reticulum
+reference permits both. No OMEN-level replay, fragmentation, dependency patch,
+or fork was added. Publication is blocked until this routed retransmission
+boundary is corrected and requalified, or a separately reviewed compatible
+design is accepted.
+
 Full release and external platform results are recorded in the release
 checklist and final implementation report; unavailable lanes are not inferred.

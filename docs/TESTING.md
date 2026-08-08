@@ -546,6 +546,17 @@ typed upload completion and Resource-available events with the exact byte count
 for both clients. Reticulum Resource integrity remains enforced; raw payloads,
 resource IDs, identities, destinations, paths, and reports are deleted.
 
+This direct/local process gate is deliberately not a routed retransmission
+qualification. On exact registry `reticulum-rs-transport 0.9.8`, an isolated
+multi-hop TCP-gateway run completed the 873-byte fixture but failed to complete
+a 13,613-byte incompressible attachment after repeated Resource requests. The
+current Rust transport duplicate filter permits repeated Resource requests but
+not repeated Resource-data packets; Python Reticulum permits both. See
+`docs/reviews/OMENBROWSER_V0983_ROUTED_RESOURCE_RETRANSMISSION.md`. A release
+claim covering routed attachments requires a realistic multi-packet routed
+case, exact received bytes, and at least one exercised retransmission—not only
+the 873-byte fixture.
+
 Route-scoped recovery coverage uses focused in-memory transport tests plus an
 isolated live profile. The focused tests require a terminal NomadNet response
 timeout or outbound OMENchat Resource failure to close only the failed Link,
@@ -554,7 +565,9 @@ application Request or Resource replay. The live three-gateway check uses a
 fresh identity/root: its first NEMO request reproduced the partially healthy
 gateway timeout, while its second explicit request loaded the exact 33,277-byte
 page without disabling any interface. The attachment process smoke was also
-repeated with a 54,427-byte file in addition to the canonical 873-byte fixture.
+repeated directly/locally with a 54,427-byte file in addition to the canonical
+873-byte fixture. That result does not supersede the separately recorded routed
+retransmission failure.
 
 Bounded local-history reducer and packaged SQLite capability:
 

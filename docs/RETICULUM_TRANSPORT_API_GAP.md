@@ -27,6 +27,31 @@ The maximum-UDP Resource sentinel is independent and still fails because the
 remains ignored and visible. Product upload, Resource, queue, parser, negotiated
 peer/room, cancellation, timeout, and retention limits are unchanged.
 
+### Routed Resource retransmission boundary on 0.9.8
+
+The split-metadata correction does not prove reliable Resource retransmission
+through a forwarding gateway. An isolated direct/local transport transferred
+and fetched 873-byte and 54,427-byte OMENchat attachments. A fresh isolated
+client on a multi-hop TCP-gateway route also transferred the 873-byte fixture,
+but a 13,613-byte incompressible attachment stalled after repeated Resource
+requests and terminated at the existing bounded retry limit.
+
+The exact registry `reticulum-rs-transport 0.9.8` duplicate filter admits
+repeated `ResourceRequest` packets but does not admit repeated `Resource` data
+packets. Python Reticulum's transport filter explicitly admits both. Resource
+data packets are deterministic for the same fragment, so an intermediate Rust
+transport that already observed a fragment can suppress its retransmission
+when the original forwarded copy was lost downstream. This is source-backed
+diagnosis plus a reproducible routed symptom; it is not a claim that every
+routed failure has this cause.
+
+OMEN retains bounded route-scoped recovery for a later explicit attempt. It
+does not automatically replay an uncertain Resource, fragment OMENchat at a new
+wire layer, patch the dependency, or switch transport primitives after
+dispatch. Until an official crate train corrects and qualifies this behavior,
+direct/local attachment smoke must not be described as routed attachment
+qualification.
+
 The OMENchat client and `omenchatd` `live-reticulum` server have a clean-stack
 transport path now: links are opened against `omenchat.node`, normal OMENchat
 frames are sent as context-zero encrypted link data with
