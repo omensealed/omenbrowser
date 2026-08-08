@@ -30,6 +30,17 @@ Status: final
 - Dynamic negotiated-payload-MDU response selection remains deferred until a
   suitable public upstream boundary is available. The conservative public
   `PACKET_MDU` selector is intentionally retained.
+- A terminal NomadNet response timeout now retires only the route selected for
+  that failed Link and requests paths on the other attached interfaces. The
+  failed request is never replayed; recovery applies only to a later explicit
+  user attempt. A three-gateway isolated-root smoke reproduced a timeout over
+  one partially healthy route and loaded the exact 33,277-byte page on the
+  next explicit attempt without disabling any gateway.
+- An outbound OMENchat Resource failure applies the same route-scoped recovery:
+  the affected Link is closed, its ownership is removed, and alternate path
+  discovery is prepared without resending the attachment. Isolated two-client
+  local-gateway smokes transferred and fetched exact 873-byte and 54,427-byte
+  attachments.
 
 ## Compatibility boundaries
 

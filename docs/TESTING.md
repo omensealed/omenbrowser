@@ -546,6 +546,16 @@ typed upload completion and Resource-available events with the exact byte count
 for both clients. Reticulum Resource integrity remains enforced; raw payloads,
 resource IDs, identities, destinations, paths, and reports are deleted.
 
+Route-scoped recovery coverage uses focused in-memory transport tests plus an
+isolated live profile. The focused tests require a terminal NomadNet response
+timeout or outbound OMENchat Resource failure to close only the failed Link,
+exclude its ingress interface from alternate path discovery, and emit no
+application Request or Resource replay. The live three-gateway check uses a
+fresh identity/root: its first NEMO request reproduced the partially healthy
+gateway timeout, while its second explicit request loaded the exact 33,277-byte
+page without disabling any interface. The attachment process smoke was also
+repeated with a 54,427-byte file in addition to the canonical 873-byte fixture.
+
 Bounded local-history reducer and packaged SQLite capability:
 
 ```bash

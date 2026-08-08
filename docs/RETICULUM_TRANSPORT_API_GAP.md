@@ -43,6 +43,13 @@ small encrypted `PacketContext::Request` link
 data from public primitives and sends it directly on the active link's bound
 interface. No automatic Resource retry follows a direct request, because a
 retry could repeat an executable form action whose response was merely lost.
+After a terminal response timeout, OMEN expires only the selected failed route
+and requests path discovery on the other attached interfaces. It does not
+replay the operation or switch its primitive; it prepares routing for a later
+explicit attempt. Outbound OMENchat Resource failure uses the same route-scoped
+recovery after closing only the affected Link. This prevents a partially
+healthy low-hop gateway from pinning later page and attachment attempts while
+preserving Reticulum's normal hop-based choice during healthy operation.
 
 The quiet `omenchatd` portal uses `Link::response_packet()` for a complete
 packed response at or below public `PACKET_MDU`, and
