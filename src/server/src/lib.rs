@@ -9,7 +9,6 @@ pub mod live;
 mod path_policy;
 mod private_fs;
 pub mod protocol;
-mod resource_compat;
 #[cfg(feature = "live-reticulum")]
 pub mod reticulum_live;
 #[cfg(feature = "live-reticulum")]
@@ -1979,7 +1978,7 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "dependency_train": {
-            "reticulum_rs": "0.9.7",
+            "reticulum_rs": "0.9.8",
             "lxmf": null,
         },
         "runtime": {
@@ -2473,7 +2472,7 @@ mod tests {
             status_value["application"]["version"],
             env!("CARGO_PKG_VERSION")
         );
-        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.7");
+        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.8");
         assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
         assert_eq!(status_value["history_retention"]["enabled"], false);
         assert_eq!(

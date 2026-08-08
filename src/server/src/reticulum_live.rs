@@ -50,84 +50,6 @@ const OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS: usize = 256;
 const OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK: usize = 16;
 const OUTBOUND_RESOURCE_CORRELATION_MAX_BYTES: usize = 1024 * 1024;
 const OUTBOUND_RESOURCE_CORRELATION_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-const REJECTED_SPLIT_RESOURCE_MAX_ITEMS: usize = 256;
-const REJECTED_SPLIT_RESOURCE_TTL: Duration = Duration::from_secs(2 * 60);
-
-fn remember_rejected_split_resource(
-    rejected: &mut BTreeMap<[u8; 32], Instant>,
-    resource_hash: [u8; 32],
-    now: Instant,
-    metrics: &SplitResourceSafeguardMetrics,
-) -> bool {
-    let before_purge = rejected.len();
-    rejected.retain(|_, inserted| now.duration_since(*inserted) <= REJECTED_SPLIT_RESOURCE_TTL);
-    metrics.add_expired(before_purge.saturating_sub(rejected.len()));
-    if rejected.contains_key(&resource_hash) {
-        return false;
-    }
-    if rejected.len() >= REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
-        if let Some(oldest) = rejected
-            .iter()
-            .min_by_key(|(_, inserted)| **inserted)
-            .map(|(hash, _)| *hash)
-        {
-            rejected.remove(&oldest);
-        }
-    }
-    rejected.insert(resource_hash, now);
-    metrics.increment_rejected();
-    true
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SplitResourceSafeguardMetricsSnapshot {
-    pub split_resources_rejected: u64,
-    pub late_split_completions_suppressed: u64,
-    pub split_rejection_markers_expired: u64,
-}
-
-#[derive(Debug, Default)]
-struct SplitResourceSafeguardMetrics {
-    split_resources_rejected: AtomicU64,
-    late_split_completions_suppressed: AtomicU64,
-    split_rejection_markers_expired: AtomicU64,
-}
-
-impl SplitResourceSafeguardMetrics {
-    fn saturating_increment(counter: &AtomicU64, amount: u64) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(amount))
-        });
-    }
-
-    fn increment_rejected(&self) {
-        Self::saturating_increment(&self.split_resources_rejected, 1);
-    }
-
-    fn increment_late_suppressed(&self) {
-        Self::saturating_increment(&self.late_split_completions_suppressed, 1);
-    }
-
-    fn add_expired(&self, count: usize) {
-        Self::saturating_increment(
-            &self.split_rejection_markers_expired,
-            u64::try_from(count).unwrap_or(u64::MAX),
-        );
-    }
-
-    fn snapshot(&self) -> SplitResourceSafeguardMetricsSnapshot {
-        SplitResourceSafeguardMetricsSnapshot {
-            split_resources_rejected: self.split_resources_rejected.load(Ordering::Relaxed),
-            late_split_completions_suppressed: self
-                .late_split_completions_suppressed
-                .load(Ordering::Relaxed),
-            split_rejection_markers_expired: self
-                .split_rejection_markers_expired
-                .load(Ordering::Relaxed),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueMetricsSnapshot {
     pub queued_items: usize,
@@ -358,7 +280,6 @@ pub struct ReticulumLiveRuntime {
     event_rx: mpsc::Receiver<Queued<OmenchatLinkEvent>>,
     event_queue_budget: Arc<QueueBudget>,
     transport_queue_budget: Arc<QueueBudget>,
-    split_resource_safeguard_metrics: Arc<SplitResourceSafeguardMetrics>,
     pub live_server: LiveServerWorker<ReticulumOmenchatTransport>,
     interface_statuses: Vec<ReticulumInterfaceStatus>,
     shutdown: CancellationToken,
@@ -1262,18 +1183,6 @@ async fn run_live_server_async(
     config: ServerConfig,
     qualification_slow_mode_transition_seconds: Option<u32>,
 ) -> ServerResult<()> {
-    let effective_upload_max = config
-        .upload_max_file_bytes
-        .min(crate::resource_compat::exact_train_upload_payload_max() as u64);
-    if effective_upload_max != config.upload_max_file_bytes {
-        append_server_log_warning_path(
-            &config.log_path(),
-            format!(
-                "configured upload limit {} bytes is capped to {} bytes on Reticulum 0.9.7",
-                config.upload_max_file_bytes, effective_upload_max
-            ),
-        );
-    }
     append_server_log(
         &config,
         format!(
@@ -1565,7 +1474,6 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         log_path: config.log_path(),
     };
     let outbound_correlations = Arc::new(Mutex::new(OutboundResourceCorrelations::default()));
-    let split_resource_safeguard_metrics = Arc::new(SplitResourceSafeguardMetrics::default());
     let shutdown = CancellationToken::new();
     let mut owned_tasks = vec![
         OwnedTask::cancellable(spawn_link_event_bridge(
@@ -1586,7 +1494,6 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
             config.clone(),
             shutdown.clone(),
             outbound_correlations.clone(),
-            split_resource_safeguard_metrics.clone(),
         )),
     ];
     owned_tasks.extend(
@@ -1627,7 +1534,6 @@ pub async fn start_live_server(config: &ServerConfig) -> ServerResult<ReticulumL
         event_rx,
         event_queue_budget,
         transport_queue_budget,
-        split_resource_safeguard_metrics,
         live_server: LiveServerWorker::new(OmenchatLiveServer::new(engine, transport_impl)),
         interface_statuses: attached,
         shutdown,
@@ -1662,10 +1568,6 @@ impl ReticulumLiveRuntime {
         }
     }
 
-    pub fn split_resource_safeguard_metrics(&self) -> SplitResourceSafeguardMetricsSnapshot {
-        self.split_resource_safeguard_metrics.snapshot()
-    }
-
     pub fn interface_health(&self) -> InterfaceHealth {
         let observations = self
             .interface_statuses
@@ -1684,16 +1586,12 @@ impl ReticulumLiveRuntime {
 
     pub fn queue_summary_line(&self) -> String {
         let (transport_queue, event_queue) = self.queue_metrics();
-        let split_metrics = self.split_resource_safeguard_metrics();
         format!(
-            "queues: {} {} {} {} resource_safeguards=split_rejected:{} late_suppressed:{} markers_expired:{}",
+            "queues: {} {} {} {}",
             transport_queue.summary("transport"),
             event_queue.summary("events"),
             self.live_server.worker_metrics().summary(),
             crate::server_log::metrics().summary(),
-            split_metrics.split_resources_rejected,
-            split_metrics.late_split_completions_suppressed,
-            split_metrics.split_rejection_markers_expired,
         )
     }
 
@@ -2194,7 +2092,6 @@ fn spawn_resource_event_bridge(
     config: ServerConfig,
     shutdown: CancellationToken,
     outbound_correlations: Arc<Mutex<OutboundResourceCorrelations>>,
-    split_resource_safeguard_metrics: Arc<SplitResourceSafeguardMetrics>,
 ) -> JoinHandle<()> {
     spawn_resource_event_receiver(
         transport.clone(),
@@ -2203,7 +2100,6 @@ fn spawn_resource_event_bridge(
         config,
         shutdown,
         outbound_correlations,
-        split_resource_safeguard_metrics,
     )
 }
 
@@ -2214,11 +2110,9 @@ fn spawn_resource_event_receiver(
     config: ServerConfig,
     shutdown: CancellationToken,
     outbound_correlations: Arc<Mutex<OutboundResourceCorrelations>>,
-    split_resource_safeguard_metrics: Arc<SplitResourceSafeguardMetrics>,
 ) -> JoinHandle<()> {
     let log_path = config.log_path();
     tokio::spawn(async move {
-        let mut rejected_split_resources = BTreeMap::<[u8; 32], Instant>::new();
         loop {
             let next = tokio::select! {
                 biased;
@@ -2228,23 +2122,7 @@ fn spawn_resource_event_receiver(
             match next {
                 Ok(event) => {
                     let complete = match event.kind {
-                        ResourceEventKind::Complete(complete) => {
-                            if rejected_split_resources
-                                .remove(&event.hash.to_bytes())
-                                .is_some()
-                            {
-                                split_resource_safeguard_metrics.increment_late_suppressed();
-                                append_server_log_warning_path(
-                                    &log_path,
-                                    format!(
-                                        "reticulum-rs split resource completion suppressed link={} hash={}",
-                                        event.link_id, event.hash
-                                    ),
-                                );
-                                continue;
-                            }
-                            complete
-                        }
+                        ResourceEventKind::Complete(complete) => complete,
                         ResourceEventKind::InboundFailed(failure) => {
                             let link_id = address_hash_bytes(event.link_id);
                             let reason = failure
@@ -2314,98 +2192,8 @@ fn spawn_resource_event_receiver(
                             continue;
                         }
                         ResourceEventKind::Progress(_) => continue,
-                        ResourceEventKind::SegmentComplete(segment) => {
-                            if segment.total_segments <= 1 {
-                                continue;
-                            }
-                            let now = Instant::now();
-                            let resource_hash = event.hash.to_bytes();
-                            let first_rejection = remember_rejected_split_resource(
-                                &mut rejected_split_resources,
-                                resource_hash,
-                                now,
-                                &split_resource_safeguard_metrics,
-                            );
-                            if first_rejection {
-                                let link_id = address_hash_bytes(event.link_id);
-                                append_server_log_warning_path(
-                                    &log_path,
-                                    format!(
-                                        "reticulum-rs split resource rejected link={} hash={} segments={} tracked={}",
-                                        hex_lower(&link_id),
-                                        event.hash,
-                                        segment.total_segments,
-                                        rejected_split_resources.len()
-                                    ),
-                                );
-                                event_tx
-                                    .send_control(OmenchatLinkEvent::ResourceTerminal {
-                                        link_id,
-                                        resource_hash,
-                                        resource_id: None,
-                                        direction: LiveResourceDirection::Inbound,
-                                        outcome: LiveResourceOutcome::Failed,
-                                        expected_size: Some(segment.total_data_size),
-                                        reason: Some(
-                                            "split Resource rejected on affected Reticulum 0.9.7 train"
-                                                .into(),
-                                        ),
-                                    })
-                                    .await;
-                                if let Err(error) = transport.channel(event.link_id).close().await {
-                                    append_server_log_warning_path(
-                                        &log_path,
-                                        format!(
-                                            "reticulum-rs split resource link close failed link={} error={error:?}",
-                                            hex_lower(&link_id)
-                                        ),
-                                    );
-                                }
-                            }
-                            continue;
-                        }
+                        ResourceEventKind::SegmentComplete(_) => continue,
                     };
-                    if complete.metadata.as_deref().is_some_and(|metadata| {
-                        !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
-                            complete.data.len(),
-                            metadata.len(),
-                        )
-                    }) {
-                        let link_id = address_hash_bytes(event.link_id);
-                        append_server_log_warning_path(
-                            &log_path,
-                            format!(
-                                "reticulum-rs oversized metadata resource rejected link={} hash={} bytes={}",
-                                hex_lower(&link_id),
-                                event.hash,
-                                complete.data.len()
-                            ),
-                        );
-                        event_tx
-                            .send_control(OmenchatLinkEvent::ResourceTerminal {
-                                link_id,
-                                resource_hash: event.hash.to_bytes(),
-                                resource_id: None,
-                                direction: LiveResourceDirection::Inbound,
-                                outcome: LiveResourceOutcome::Failed,
-                                expected_size: Some(complete.data.len() as u64),
-                                reason: Some(
-                                    "metadata Resource exceeds safe Reticulum 0.9.7 boundary"
-                                        .into(),
-                                ),
-                            })
-                            .await;
-                        if let Err(error) = transport.channel(event.link_id).close().await {
-                            append_server_log_warning_path(
-                                &log_path,
-                                format!(
-                                    "reticulum-rs oversized metadata resource link close failed link={} error={error:?}",
-                                    hex_lower(&link_id)
-                                ),
-                            );
-                        }
-                        continue;
-                    }
                     if complete.is_request {
                         let Some(request_id) = complete.request_id.clone() else {
                             append_server_log_warning_path(
@@ -2705,7 +2493,7 @@ fn validate_reticulum_interfaces(interfaces: &[ReticulumInterface]) -> ServerRes
             Some("TCPServerInterface") | Some("tcp_server") => {
                 if interface.network_name.is_some() || interface.passphrase.is_some() {
                     return Err(ServerError::Message(format!(
-                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.7 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
+                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.8 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
                         interface.name
                     )));
                 }
@@ -3865,50 +3653,6 @@ mod tests {
         assert_eq!(budget.snapshot().rejected_items, 1);
     }
 
-    #[test]
-    fn split_resource_rejection_markers_are_deduplicated_bounded_and_expire() {
-        let start = Instant::now();
-        let mut rejected = BTreeMap::new();
-        let metrics = SplitResourceSafeguardMetrics::default();
-        assert!(remember_rejected_split_resource(
-            &mut rejected,
-            [0x01; 32],
-            start,
-            &metrics,
-        ));
-        assert!(!remember_rejected_split_resource(
-            &mut rejected,
-            [0x01; 32],
-            start + Duration::from_secs(1),
-            &metrics,
-        ));
-        for index in 0..=REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
-            let mut hash = [0u8; 32];
-            hash[..8].copy_from_slice(&(index as u64 + 2).to_be_bytes());
-            assert!(remember_rejected_split_resource(
-                &mut rejected,
-                hash,
-                start + Duration::from_secs(2 + index as u64),
-                &metrics,
-            ));
-            assert!(rejected.len() <= REJECTED_SPLIT_RESOURCE_MAX_ITEMS);
-        }
-        assert!(!rejected.contains_key(&[0x01; 32]));
-
-        let expired_at = start + REJECTED_SPLIT_RESOURCE_TTL + Duration::from_secs(600);
-        assert!(remember_rejected_split_resource(
-            &mut rejected,
-            [0xff; 32],
-            expired_at,
-            &metrics,
-        ));
-        assert_eq!(rejected.len(), 1);
-        let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.split_resources_rejected, 259);
-        assert_eq!(snapshot.late_split_completions_suppressed, 0);
-        assert_eq!(snapshot.split_rejection_markers_expired, 258);
-    }
-
     #[tokio::test]
     async fn control_lane_remains_responsive_while_payload_lane_is_saturated() {
         let budget = QueueBudget::new(128, 128);
@@ -4028,7 +3772,6 @@ mod tests {
             &identity,
             true,
         )));
-        let metrics = Arc::new(SplitResourceSafeguardMetrics::default());
         let bridge = spawn_resource_event_receiver(
             transport,
             resource_rx,
@@ -4036,7 +3779,6 @@ mod tests {
             config.clone(),
             shutdown.clone(),
             Arc::new(Mutex::new(OutboundResourceCorrelations::default())),
-            metrics.clone(),
         );
         let link_id = AddressHash::new([0x42; 16]);
 
@@ -4115,7 +3857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_resource_terminal_suppresses_later_completion_without_runtime_shutdown() {
+    async fn split_resource_completion_reaches_application_without_runtime_shutdown() {
         use rns_transport::hash::Hash;
         use rns_transport::resource::{ResourceComplete, ResourceEvent, ResourceSegmentProgress};
         use tokio::sync::broadcast;
@@ -4140,7 +3882,6 @@ mod tests {
             &identity,
             true,
         )));
-        let metrics = Arc::new(SplitResourceSafeguardMetrics::default());
         let bridge = spawn_resource_event_receiver(
             transport,
             resource_rx,
@@ -4148,7 +3889,6 @@ mod tests {
             config.clone(),
             shutdown.clone(),
             Arc::new(Mutex::new(OutboundResourceCorrelations::default())),
-            metrics.clone(),
         );
         let link_id = AddressHash::new([0x52; 16]);
         let hash = Hash::new([0x53; 32]);
@@ -4164,23 +3904,12 @@ mod tests {
                 }),
             })
             .expect("bridge owns split event receiver");
-        let terminal = tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
-            .await
-            .expect("split terminal arrives")
-            .expect("control queue open");
-        let OmenchatLinkEvent::ResourceTerminal {
-            resource_hash,
-            outcome,
-            expected_size,
-            ..
-        } = terminal.value
-        else {
-            panic!("expected split Resource terminal");
-        };
-        assert_eq!(resource_hash, [0x53; 32]);
-        assert_eq!(outcome, LiveResourceOutcome::Failed);
-        assert_eq!(expected_size, Some(1_048_576));
-        drop(terminal);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), control_rx.recv())
+                .await
+                .is_err(),
+            "accepted split progress must not emit a terminal failure"
+        );
 
         resource_tx
             .send(ResourceEvent {
@@ -4195,20 +3924,18 @@ mod tests {
                 }),
             })
             .expect("bridge owns completion receiver");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), payload_rx.recv())
-                .await
-                .is_err(),
-            "completion queued after split rejection must not reach application state"
-        );
-        assert_eq!(
-            metrics.snapshot(),
-            SplitResourceSafeguardMetricsSnapshot {
-                split_resources_rejected: 1,
-                late_split_completions_suppressed: 1,
-                split_rejection_markers_expired: 0,
-            }
-        );
+        let received = tokio::time::timeout(Duration::from_secs(1), payload_rx.recv())
+            .await
+            .expect("split completion reaches payload queue")
+            .expect("payload queue remains open");
+        assert!(matches!(
+            received.value,
+            OmenchatLinkEvent::ResourceReceived {
+                resource_hash,
+                data,
+                ..
+            } if resource_hash == [0x53; 32] && data == vec![0x99; 64]
+        ));
 
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(1), bridge)
@@ -4312,7 +4039,6 @@ mod tests {
             client_config.clone(),
             shutdown.clone(),
             Arc::new(Mutex::new(OutboundResourceCorrelations::default())),
-            Arc::new(SplitResourceSafeguardMetrics::default()),
         );
 
         let destination = server_destination.lock().await.desc;

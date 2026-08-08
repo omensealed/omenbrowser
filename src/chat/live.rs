@@ -2303,11 +2303,11 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
             message: "usage: /upload <path> with a non-empty file".into(),
         }];
     }
-    let exact_train_max = crate::resource_compat::exact_train_upload_payload_max();
-    if bytes.len() > exact_train_max {
+    let local_resource_max = LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES;
+    if bytes.len() > local_resource_max {
         state.rejected_pending_uploads = state.rejected_pending_uploads.saturating_add(1);
         let message = format!(
-            "upload exceeds the {exact_train_max}-byte Reticulum 0.9.7 compatibility limit; rejected before an upload offer"
+            "upload exceeds the {local_resource_max}-byte OMENchat Resource limit; rejected before an upload offer"
         );
         if let Some(session) = client.session_mut(session_id) {
             session.status = message.clone();
@@ -2322,7 +2322,7 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
         .get(&session_id)
         .copied()
         .unwrap_or(u64::MAX)
-        .min(exact_train_max as u64);
+        .min(local_resource_max as u64);
     let effective_max = match client.room_upload_policy(session_id, room_id) {
         Some(policy) => policy.effective_max_file_bytes(advertised_max),
         None if advertised_max != 0 => Some(advertised_max),
@@ -4483,17 +4483,6 @@ fn apply_upload_accept(
         return;
     }
     let byte_len = upload.bytes.len() as u64;
-    let metadata_len = crate::chat::rns::resource_metadata(&resource_id).len();
-    if !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
-        upload.bytes.len(),
-        metadata_len,
-    ) {
-        events.push(ChatClientEvent::Error {
-            session_id: Some(session_id),
-            message: "OMENchat upload exceeds the safe Reticulum 0.9.7 single-segment limit".into(),
-        });
-        return;
-    }
     if let Err(error) = transport.send_resource(&resource_id, upload.bytes) {
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
@@ -9400,11 +9389,11 @@ mod tests {
     }
 
     #[test]
-    fn reusable_upload_rejects_above_exact_train_ceiling_before_offer_state() {
+    fn reusable_upload_rejects_above_product_resource_limit_before_offer_state() {
         let (mut client, session_id) = live_test_client();
         let mut state = LiveChatClientState::default();
         let mut transport = CapturedChatTransport::default();
-        let unsafe_len = crate::resource_compat::exact_train_upload_payload_max().saturating_add(1);
+        let unsafe_len = LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES.saturating_add(1);
 
         let events = handle_live_request(
             &mut client,
@@ -9422,7 +9411,7 @@ mod tests {
         assert!(matches!(
             events.as_slice(),
             [ChatClientEvent::Error { message, .. }]
-                if message.contains("Reticulum 0.9.7")
+                if message.contains("OMENchat Resource limit")
                     && message.contains("before an upload offer")
         ));
         assert!(transport.sent_frames.is_empty());
@@ -9438,11 +9427,11 @@ mod tests {
     }
 
     #[test]
-    fn reusable_upload_accepts_exact_train_ceiling_once() {
+    fn reusable_upload_accepts_product_resource_limit_once() {
         let (mut client, session_id) = live_test_client();
         let mut state = LiveChatClientState::default();
         let mut transport = CapturedChatTransport::default();
-        let safe_len = crate::resource_compat::exact_train_upload_payload_max();
+        let safe_len = LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES;
 
         let events = handle_live_request(
             &mut client,
@@ -9467,12 +9456,12 @@ mod tests {
 
     #[test]
     fn reusable_upload_uses_smaller_peer_limit_and_never_trusts_larger_one() {
-        let exact_train_max = crate::resource_compat::exact_train_upload_payload_max();
+        let local_resource_max = LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES;
         let (mut client, session_id) = live_test_client();
         let mut state = LiveChatClientState::default();
         state
             .server_upload_max_file_bytes
-            .insert(session_id, (exact_train_max as u64).saturating_mul(4));
+            .insert(session_id, (local_resource_max as u64).saturating_mul(4));
         let mut transport = CapturedChatTransport::default();
 
         let events = handle_live_request(
@@ -9484,7 +9473,7 @@ mod tests {
                 room: "lobby".into(),
                 filename: "peer-too-large.bin".into(),
                 content_type: None,
-                bytes: vec![0; exact_train_max.saturating_add(1)],
+                bytes: vec![0; local_resource_max.saturating_add(1)],
             },
         );
         assert!(matches!(events.as_slice(), [ChatClientEvent::Error { .. }]));
@@ -9519,7 +9508,7 @@ mod tests {
 
         state
             .server_upload_max_file_bytes
-            .insert(session_id, exact_train_max as u64);
+            .insert(session_id, local_resource_max as u64);
         let room_policy = RoomPolicyProjection::new_with_upload_policy(0, 0, Some(Some(32)))
             .expect("bounded room upload policy");
         assert!(client.replace_room_policies(session_id, &[(1, room_policy)]));

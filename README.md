@@ -300,7 +300,7 @@ is deprecated because command arguments may be visible in process listings.
 
 IFAC enforcement is currently provided by omenchatd's project-local TCP client
 adapter. An IFAC-configured stock TCP server is rejected at startup because
-reticulum-rs 0.9.7 does not apply the Python IFAC wire transform on that path.
+reticulum-rs 0.9.8 does not apply the Python IFAC wire transform on that path.
 Use an enforcing gateway as the TCP server and connect omenchatd to it as shown
 above.
 
@@ -446,7 +446,7 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   policy, and authorized moderation audit are active only after explicit
   per-Link negotiation. Deterministic downgrade coverage does not replace the
   separately reported prior-binary live lane.
-- The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.7.
+- The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.8.
   Isolated current-product OMENchat reconnect/upload and NomadNet portal fetches
   pass, as does the current Python NomadNet direct/Resource request-response
   matrix and the pinned/current Python LXMF direct, propagated, ticket/stamp,
@@ -458,17 +458,19 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   Intel macOS, and Apple Silicon checks pass. The Linux packages and Windows
   portable ZIP, unsigned NSIS setup, and unsigned WiX MSI also pass their
   isolated install/upgrade/launch/uninstall qualification. The published
-  Reticulum 0.9.7 UDP worker still cannot transmit maximum Resource packets; that
+  Reticulum 0.9.8 UDP worker still cannot transmit maximum Resource packets; that
   known upstream limitation remains visible and blocks a UDP Resource parity
   claim, but does not block this version-aligned OMEN release. The prior two
   `quick-xml 0.39.2` findings are resolved: the locked Wayland proc-macro path
   uses fixed `quick-xml 0.41.0`, the standalone server does not resolve that
   crate, and the current audit policy accepts zero vulnerabilities. Historical
   0.6 live results remain migration baselines.
-- Reticulum 0.9.7 also has an upstream split-Resource metadata assembly defect
-  (#553; proposed correction #556). OMEN v0.9.7-7 fails closed before unsafe
-  outbound offers and rejects split inbound OMEN-owned Resources. The default
-  512 KiB upload limit remains unchanged; no retry or fragmentation is added.
+- Official Reticulum 0.9.8 resolves the split-Resource metadata assembly defect
+  tracked by upstream issues #553/#556. OMEN's unchanged sentinel passed, and a
+  strengthened incompressible multi-segment TCP regression verifies exact
+  metadata and payload bytes. The temporary 0.9.7 split ceiling and rejection
+  markers are removed. The default 512 KiB upload limit and all independent
+  product/peer/room bounds remain unchanged; no retry or fragmentation is added.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when

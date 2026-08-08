@@ -3686,19 +3686,21 @@ and remains a separate multi-process/pinned-Python gate.
 
 ## omenchatd two-process Resource completion gate
 
-### Reticulum 0.9.7 split-metadata sentinel and OMEN guards
+### Reticulum 0.9.8 split-metadata regression and maximum-UDP sentinel
 
-The deliberately ignored
-`reticulum_split_metadata_assembly_preserves_segment_two_payload` test sends a
-real two-segment metadata Resource through the unmodified registry transport.
-It documents upstream issue #553 and proposed fix #556 and is expected to fail
-on 0.9.7. It is separate from
-`reticulum_udp_tx_buffer_covers_max_resource_wire_packet`.
+The unchanged
+`reticulum_split_metadata_assembly_preserves_segment_two_payload` sentinel
+passed against the unmodified official registry 0.9.8 transport. It is now a
+normal regression and uses deterministic incompressible bytes over TCP, asserts
+that more than one segment was observed, and verifies exact metadata and
+application payload bytes. It documents the resolved upstream #553/#556 defect
+and remains separate from the deliberately ignored
+`reticulum_udp_tx_buffer_covers_max_resource_wire_packet` limitation.
 
-Non-ignored product tests cover exact-boundary acceptance, plus-one rejection
-before the offer frame, retained-payload cleanup, one dispatch only, effective
-upload negotiation, and suppression of a later completion after split evidence.
-Run the source/release guard with:
+The obsolete exact-0.9.7 split ceiling, rejection markers, forced Link close,
+late-completion suppression, and associated counters are removed. Application,
+peer, room, parser, queue, and storage limits remain unchanged. Run the
+source/release guard with:
 
 ```bash
 bash scripts/verify-reticulum-resource-compat.sh
@@ -4211,7 +4213,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.6-2` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.8-1` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -4226,7 +4228,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.7-7` must report
+therefore exits with the expected signal status; current `0.9.8-1` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -5970,7 +5972,7 @@ The maximum-UDP Resource sentinel remains deliberately ignored and visible. It
 must not be weakened or relabeled as passing while the locked upstream transmit
 buffer remains smaller than the maximum serialized Resource packet.
 
-## v0.9.7-7 Resource maintenance
+## Historical v0.9.7-7 Resource maintenance
 
 The v0.9.7-7 revision packages the qualified post-v0.9.7-6 maintenance.
 Focused gates cover reusable upload rejection before any
@@ -5990,4 +5992,27 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
 The tests assert one outbound request/offer at most, no fallback or replay,
 unchanged cancellation cleanup, deduplicated rejection counts, late-completion
 suppression, and expiry counting only when TTL cleanup actually removes a
-marker. The separate split-metadata and maximum-UDP sentinels remain visible.
+marker. This describes the released 0.9.7 train and is retained as historical
+evidence; v0.9.8-1 supersedes the split guard after the promoted regression
+passes. The maximum-UDP sentinel remains separately visible.
+
+## v0.9.8-1 Resource requalification
+
+The v0.9.8-1 upgrade uses the exact official registry train. Run the promoted
+split regression and independent expected-defect UDP sentinel with:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  reticulum_split_metadata_assembly_preserves_segment_two_payload -- --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  reticulum_udp_tx_buffer_covers_max_resource_wire_packet -- --ignored --nocapture
+```
+
+The first must pass and prove an actual multi-segment transfer with exact
+bytes. The second currently fails at the independent 456-versus-483-byte UDP
+transmit-buffer boundary and must remain ignored but explicit. OMEN keeps its
+default 512 KiB upload behavior and all independent 8 MiB/16 MiB Resource and
+queue ceilings. There is no request replay, primitive fallback, or second
+dispatch.

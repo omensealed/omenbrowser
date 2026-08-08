@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.7-7 compatibility boundary
+### v0.6.0-1 / v0.9.8-1 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.7-7 release retains protocol version `1`, protocol name
+The v0.9.8-1 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -26,12 +26,11 @@ accepts a valid frame received as either generic context `0x00` or the legacy
 responses for compatibility. This is transport adaptation; it does not change
 the OMENchat frame protocol.
 
-The exact 0.9.7 implementation temporarily caps upload negotiation and
-admission so `3 + len("omenchat-resource:") + len(resource_id) + payload`
-does not exceed 1,048,575 bytes. The configured value is retained, the default
-512 KiB limit is unchanged, and no operation or capability identifier changes.
-Unsafe Resource fetches return the existing bounded error operation before a
-Resource-offer frame is sent.
+Official reticulum-rs 0.9.8 passes OMEN's strengthened multi-segment metadata
+Resource regression, so the temporary exact-0.9.7 efficient-Resource ceiling
+is removed. The default 512 KiB upload limit, the 8 MiB application Resource
+ceiling, negotiated peer/room limits, and all queue/byte bounds remain
+authoritative. No operation or capability identifier changes.
 
 `fixtures/omenchat/v0_6_0_1_wire.rs` records public v0.6.0-1 session-open,
 room-message, and history-resource-offer bytes plus the protocol and transport
@@ -133,7 +132,7 @@ lifecycle event, not a new OMENchat frame. The desktop releases pending
 history/user-list offers owned by that live link and leaves the link connected
 for an explicit retry. Server outbound Resources retain a bounded association
 between the application resource ID and the exact Reticulum hash until a
-terminal, link close, shutdown, or six-hour TTL. The pinned 0.9.7 inbound
+terminal, link close, shutdown, or six-hour TTL. The pinned 0.9.8 inbound
 failure shape carries the exact hash and expected size but not the OMENchat
 metadata/application ID. Server upload cleanup therefore removes one offer only
 when the authenticated identity and expected size identify exactly one pending
@@ -204,7 +203,7 @@ inbound frame carrying the `SessionOpen` operation number.
 ### Authoritative production capability matrix
 
 This table describes the canonical `desktop-product` client and
-`server-headless`/`server-full` server at 0.9.7-7. Capability names come from
+`server-headless`/`server-full` server at 0.9.8-1. Capability names come from
 `omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
 shared vocabulary, the client's request, and the canonical server's acceptance.
 Definition alone never activates a capability: each Link must request it and

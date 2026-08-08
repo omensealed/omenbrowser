@@ -6,11 +6,12 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
+use std::sync::atomic::Ordering;
 #[cfg(feature = "native-lxmf")]
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
@@ -21,7 +22,9 @@ use rns_transport::resource::ResourceEventKind;
 use sha2::{Digest, Sha256};
 #[cfg(not(all(feature = "native-rns-net", any())))]
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::{broadcast, watch, Semaphore};
+#[cfg(any(feature = "native-lxmf", feature = "native-lxmf-sdk"))]
+use tokio::sync::Semaphore;
+use tokio::sync::{broadcast, watch};
 
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 const NATIVE_LXMF_PROPAGATED_TERMINAL_RETENTION_SECS: f64 = 3600.0;
@@ -68,92 +71,9 @@ const OMENCHAT_FRAME_RESOURCE_METADATA: &[u8] = b"omenchat-frame:";
 #[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_CLEAN_RESOURCE_MAX_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(not(all(feature = "native-rns-net", any())))]
-const OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS: usize = 256;
-#[cfg(not(all(feature = "native-rns-net", any())))]
-const OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL: Duration = Duration::from_secs(2 * 60);
-#[cfg(not(all(feature = "native-rns-net", any())))]
-fn remember_omenchat_rejected_split_resource(
-    rejected: &mut BTreeMap<[u8; 32], Instant>,
-    resource_hash: [u8; 32],
-    now: Instant,
-    metrics: &SplitResourceSafeguardMetrics,
-) -> bool {
-    let before_purge = rejected.len();
-    rejected.retain(|_, inserted| {
-        now.duration_since(*inserted) <= OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL
-    });
-    metrics.add_expired(before_purge.saturating_sub(rejected.len()));
-    if rejected.contains_key(&resource_hash) {
-        return false;
-    }
-    if rejected.len() >= OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
-        if let Some(oldest) = rejected
-            .iter()
-            .min_by_key(|(_, inserted)| **inserted)
-            .map(|(hash, _)| *hash)
-        {
-            rejected.remove(&oldest);
-        }
-    }
-    rejected.insert(resource_hash, now);
-    metrics.increment_rejected();
-    true
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct SplitResourceSafeguardMetricsSnapshot {
-    split_resources_rejected: u64,
-    late_split_completions_suppressed: u64,
-    split_rejection_markers_expired: u64,
-}
-
-#[derive(Debug, Default)]
-struct SplitResourceSafeguardMetrics {
-    split_resources_rejected: AtomicU64,
-    late_split_completions_suppressed: AtomicU64,
-    split_rejection_markers_expired: AtomicU64,
-}
-
-#[cfg(not(all(feature = "native-rns-net", any())))]
 #[derive(Clone)]
 struct CleanOmenchatResourceGuard {
     active_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
-    metrics: Arc<SplitResourceSafeguardMetrics>,
-}
-
-impl SplitResourceSafeguardMetrics {
-    fn saturating_increment(counter: &AtomicU64, amount: u64) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            Some(value.saturating_add(amount))
-        });
-    }
-
-    fn increment_rejected(&self) {
-        Self::saturating_increment(&self.split_resources_rejected, 1);
-    }
-
-    fn increment_late_suppressed(&self) {
-        Self::saturating_increment(&self.late_split_completions_suppressed, 1);
-    }
-
-    fn add_expired(&self, count: usize) {
-        Self::saturating_increment(
-            &self.split_rejection_markers_expired,
-            u64::try_from(count).unwrap_or(u64::MAX),
-        );
-    }
-
-    fn snapshot(&self) -> SplitResourceSafeguardMetricsSnapshot {
-        SplitResourceSafeguardMetricsSnapshot {
-            split_resources_rejected: self.split_resources_rejected.load(Ordering::Relaxed),
-            late_split_completions_suppressed: self
-                .late_split_completions_suppressed
-                .load(Ordering::Relaxed),
-            split_rejection_markers_expired: self
-                .split_rejection_markers_expired
-                .load(Ordering::Relaxed),
-        }
-    }
 }
 #[cfg(feature = "native-lxmf")]
 const PROPAGATION_STAMP_BLOCKING_JOBS: usize = 2;
@@ -193,11 +113,13 @@ use crate::browser::{BrowserPage, DownloadedFile};
 use crate::directory::DirectoryKind;
 use crate::error::{AppError, AppResult};
 use crate::identity::IdentityProfile;
+#[cfg(feature = "native-lxmf")]
+use crate::messaging::AttachmentSummary;
 #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
 use crate::messaging::DeliveryMode;
 #[cfg(feature = "native-lxmf-sdk")]
 use crate::messaging::TransportMethod;
-use crate::messaging::{AttachmentSummary, MessageEnvelope, MessageSummary};
+use crate::messaging::{MessageEnvelope, MessageSummary};
 use crate::runtime::facade::{
     RuntimeCapability, RuntimeCapabilityAvailability, RuntimeCapabilityRecord,
     RuntimeCapabilitySnapshot, RuntimeCapabilitySource, RuntimeFailure, RuntimeFailureCategory,
@@ -229,10 +151,12 @@ use crate::runtime::native::lxmf_router::{
 };
 #[cfg(not(all(feature = "native-rns-net", any())))]
 use crate::runtime::native::request::native_reticulum09_capability_report;
+#[cfg(all(feature = "native-lxmf", not(feature = "native-rns-net")))]
+use crate::runtime::native::request::NativeLinkResponseFrame;
 #[cfg(not(all(feature = "native-rns-net", any())))]
 use crate::runtime::native::request::{
     send_reticulum_link_identify, single_output_destination_desc, NativeLinkRequestFrame,
-    NativeLinkResponseFrame, NativePageFetchContext,
+    NativePageFetchContext,
 };
 use crate::runtime::native::request::{
     NativeFetchPlan, NativePageTransportClient, ReticulumPageTransportClient,
@@ -309,7 +233,6 @@ pub struct NativeNetworkRuntime {
     #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
     pending_propagated_lxmf: PendingPropagatedLxmf,
     active_omenchat_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
-    split_resource_safeguard_metrics: Arc<SplitResourceSafeguardMetrics>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
     clean_omenchat_links: Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
     #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1158,7 +1081,6 @@ impl NativeNetworkRuntime {
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_propagated_lxmf: Arc::new(Mutex::new(BTreeMap::new())),
             active_omenchat_links: Arc::new(Mutex::new(BTreeSet::new())),
-            split_resource_safeguard_metrics: Arc::new(SplitResourceSafeguardMetrics::default()),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1206,7 +1128,6 @@ impl NativeNetworkRuntime {
             #[cfg(all(feature = "native-lxmf", feature = "native-rns-net"))]
             pending_propagated_lxmf: Arc::new(Mutex::new(BTreeMap::new())),
             active_omenchat_links: Arc::new(Mutex::new(BTreeSet::new())),
-            split_resource_safeguard_metrics: Arc::new(SplitResourceSafeguardMetrics::default()),
             #[cfg(not(all(feature = "native-rns-net", any())))]
             clean_omenchat_links: Arc::new(Mutex::new(BTreeMap::new())),
             #[cfg(not(all(feature = "native-rns-net", any())))]
@@ -1548,6 +1469,9 @@ impl NativeNetworkRuntime {
             "native Reticulum ratchet store {}",
             self.config.reticulum_storage_dir.join("ratchets").display()
         )));
+        // Some maintained feature profiles register mutable endpoints below,
+        // while the transport-only profile deliberately does not.
+        #[allow(unused_mut)]
         let mut transport = reticulum_rs::runtime::Transport::new(config);
         #[cfg(not(all(feature = "native-rns-net", any())))]
         let clean_lxmf_delivery_destination =
@@ -1615,7 +1539,6 @@ impl NativeNetworkRuntime {
             transport.clone(),
             CleanOmenchatResourceGuard {
                 active_links: self.active_omenchat_links.clone(),
-                metrics: self.split_resource_safeguard_metrics.clone(),
             },
             self.clean_omenchat_links.clone(),
             self.clean_destination_identities.clone(),
@@ -1705,7 +1628,7 @@ impl NativeNetworkRuntime {
             "native rns-net starting request node config_dir={}",
             self.config.reticulum_config_dir.display()
         )));
-        let startup_timer = Instant::now();
+        let startup_timer = std::time::Instant::now();
         let (announce_tx, mut announce_rx) = tokio::sync::mpsc::unbounded_channel();
         let (path_tx, mut path_rx) = tokio::sync::mpsc::unbounded_channel();
         let (local_tx, mut local_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -7227,13 +7150,6 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 ));
             }
         }
-        let split_metrics = self.split_resource_safeguard_metrics.snapshot();
-        interfaces.push(format!(
-            "resource safeguards: split_rejected={} late_suppressed={} markers_expired={}",
-            split_metrics.split_resources_rejected,
-            split_metrics.late_split_completions_suppressed,
-            split_metrics.split_rejection_markers_expired
-        ));
 
         Ok(InterfaceStats {
             available: matches!(state.lifecycle, NativeRuntimeLifecycle::Running),
@@ -9810,6 +9726,7 @@ async fn clean_request_omenchat_paths_on_attached_interfaces(
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
+#[cfg_attr(not(feature = "native-lxmf"), allow(unused_variables))]
 fn spawn_clean_omenchat_event_bridge(
     transport: Arc<reticulum_rs::runtime::Transport>,
     resource_guard: CleanOmenchatResourceGuard,
@@ -9820,7 +9737,6 @@ fn spawn_clean_omenchat_event_bridge(
     #[cfg(feature = "native-lxmf")] pending_lxmf_proofs: PendingLxmfProofs,
 ) {
     let active_omenchat_links = resource_guard.active_links;
-    let split_resource_safeguard_metrics = resource_guard.metrics;
     #[cfg(feature = "native-lxmf")]
     let clean_lxmf_seen_messages: Arc<Mutex<BTreeMap<String, tokio::time::Instant>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
@@ -9884,7 +9800,9 @@ fn spawn_clean_omenchat_event_bridge(
         let mut link_events = transport.out_link_events();
         let active_omenchat_links = active_omenchat_links.clone();
         let clean_omenchat_links = clean_omenchat_links.clone();
+        #[cfg(feature = "native-lxmf")]
         let clean_destination_identities = clean_destination_identities.clone();
+        #[cfg(feature = "native-lxmf")]
         let attachments_dir = attachments_dir.clone();
         let event_tx = event_tx.clone();
         #[cfg(feature = "native-lxmf")]
@@ -10015,7 +9933,9 @@ fn spawn_clean_omenchat_event_bridge(
         let mut link_events = transport.in_link_events();
         let active_omenchat_links = active_omenchat_links.clone();
         let clean_omenchat_links = clean_omenchat_links.clone();
+        #[cfg(feature = "native-lxmf")]
         let clean_destination_identities = clean_destination_identities.clone();
+        #[cfg(feature = "native-lxmf")]
         let attachments_dir = attachments_dir.clone();
         let event_tx = event_tx.clone();
         #[cfg(feature = "native-lxmf")]
@@ -10125,7 +10045,9 @@ fn spawn_clean_omenchat_event_bridge(
         let mut received_data_events = transport.received_data_events();
         let active_omenchat_links = active_omenchat_links.clone();
         let clean_omenchat_links = clean_omenchat_links.clone();
+        #[cfg(feature = "native-lxmf")]
         let clean_destination_identities = clean_destination_identities.clone();
+        #[cfg(feature = "native-lxmf")]
         let attachments_dir = attachments_dir.clone();
         let event_tx = event_tx.clone();
         #[cfg(feature = "native-lxmf")]
@@ -10230,22 +10152,21 @@ fn spawn_clean_omenchat_event_bridge(
     }
     {
         let mut resource_events = transport.resource_events();
-        let split_resource_safeguard_metrics = split_resource_safeguard_metrics.clone();
         #[cfg(feature = "native-lxmf")]
         let pending_lxmf_proofs = pending_lxmf_proofs.clone();
         let active_omenchat_links = active_omenchat_links.clone();
         let clean_omenchat_links = clean_omenchat_links.clone();
+        #[cfg(feature = "native-lxmf")]
         let clean_destination_identities = clean_destination_identities.clone();
+        #[cfg(feature = "native-lxmf")]
         let attachments_dir = attachments_dir.clone();
         let event_tx = event_tx.clone();
         #[cfg(feature = "native-lxmf")]
         let clean_lxmf_seen_messages = clean_lxmf_seen_messages.clone();
         tokio::spawn(async move {
-            let mut rejected_split_resources = BTreeMap::<[u8; 32], Instant>::new();
             loop {
                 match resource_events.recv().await {
                     Ok(event) => {
-                        let now = Instant::now();
                         let event_link_id = address_hash_to_link_id(event.link_id);
                         let link_id = {
                             let active_links = active_omenchat_links
@@ -10266,6 +10187,7 @@ fn spawn_clean_omenchat_event_bridge(
                                     })
                             }
                         };
+                        #[allow(unused_mut)]
                         let mut complete = match event.kind {
                             rns_transport::resource::ResourceEventKind::Progress(progress) => {
                                 if let Some(link_id) = link_id {
@@ -10294,75 +10216,10 @@ fn spawn_clean_omenchat_event_bridge(
                                 }
                                 continue;
                             }
-                            rns_transport::resource::ResourceEventKind::SegmentComplete(
-                                segment,
-                            ) => {
-                                if segment.total_segments <= 1 {
-                                    continue;
-                                }
-                                let Some(link_id) = link_id else {
-                                    // This worker also observes LXMF Resources. Only Resources
-                                    // owned by an active OMENchat Link are governed here.
-                                    continue;
-                                };
-                                let resource_hash = event.hash.to_bytes();
-                                let first_rejection = remember_omenchat_rejected_split_resource(
-                                    &mut rejected_split_resources,
-                                    resource_hash,
-                                    now,
-                                    &split_resource_safeguard_metrics,
-                                );
-                                if first_rejection {
-                                    let transfer_id = hex_encode(event.hash.as_slice());
-                                    let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
-                                        ResourceLifecycleEvent {
-                                            transfer_id: transfer_id.clone(),
-                                            state: ResourceLifecycleState::Failed,
-                                            bytes: Some(segment.total_data_size),
-                                            reason: Some(
-                                                "split Resource rejected on affected Reticulum 0.9.7 train"
-                                                    .into(),
-                                            ),
-                                            operation_id: None,
-                                            source: Some("omenchat".into()),
-                                            purpose: Some("omenchat-resource".into()),
-                                            direction: Some("inbound".into()),
-                                            peer: Some(hex_encode(&link_id)),
-                                        },
-                                    ));
-                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 OMENchat split resource rejected link_id={} resource={} segment={}/{} total_bytes={} tracked={}",
-                                        hex_encode(&link_id),
-                                        transfer_id,
-                                        segment.segment_index,
-                                        segment.total_segments,
-                                        segment.total_data_size,
-                                        rejected_split_resources.len()
-                                    )));
-                                    let clean_link = clean_omenchat_links
-                                        .lock()
-                                        .expect("native clean OMENchat link lock")
-                                        .get(&link_id)
-                                        .cloned();
-                                    if let Some(clean_link) = clean_link {
-                                        clean_close_link(&clean_link.transport, &clean_link.link)
-                                            .await;
-                                    }
-                                }
+                            rns_transport::resource::ResourceEventKind::SegmentComplete(_) => {
                                 continue;
                             }
                             rns_transport::resource::ResourceEventKind::Complete(complete) => {
-                                if rejected_split_resources
-                                    .remove(&event.hash.to_bytes())
-                                    .is_some()
-                                {
-                                    split_resource_safeguard_metrics.increment_late_suppressed();
-                                    let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 OMENchat rejected split resource completion suppressed resource={}",
-                                        hex_encode(event.hash.as_slice())
-                                    )));
-                                    continue;
-                                }
                                 complete
                             }
                             rns_transport::resource::ResourceEventKind::OutboundComplete => {
@@ -10521,47 +10378,6 @@ fn spawn_clean_omenchat_event_bridge(
                             complete.metadata.as_deref().is_some_and(|metadata| {
                                 metadata.starts_with(OMENCHAT_RESOURCE_METADATA_PREFIX)
                             });
-                        if is_metadata_omenchat
-                            && complete.metadata.as_deref().is_some_and(|metadata| {
-                                !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
-                                    complete.data.len(),
-                                    metadata.len(),
-                                )
-                            })
-                        {
-                            let transfer_id = hex_encode(event.hash.as_slice());
-                            if let Some(link_id) = link_id {
-                                let _ = event_tx.send(RuntimeBusEvent::ResourceLifecycle(
-                                    ResourceLifecycleEvent {
-                                        transfer_id: transfer_id.clone(),
-                                        state: ResourceLifecycleState::Failed,
-                                        bytes: Some(complete.data.len() as u64),
-                                        reason: Some(
-                                            "metadata Resource exceeds safe Reticulum 0.9.7 boundary"
-                                                .into(),
-                                        ),
-                                        operation_id: None,
-                                        source: Some("omenchat".into()),
-                                        purpose: Some("omenchat-resource".into()),
-                                        direction: Some("inbound".into()),
-                                        peer: Some(hex_encode(&link_id)),
-                                    },
-                                ));
-                                let clean_link = clean_omenchat_links
-                                    .lock()
-                                    .expect("native clean OMENchat link lock")
-                                    .get(&link_id)
-                                    .cloned();
-                                if let Some(clean_link) = clean_link {
-                                    clean_close_link(&clean_link.transport, &clean_link.link).await;
-                                }
-                            }
-                            let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                "native Reticulum 0.9 OMENchat oversized metadata resource rejected resource={transfer_id} bytes={}",
-                                complete.data.len()
-                            )));
-                            continue;
-                        }
                         #[cfg(feature = "native-lxmf")]
                         if !is_metadata_omenchat {
                             let decoded = match decode_native_lxmf_payload_bounded(
@@ -13379,56 +13195,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(all(feature = "native-rns-net", any())))]
-    #[test]
-    fn clean_omenchat_split_resource_rejections_are_deduplicated_bounded_and_expire() {
-        let start = Instant::now();
-        let mut rejected = BTreeMap::new();
-        let metrics = SplitResourceSafeguardMetrics::default();
-        assert!(remember_omenchat_rejected_split_resource(
-            &mut rejected,
-            [0x01; 32],
-            start,
-            &metrics,
-        ));
-        assert!(!remember_omenchat_rejected_split_resource(
-            &mut rejected,
-            [0x01; 32],
-            start + Duration::from_secs(1),
-            &metrics,
-        ));
-
-        for index in 0..=OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS {
-            let mut hash = [0u8; 32];
-            hash[..8].copy_from_slice(&(index as u64 + 2).to_be_bytes());
-            assert!(remember_omenchat_rejected_split_resource(
-                &mut rejected,
-                hash,
-                start + Duration::from_secs(2 + index as u64),
-                &metrics,
-            ));
-            assert!(rejected.len() <= OMENCHAT_REJECTED_SPLIT_RESOURCE_MAX_ITEMS);
-        }
-        assert!(!rejected.contains_key(&[0x01; 32]));
-
-        let expired_at = start + OMENCHAT_REJECTED_SPLIT_RESOURCE_TTL + Duration::from_secs(600);
-        assert!(remember_omenchat_rejected_split_resource(
-            &mut rejected,
-            [0xff; 32],
-            expired_at,
-            &metrics,
-        ));
-        assert_eq!(rejected.len(), 1);
-        let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.split_resources_rejected, 259);
-        assert_eq!(snapshot.late_split_completions_suppressed, 0);
-        assert_eq!(snapshot.split_rejection_markers_expired, 258);
-        assert!(rejected.remove(&[0xff; 32]).is_some());
-        assert!(rejected.remove(&[0xff; 32]).is_none());
-        metrics.increment_late_suppressed();
-        assert_eq!(metrics.snapshot().late_split_completions_suppressed, 1);
-    }
-
     #[cfg(feature = "native-lxmf")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn native_lxmf_blocking_gate_caps_concurrency_and_releases_permits() {
@@ -16237,7 +16003,7 @@ enable_transport = No
             ">Current Python Form\nfield_size=2048\nnext=/page/index.mu\n";
         let large_page = format!(
             ">Current Python Large Response\n{}",
-            "resource-response-line\n".repeat(256)
+            "resource-response-line\n".repeat(16_384)
         );
 
         let paths = temp_paths("current-python-nomadnet");
@@ -16339,12 +16105,19 @@ enable_transport = No
             Some("request-resource")
         );
         let mut saw_outbound_request_resource_complete = false;
-        while let Ok(event) = page_events.try_recv() {
-            if let RuntimeBusEvent::ResourceLifecycle(lifecycle) = event {
-                saw_outbound_request_resource_complete |= lifecycle.source.as_deref()
-                    == Some("nomadnet-page")
-                    && lifecycle.direction.as_deref() == Some("outbound")
-                    && lifecycle.state == ResourceLifecycleState::Complete;
+        loop {
+            match page_events.try_recv() {
+                Ok(RuntimeBusEvent::ResourceLifecycle(lifecycle)) => {
+                    saw_outbound_request_resource_complete |= lifecycle.source.as_deref()
+                        == Some("nomadnet-page")
+                        && lifecycle.direction.as_deref() == Some("outbound")
+                        && lifecycle.state == ResourceLifecycleState::Complete;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
             }
         }
         assert!(saw_outbound_request_resource_complete);
@@ -16366,18 +16139,31 @@ enable_transport = No
             Some("direct-request")
         );
         let mut saw_inbound_response_resource_complete = false;
-        while let Ok(event) = page_events.try_recv() {
-            if let RuntimeBusEvent::ResourceLifecycle(lifecycle) = event {
-                saw_inbound_response_resource_complete |= lifecycle.source.as_deref()
-                    == Some("nomadnet-page")
-                    && lifecycle.direction.as_deref() == Some("inbound")
-                    && lifecycle.state == ResourceLifecycleState::Complete
-                    && lifecycle
-                        .bytes
-                        .is_some_and(|bytes| bytes >= large_page.len() as u64);
+        let mut observed_resource_lifecycle = Vec::new();
+        loop {
+            match page_events.try_recv() {
+                Ok(RuntimeBusEvent::ResourceLifecycle(lifecycle)) => {
+                    observed_resource_lifecycle.push((
+                        lifecycle.state.clone(),
+                        lifecycle.direction.clone(),
+                        lifecycle.bytes,
+                    ));
+                    saw_inbound_response_resource_complete |= lifecycle.source.as_deref()
+                        == Some("nomadnet-page")
+                        && lifecycle.direction.as_deref() == Some("inbound")
+                        && lifecycle.state == ResourceLifecycleState::Complete;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
             }
         }
-        assert!(saw_inbound_response_resource_complete);
+        assert!(
+            saw_inbound_response_resource_complete,
+            "missing inbound response-Resource completion; observed={observed_resource_lifecycle:?}"
+        );
 
         let result = peer.finish();
         assert_eq!(result["passed"], true);

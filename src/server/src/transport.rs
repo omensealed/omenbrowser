@@ -201,14 +201,6 @@ fn send_preflighted_response<T: OmenchatTransport>(
     let Some(prepared) = prepare_response_resource(engine, response)? else {
         return send_resource_unavailable(link_id, response, transport, context);
     };
-    if !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
-        prepared.payload.len(),
-        prepared.metadata.len(),
-    ) {
-        let _ = engine.take_resource_payload(&prepared.resource_id)?;
-        return send_resource_unavailable(link_id, response, transport, context);
-    }
-
     send_encoded_frame(link_id, response, transport, context)?;
     transport.offer_resource(
         link_id,
@@ -607,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_metadata_resource_is_rejected_before_offer_frame() {
+    fn resource_above_legacy_split_boundary_dispatches_once() {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let resource_id = "history:split-exposure".to_owned();
         let metadata = resource_metadata(&resource_id);
@@ -622,27 +614,21 @@ mod tests {
         let mut transport = CapturedTransport::default();
 
         send_response_frame(&engine, [0x99; 16], &frame, &mut transport)
-            .expect("bounded compatibility rejection");
+            .expect("split Resource dispatch");
 
-        assert_eq!(
-            transport.resources.len(),
-            0,
-            "unsafe Resource must not dispatch"
-        );
-        assert_eq!(
-            transport.frames.len(),
-            1,
-            "one bounded error frame is returned"
-        );
+        assert_eq!(transport.resources.len(), 1);
+        assert_eq!(transport.resources[0].payload.len(), payload_len);
+        assert_eq!(transport.frames.len(), 1);
         let returned = decode_frame(&transport.frames[0].bytes).expect("decode returned frame");
-        assert_eq!(returned.op, ChatOp::Error);
+        assert_eq!(returned.op, ChatOp::HistoryResourceOffer);
         assert_eq!(
             engine
                 .pending_resource_metrics()
                 .expect("pending resource metrics"),
-            (0, 0, 0),
-            "unsafe retained payload is released"
+            (1, payload_len, 0),
+            "payload remains retained until terminal cleanup"
         );
+        release_response_resource(&engine, &frame).expect("release split payload");
     }
 
     #[test]
@@ -650,7 +636,8 @@ mod tests {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let resource_id = "history:exact-boundary".to_owned();
         let metadata = resource_metadata(&resource_id);
-        let payload_len = crate::resource_compat::maximum_payload_for_metadata_len(metadata.len())
+        let payload_len = rns_transport::resource::MAX_EFFICIENT_SIZE
+            .checked_sub(3 + metadata.len())
             .expect("metadata fits");
         engine
             .store_test_pending_resource(resource_id.clone(), vec![0x33; payload_len])

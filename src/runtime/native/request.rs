@@ -350,7 +350,7 @@ impl RequestEventLagEvidence {
 
 fn resource_assembly_timeout_suffix(resource_activity_observed: bool) -> &'static str {
     if resource_activity_observed {
-        "; Resource assembly did not complete on the current Reticulum 0.9.7 train; no retry was attempted"
+        "; Resource assembly did not complete on the current Reticulum 0.9.8 train; no retry was attempted"
     } else {
         ""
     }
@@ -506,19 +506,6 @@ impl Reticulum09LinkRequestAdapter {
                     Ok(event) if event.link_id == prepared.link_id => match event.kind {
                         ResourceEventKind::Complete(complete) => {
                             response_resource_activity_observed = true;
-                            if resource_complete_exceeds_affected_train_boundary(&complete) {
-                                let _ = cancel_clean_page_response_resource(
-                                    transport,
-                                    prepared,
-                                    event.hash,
-                                    "oversized-metadata-resource-compatibility-rejection",
-                                )
-                                .await;
-                                return Err(AppError::from(NativeRuntimeError::InvalidResponse(
-                                    "metadata Resource response exceeds the safe Reticulum 0.9.7 boundary"
-                                        .into(),
-                                )));
-                            }
                             if let Some(response) =
                                 NativeLinkResponseFrame::parse_matching_response_resource(
                                     &complete,
@@ -560,33 +547,6 @@ impl Reticulum09LinkRequestAdapter {
                                 progress.total_bytes,
                                 prepared.operation_id.as_deref(),
                             );
-                        }
-                        ResourceEventKind::SegmentComplete(segment)
-                            if segment.total_segments > 1 =>
-                        {
-                            emit_clean_page_resource_lifecycle(
-                                prepared.event_tx.as_ref(),
-                                event.hash.to_string(),
-                                ResourceLifecycleState::Failed,
-                                Some(segment.total_data_size),
-                                Some(
-                                    "split Resource rejected on affected Reticulum 0.9.7 train"
-                                        .into(),
-                                ),
-                                "inbound",
-                                prepared.operation_id.as_deref(),
-                            );
-                            let _ = cancel_clean_page_response_resource(
-                                transport,
-                                prepared,
-                                event.hash,
-                                "split-resource-compatibility-rejection",
-                            )
-                            .await;
-                            return Err(AppError::from(NativeRuntimeError::InvalidResponse(
-                                "split Resource response is unsupported on Reticulum 0.9.7"
-                                    .into(),
-                            )));
                         }
                         ResourceEventKind::SegmentComplete(_) => {
                             response_resource_activity_observed = true;
@@ -762,26 +722,6 @@ impl Reticulum09LinkRequestAdapter {
                     match event.kind {
                         ResourceEventKind::Complete(complete) => {
                             response_resource_activity_observed = true;
-                            if resource_complete_exceeds_affected_train_boundary(&complete) {
-                                let _ = cancel_clean_page_response_resource(
-                                    transport,
-                                    prepared,
-                                    event.hash,
-                                    "oversized-metadata-resource-compatibility-rejection",
-                                )
-                                .await;
-                                let _ = cancel_clean_page_request_resource(
-                                    transport,
-                                    prepared,
-                                    request_resource_hash,
-                                    "oversized-response-resource-compatibility-rejection",
-                                )
-                                .await;
-                                return Err(AppError::from(NativeRuntimeError::InvalidResponse(
-                                    "metadata Resource response exceeds the safe Reticulum 0.9.7 boundary"
-                                        .into(),
-                                )));
-                            }
                             match NativeLinkResponseFrame::parse_matching_response_resource(
                                 &complete,
                                 &frame.request_id,
@@ -852,40 +792,6 @@ impl Reticulum09LinkRequestAdapter {
                                 progress.total_bytes,
                                 prepared.operation_id.as_deref(),
                             );
-                        }
-                        ResourceEventKind::SegmentComplete(segment)
-                            if segment.total_segments > 1 =>
-                        {
-                            emit_clean_page_resource_lifecycle(
-                                prepared.event_tx.as_ref(),
-                                event.hash.to_string(),
-                                ResourceLifecycleState::Failed,
-                                Some(segment.total_data_size),
-                                Some(
-                                    "split Resource rejected on affected Reticulum 0.9.7 train"
-                                        .into(),
-                                ),
-                                "inbound",
-                                prepared.operation_id.as_deref(),
-                            );
-                            let _ = cancel_clean_page_response_resource(
-                                transport,
-                                prepared,
-                                event.hash,
-                                "split-resource-compatibility-rejection",
-                            )
-                            .await;
-                            let _ = cancel_clean_page_request_resource(
-                                transport,
-                                prepared,
-                                request_resource_hash,
-                                "split-response-resource-compatibility-rejection",
-                            )
-                            .await;
-                            return Err(AppError::from(NativeRuntimeError::InvalidResponse(
-                                "split Resource response is unsupported on Reticulum 0.9.7"
-                                    .into(),
-                            )));
                         }
                         ResourceEventKind::OutboundComplete
                             if event.hash == request_resource_hash =>
@@ -1043,15 +949,6 @@ impl Reticulum09LinkRequestAdapter {
             }
         }
     }
-}
-
-fn resource_complete_exceeds_affected_train_boundary(complete: &ResourceComplete) -> bool {
-    complete.metadata.as_deref().is_some_and(|metadata| {
-        !crate::resource_compat::metadata_bearing_resource_is_unsplit_safe(
-            complete.data.len(),
-            metadata.len(),
-        )
-    })
 }
 
 pub fn native_reticulum09_capability_report() -> NativeReticulum09CapabilityReport {
@@ -1428,12 +1325,11 @@ pub(crate) fn build_reticulum09_direct_request_packet(
             "native Reticulum direct request candidate requires a bound link interface".into(),
         )
     })?;
-    let mut packet = link.data_packet(&frame.packed).map_err(|error| {
+    let packet = link.request_packet(&frame.packed).map_err(|error| {
         NativeRuntimeError::Native(format!(
             "native Reticulum direct request candidate could not encrypt request: {error:?}"
         ))
     })?;
-    packet.context = PacketContext::Request;
     let packet_hash = packet.hash().to_bytes();
     let mut request_id = [0u8; 16];
     request_id.copy_from_slice(&packet_hash[..16]);
@@ -2340,6 +2236,51 @@ mod tests {
         assert!(format!("{error:?}").contains("requires an active link"));
     }
 
+    #[test]
+    fn reticulum098_public_link_mtu_reports_legacy_clamped_and_signalled_values() {
+        let remote_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-phase-5-link-mtu-peer",
+        );
+        let remote_destination = rns_transport::destination::SingleInputDestination::new(
+            remote_identity,
+            DestinationName::new(NOMADNET_APP_NAME, NOMADNET_NODE_ASPECT),
+        );
+        let (link_events, _receiver) = broadcast::channel(4);
+        let mut initiator = Link::new(remote_destination.desc, link_events.clone());
+        let signalled_request = initiator.request();
+        let signalled = Link::new_from_request(
+            &signalled_request,
+            remote_destination.sign_key().clone(),
+            remote_destination.desc,
+            link_events.clone(),
+        )
+        .expect("signalled request accepted");
+        assert!(signalled.link_mtu() > 500);
+
+        let mut legacy_request = signalled_request.clone();
+        legacy_request.data.resize(64);
+        let legacy = Link::new_from_request(
+            &legacy_request,
+            remote_destination.sign_key().clone(),
+            remote_destination.desc,
+            link_events.clone(),
+        )
+        .expect("legacy request accepted");
+        assert_eq!(legacy.link_mtu(), 500);
+
+        let mut small_request = signalled_request;
+        let len = small_request.data.len();
+        small_request.data.as_mut_slice()[len - 3..].copy_from_slice(&[0, 0, 1]);
+        let clamped = Link::new_from_request(
+            &small_request,
+            remote_destination.sign_key().clone(),
+            remote_destination.desc,
+            link_events,
+        )
+        .expect("small signalled request accepted");
+        assert_eq!(clamped.link_mtu(), 500);
+    }
+
     fn receive_link_payload(
         receiver: &mut broadcast::Receiver<rns_transport::destination::link::LinkEventData>,
         expected_context: PacketContext,
@@ -2464,7 +2405,7 @@ mod tests {
 
         assert!(ordinary.is_empty());
         assert!(incomplete.contains("Resource assembly did not complete"));
-        assert!(incomplete.contains("Reticulum 0.9.7"));
+        assert!(incomplete.contains("Reticulum 0.9.8"));
         assert!(incomplete.contains("no retry was attempted"));
         assert!(incomplete.len() < 128);
         assert!(!incomplete.contains("destination"));
@@ -2555,37 +2496,6 @@ mod tests {
             .expect("conflicting inner id is unrelated"),
             None
         );
-    }
-
-    #[test]
-    fn metadata_resource_completion_obeys_exact_affected_train_boundary() {
-        let metadata = b"nomadnet-response".to_vec();
-        let exact_payload =
-            crate::resource_compat::maximum_payload_for_metadata_len(metadata.len())
-                .expect("metadata fits the exact-train boundary");
-        let exact = ResourceComplete {
-            data: vec![0; exact_payload],
-            metadata: Some(metadata.clone()),
-            request_id: None,
-            is_request: false,
-            is_response: true,
-        };
-        assert!(!resource_complete_exceeds_affected_train_boundary(&exact));
-
-        let over = ResourceComplete {
-            data: vec![0; exact_payload + 1],
-            ..exact
-        };
-        assert!(resource_complete_exceeds_affected_train_boundary(&over));
-
-        let metadata_free = ResourceComplete {
-            data: vec![0; exact_payload + 1],
-            metadata: None,
-            ..over
-        };
-        assert!(!resource_complete_exceeds_affected_train_boundary(
-            &metadata_free
-        ));
     }
 
     #[test]

@@ -2852,7 +2852,7 @@ async fn native_startup_report(
 fn upstream_software_parity_diagnostics() -> serde_json::Value {
     serde_json::json!({
         "available": true,
-        "source": "official registry lxmf-sdk 0.9.7",
+        "source": "official registry lxmf-sdk 0.9.8",
         "interpretation": "advisory implementation capability inventory; not live interoperability proof",
         "orientation": lxmf_sdk::current_software_parity_orientation(),
     })
@@ -4586,7 +4586,7 @@ mod tests {
             assert!(diagnostics["orientation"]["overall"]["inventory"]["total"]
                 .as_u64()
                 .is_some_and(|total| total > 0));
-            assert_eq!(diagnostics["source"], "official registry lxmf-sdk 0.9.7");
+            assert_eq!(diagnostics["source"], "official registry lxmf-sdk 0.9.8");
         }
 
         #[cfg(not(feature = "native-lxmf-sdk"))]
