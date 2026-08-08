@@ -56,9 +56,9 @@ selection alone was not the remaining cause.
 The pinned Rust transport duplicate filter permits repeated Resource-request
 packets but not repeated Resource-data packets; the installed Python Reticulum
 reference permits both. No OMEN-level replay, fragmentation, dependency patch,
-or fork was added. Publication is blocked until this routed retransmission
-boundary is corrected and requalified, or a separately reviewed compatible
-design is accepted.
+or fork was added. The maintainer accepted this as a disclosed v0.9.8-3
+limitation; routed attachment qualification remains pending an official train
+correction and requalification, or a separately reviewed compatible design.
 
 Full release and external platform results are recorded in the release
 checklist and final implementation report; unavailable lanes are not inferred.

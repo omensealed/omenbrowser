@@ -49,8 +49,8 @@ cause.
 - Do not replay an uncertain upload automatically.
 - Do not add an OMENchat wire change or application fragmentation here.
 - Do not patch or fork the upstream crate.
-- Treat realistic routed attachment qualification as release-blocking for this
-  candidate.
+- Disclose realistic routed attachment failure in v0.9.8-3 and defer broader
+  qualification rather than adopting a fork, wire change, or unsafe replay.
 
 Removal of this boundary requires an official corrected crate train plus a
 routed, incompressible, multi-packet upload/fetch test that exercises

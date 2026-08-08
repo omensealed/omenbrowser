@@ -26,7 +26,8 @@ Released baseline: `v0.9.8-2` /
 - [x] Current Python drift matrix.
 - [x] Full release check and local Linux package candidate.
 - [x] Hosted cross-platform CI on the current candidate branch.
-- [ ] Routed realistic multi-packet attachment retransmission gate.
+- [ ] Routed realistic multi-packet attachment retransmission gate; accepted as
+      a disclosed upstream-bound limitation for v0.9.8-3.
 - [ ] Hosted Python interoperability and native platform package gates not
       already represented by the branch CI result.
 - [ ] Reviewed candidate merged to `main`.
@@ -40,5 +41,6 @@ Released baseline: `v0.9.8-2` /
 - [ ] Physical interface/radio testing.
 
 Tagging and publication require all applicable release gates to pass.
-The routed attachment failure is release-blocking; a passing 873-byte
-direct/local fixture does not satisfy it.
+The routed attachment failure is not hidden by the passing 873-byte
+direct/local fixture. The maintainer accepted it as a disclosed limitation for
+this revision rather than adopting a fork, protocol change, or unsafe replay.

@@ -59,8 +59,9 @@ Status: final
   resend uncertain application work. Routed OMENchat attachments are therefore
   not qualified by the direct/local upload smoke in this candidate.
 - No upstream fork, crate patch, unnegotiated fragmentation, or automatic retry
-  is included. Release publication remains blocked pending an official train
-  correction or another separately reviewed, wire-compatible solution.
+  is included. v0.9.8-3 ships with this routed-attachment limitation disclosed;
+  broader qualification waits for an official train correction or another
+  separately reviewed, wire-compatible solution.
 
 ## Compatibility boundaries
 
