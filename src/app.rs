@@ -18788,6 +18788,15 @@ impl App {
                             &target,
                             "browser form submit failed; press Retry to resubmit the captured request",
                         );
+                    } else if matches!(
+                        step.stage,
+                        PageFetchProbeStage::RequestSend | PageFetchProbeStage::ResponseWait
+                    ) {
+                        self.apply_browser_manual_retry_state(
+                            index,
+                            &target,
+                            "browser request outcome is uncertain; press Retry to send a new request",
+                        );
                     } else {
                         self.apply_browser_load_failure_retry_state(index, &target, &step);
                     }
@@ -31251,8 +31260,8 @@ side
     }
 
     #[tokio::test]
-    async fn transient_native_browser_timeout_schedules_one_auto_retry() {
-        let mut app = App::new(test_config("native-load-transient-auto-retry"));
+    async fn transient_native_browser_timeout_requires_explicit_retry() {
+        let mut app = App::new(test_config("native-load-transient-manual-retry"));
         app.switch_section(WorkspaceSection::Browser);
         app.runtime_status.connected = true;
         let tab_id = app.active_browser_tab().id;
@@ -31276,41 +31285,30 @@ side
             .as_ref()
             .expect("retry state");
         assert_eq!(retry.target, target);
-        assert_eq!(retry.attempts, 1);
+        assert_eq!(retry.attempts, 0);
         assert!(retry.ready_epoch_ms.is_some());
-        assert!(retry.reason.contains("automatic retry"));
-        assert!(app.status.task.contains("retrying once"));
-
-        let mut event =
-            tokio::time::timeout(std::time::Duration::from_secs(3), app.event_rx.recv())
-                .await
-                .expect("scheduled event")
-                .expect("event")
-                .event;
-        while !matches!(
-            &event,
-            InternalAppEvent::StartupBrowserPathReady { destination, .. }
-                if destination == FIXTURE_NODE_HASH
-        ) {
-            event = tokio::time::timeout(std::time::Duration::from_secs(3), app.event_rx.recv())
-                .await
-                .expect("scheduled retry event")
-                .expect("event")
-                .event;
+        assert!(retry.reason.contains("press Retry"));
+        assert!(!app.status.task.contains("retrying once"));
+        assert!(app.active_browser_tab().loading.is_none());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let Ok(Some(event)) = tokio::time::timeout(deadline - now, app.event_rx.recv()).await
+            else {
+                break;
+            };
+            assert!(!matches!(
+                event.event,
+                InternalAppEvent::StartupBrowserPathReady {
+                    destination,
+                    target: Some(event_target),
+                    ..
+                } if destination == FIXTURE_NODE_HASH && event_target == target
+            ));
         }
-        assert!(matches!(
-            &event,
-            InternalAppEvent::StartupBrowserPathReady { destination, .. }
-                if destination == FIXTURE_NODE_HASH
-        ));
-        assert!(app.handle_internal_event(event));
-        assert_eq!(
-            app.active_browser_tab()
-                .loading
-                .as_ref()
-                .map(|loading| loading.target.as_str()),
-            Some(target.as_str())
-        );
     }
 
     #[test]

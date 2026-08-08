@@ -307,12 +307,10 @@ pub(super) fn native_browser_load_failure_status_action(
 pub(super) fn native_browser_load_failure_allows_one_auto_retry(
     stage: &PageFetchProbeStage,
 ) -> bool {
-    matches!(
-        stage,
-        PageFetchProbeStage::LinkSetup
-            | PageFetchProbeStage::RequestSend
-            | PageFetchProbeStage::ResponseWait
-    )
+    // Link setup has not dispatched the executable NomadNet request. Once
+    // request construction/send or response waiting is reached, the remote
+    // outcome can be uncertain and retry must remain an explicit user action.
+    matches!(stage, PageFetchProbeStage::LinkSetup)
 }
 
 pub(super) fn browser_probe_summary_waits_for_network_evidence(
@@ -420,5 +418,18 @@ mod tests {
             native_page_load_failure_stage("response decode rejected trailing data"),
             PageFetchProbeStage::ResponseDecode
         );
+    }
+
+    #[test]
+    fn automatic_retry_stops_before_uncertain_request_dispatch() {
+        assert!(native_browser_load_failure_allows_one_auto_retry(
+            &PageFetchProbeStage::LinkSetup
+        ));
+        assert!(!native_browser_load_failure_allows_one_auto_retry(
+            &PageFetchProbeStage::RequestSend
+        ));
+        assert!(!native_browser_load_failure_allows_one_auto_retry(
+            &PageFetchProbeStage::ResponseWait
+        ));
     }
 }

@@ -1858,6 +1858,12 @@ pub async fn prepare_nomadnet_page_link(
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 close_nomadnet_page_link(&context.transport, &Some(link.clone())).await;
+                recover_nomadnet_page_link_setup_timeout(
+                    &context.transport,
+                    &plan.request.destination_hash,
+                    context.event_tx.as_ref(),
+                )
+                .await;
                 return Err(AppError::from(NativeRuntimeError::Timeout(
                     "NomadNet link establishment".into(),
                 )));
@@ -1981,6 +1987,29 @@ async fn close_nomadnet_page_link(
         transport.send_direct(ingress_iface, packet).await;
     }
     true
+}
+
+async fn recover_nomadnet_page_link_setup_timeout(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    destination_hash: &AddressHash,
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+) {
+    // Link setup has not dispatched the executable NomadNet request. Removing
+    // the failed Link before transport maintenance observes it would otherwise
+    // leave a stale route eligible for the next attempt.
+    transport.reset_out_link(destination_hash).await;
+    let expired = transport.expire_path(destination_hash).await;
+    transport.request_path(destination_hash, None, None).await;
+    tracing::warn!(
+        stale_path_expired = expired,
+        "native NomadNet Link setup timed out; requested bounded path rediscovery before any application request dispatch"
+    );
+    emit_clean_page_debug(
+        event_tx,
+        format!(
+            "native Reticulum clean page Link setup timed out; stale_path_expired={expired}; requested path rediscovery; no NomadNet request was replayed"
+        ),
+    );
 }
 
 async fn wait_for_destination_identity(
@@ -2874,6 +2903,53 @@ mod tests {
         assert_eq!(link.lock().await.status(), LinkStatus::Pending);
         assert!(close_nomadnet_page_link(&transport, &Some(link.clone())).await);
         assert_eq!(link.lock().await.status(), LinkStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn link_setup_timeout_expires_route_and_requests_discovery_without_request_replay() {
+        let local_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-link-timeout-recovery-local",
+        );
+        let config = reticulum_rs::runtime::TransportConfig::new(
+            "omenbrowser-link-timeout-recovery",
+            &local_identity,
+            false,
+        );
+        let transport = Arc::new(reticulum_rs::runtime::Transport::new(config));
+        let mut channel = transport
+            .iface_manager()
+            .lock()
+            .await
+            .new_channel_with_role(8, rns_transport::iface::IfaceRole::Unicast);
+        let remote_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-link-timeout-recovery-remote",
+        );
+        let destination = SingleOutputDestination::new(
+            *remote_identity.as_identity(),
+            DestinationName::new(NOMADNET_APP_NAME, NOMADNET_NODE_ASPECT),
+        );
+        let first = transport.link(destination.desc).await;
+
+        recover_nomadnet_page_link_setup_timeout(&transport, &destination.desc.address_hash, None)
+            .await;
+
+        let discovery = tokio::time::timeout(Duration::from_secs(1), channel.tx_channel.recv())
+            .await
+            .expect("path discovery timeout")
+            .expect("path discovery packet");
+        assert_eq!(discovery.packet.context, PacketContext::None);
+        assert_eq!(
+            discovery
+                .packet
+                .data
+                .as_slice()
+                .get(..rns_transport::hash::ADDRESS_HASH_SIZE),
+            Some(destination.desc.address_hash.as_slice())
+        );
+        let replacement = transport.link(destination.desc).await;
+        assert!(!Arc::ptr_eq(&first, &replacement));
+        assert_eq!(replacement.lock().await.status(), LinkStatus::Pending);
+        assert!(close_nomadnet_page_link(&transport, &Some(replacement)).await);
     }
 
     #[tokio::test]
