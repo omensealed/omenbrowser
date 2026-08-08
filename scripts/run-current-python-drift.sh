@@ -60,6 +60,13 @@ OMEN_PYTHON_RNS_VERSION="$rns_version" \
   -p omen-ifac-tcp --test pinned_python_reticulum -- \
   --ignored --nocapture --test-threads=1
 
+PATH="$temporary_root/venv/bin:$PATH" \
+OMEN_PYTHON_RNS_SOURCE="$site_packages" \
+  cargo test --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
+  --no-default-features --features server-headless \
+  current_python_nomadnet_rust_responder_four_quadrants -- \
+  --ignored --nocapture --test-threads=1
+
 OMEN_PYTHON_RNS_SOURCE="$site_packages" \
 OMEN_PYTHON_RNS_VERSION="$rns_version" \
   cargo test --locked --manifest-path "$repo_root/Cargo.toml" \
@@ -108,7 +115,7 @@ OMEN_NOMADNET_MEASUREMENT_REPORT="$release_measurement" \
 
 if [[ -n "$report_path" ]]; then
   mkdir -p -- "$(dirname -- "$report_path")"
-  "$python" -c 'import json, pathlib, sys; data=json.loads(sys.argv[2]); data["status"]="pass"; data["checks"]=["reticulum_vectors", "ifac_tcp", "reticulum_link_proof", "bidirectional_rust_python_lxmf_direct_delivery", "python_propagation_node_rust_sync_ack", "rust_python_propagation_stamp_boundaries", "network_propagation_stamp_accept_reject", "first_send_direct_policy_discovery", "stamped_direct_resource_delivery", "direct_stamp_accept_reject", "ticket_issue_use_expiry_reuse", "live_ticket_roundtrip", "nomadnet_request_response_primitive_matrix", "nomadnet_timeout_cancellation_no_replay", "nomadnet_repeated_request_link_reuse", "nomadnet_direct_request_resource_measurement", "nomadnet_retained_link_keepalive_recovery_soak", "nomadnet_release_direct_request_resource_measurement"]; data["measurements"]={"nomadnet_release": json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))}; pathlib.Path(sys.argv[1]).write_text(json.dumps(data, indent=2, sort_keys=True)+"\n", encoding="utf-8")' \
+  "$python" -c 'import json, pathlib, sys; data=json.loads(sys.argv[2]); data["status"]="pass"; data["checks"]=["reticulum_vectors", "ifac_tcp", "reticulum_link_proof", "python_to_rust_nomadnet_response_primitive_matrix", "bidirectional_rust_python_lxmf_direct_delivery", "python_propagation_node_rust_sync_ack", "rust_python_propagation_stamp_boundaries", "network_propagation_stamp_accept_reject", "first_send_direct_policy_discovery", "stamped_direct_resource_delivery", "direct_stamp_accept_reject", "ticket_issue_use_expiry_reuse", "live_ticket_roundtrip", "nomadnet_request_response_primitive_matrix", "nomadnet_timeout_cancellation_no_replay", "nomadnet_repeated_request_link_reuse", "nomadnet_direct_request_resource_measurement", "nomadnet_retained_link_keepalive_recovery_soak", "nomadnet_release_direct_request_resource_measurement"]; data["measurements"]={"nomadnet_release": json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))}; pathlib.Path(sys.argv[1]).write_text(json.dumps(data, indent=2, sort_keys=True)+"\n", encoding="utf-8")' \
     "$report_path" "$stack_json" "$release_measurement"
 fi
 

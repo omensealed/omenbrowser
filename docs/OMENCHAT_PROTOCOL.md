@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.8-2 compatibility boundary
+### v0.6.0-1 / v0.9.8-3 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.8-2 release retains protocol version `1`, protocol name
+The v0.9.8-3 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -55,7 +55,11 @@ MDU and request Resources for oversized requests. Its established path request
 is limited before MessagePack allocation
 to 4 KiB input, 1 KiB scalar values, 32 container items, 64 total values, and
 four nested levels, with no trailing data. This does not change the portal path
-hash or response encoding.
+hash or response encoding. Both ingress paths use one responder. The complete
+packed `[request_id, response_body]` length independently selects a direct
+`Response` at or below public `PACKET_MDU` or a response Resource above it.
+Portal reads and complete response envelopes are bounded to 4 MiB. Selection is
+single-shot with no primitive fallback or second dispatch.
 
 Queue overload does not change the wire format. A server may reject outbound
 work or drop an inbound payload before protocol dispatch when its documented
@@ -203,7 +207,7 @@ inbound frame carrying the `SessionOpen` operation number.
 ### Authoritative production capability matrix
 
 This table describes the canonical `desktop-product` client and
-`server-headless`/`server-full` server at 0.9.8-2. Capability names come from
+`server-headless`/`server-full` server at 0.9.8-3. Capability names come from
 `omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
 shared vocabulary, the client's request, and the canonical server's acceptance.
 Definition alone never activates a capability: each Link must request it and
@@ -235,7 +239,8 @@ Earlier revisions reserved operations 35–39 and staged
 historical: the current canonical client requests it, omenchatd accepts it only
 beside durable mutations, and its handler, persistence, snapshots, fan-out, and
 UI are active. Peers that do not negotiate it retain ordinary protocol-v1
-history and message behavior.
+history and message behavior. Statements below about disabled acceptance
+preserve earlier implementation checkpoints and are not current product claims.
 
 The shared contract also contains the production `room-media-policy-v1`
 vocabulary. It reserves no operation number. Canonical current clients and
@@ -338,32 +343,32 @@ replay miss, returns the reservation with a successful first commit, and
 releases it automatically on rollback. This mechanism remains inactive for a
 Link until it has negotiated and bound a client-instance identifier.
 
-The live server now stages session display/LXMF metadata until a real
+At that staged checkpoint, the live server staged session display/LXMF metadata until a real
 `SessionAccept` is produced, so malformed negotiation cannot mutate the
-retained peer record. A future durable client-instance binding requires both a
+retained peer record. The planned durable client-instance binding required both a
 valid request and explicit capability acceptance on an authenticated Link. The
 binding is Link-scoped, bounded by active-Link admission, identity-bound, and
-cleared on identity replacement or every Link retirement path. Production
-continues to return the legacy accept, so well-formed durable requests remain
-unbound and cannot send durable envelopes.
+cleared on identity replacement or every Link retirement path. Production at
+that checkpoint returned the legacy accept, so well-formed durable requests
+remained unbound and could not send durable envelopes.
 
-An inactive session executor now implements the negotiated semantics for room
+An inactive session executor then implemented the negotiated semantics for room
 messages, actions, notices, and part-room operations behind the staged live
 Link gate. It checks
 the canonical hash, stores mutation and exact origin result transactionally,
 returns a broadcast event only for first execution, preserves terminal policy
 rejections, avoids a second rate charge, and replays across server restart.
-Errors 1012 through 1015 have executor mappings. Current live peers can receive
+Errors 1012 through 1015 had executor mappings. Live peers at that checkpoint could receive
 1011 for an unnegotiated durable envelope or 1012 for malformed negotiation or
-envelope data, but cannot activate successful durable execution.
+envelope data, but could not activate successful durable execution.
 
 Live dispatch recognizes the durable envelope marker before applying the
 protocol-v1 same-Link sequence replay cache. A tagged malformed envelope returns
 1012, while a valid envelope without an authenticated, identity-matched durable
 binding returns 1011. With a binding, the durable replay record is authoritative:
 the first execution can broadcast one room event and exact replay returns only
-the originally encoded origin acknowledgement. Capability acceptance is still
-disabled, so production peers cannot create that binding yet.
+the originally encoded origin acknowledgement. Capability acceptance was still
+disabled, so peers at that checkpoint could not create that binding.
 
 For durable `PartRoom`, membership deletion, the departure event, the exact
 legacy-compatible `CommandResult`, and replay publication commit atomically.

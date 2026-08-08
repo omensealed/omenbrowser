@@ -5,7 +5,7 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
 readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
-readonly current_expected_version=0.9.8-2
+readonly current_expected_version=0.9.8-3
 readonly recover_unknown_sender=${OMEN_MIXED_RECOVER_UNKNOWN_SENDER:-false}
 readonly python_rns_version=1.4.0
 readonly python_lxmf_version=1.1.0

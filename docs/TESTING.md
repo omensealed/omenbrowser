@@ -546,6 +546,29 @@ typed upload completion and Resource-available events with the exact byte count
 for both clients. Reticulum Resource integrity remains enforced; raw payloads,
 resource IDs, identities, destinations, paths, and reports are deleted.
 
+This direct/local process gate is deliberately not a routed retransmission
+qualification. On exact registry `reticulum-rs-transport 0.9.8`, an isolated
+multi-hop TCP-gateway run completed the 873-byte fixture but failed to complete
+a 13,613-byte incompressible attachment after repeated Resource requests. The
+current Rust transport duplicate filter permits repeated Resource requests but
+not repeated Resource-data packets; Python Reticulum permits both. See
+`docs/reviews/OMENBROWSER_V0983_ROUTED_RESOURCE_RETRANSMISSION.md`. A release
+claim covering routed attachments requires a realistic multi-packet routed
+case, exact received bytes, and at least one exercised retransmission—not only
+the 873-byte fixture.
+
+Route-scoped recovery coverage uses focused in-memory transport tests plus an
+isolated live profile. The focused tests require a terminal NomadNet response
+timeout or outbound OMENchat Resource failure to close only the failed Link,
+exclude its ingress interface from alternate path discovery, and emit no
+application Request or Resource replay. The live three-gateway check uses a
+fresh identity/root: its first NEMO request reproduced the partially healthy
+gateway timeout, while its second explicit request loaded the exact 33,277-byte
+page without disabling any interface. The attachment process smoke was also
+repeated directly/locally with a 54,427-byte file in addition to the canonical
+873-byte fixture. That result does not supersede the separately recorded routed
+retransmission failure.
+
 Bounded local-history reducer and packaged SQLite capability:
 
 ```bash
@@ -2574,7 +2597,7 @@ bash scripts/run-current-python-drift.sh \
   --report target/current-python-drift-report.json
 ```
 
-That lane installs exact RNS 1.3.8/NomadNet 1.2.7 packages in a disposable
+That lane installs exact RNS 1.4.0/NomadNet 1.2.7 packages in a disposable
 environment and requires exact bytes for four combinations: empty direct
 request/direct response, executable form direct request/direct response,
 oversized request Resource/direct response, and direct request/large response
@@ -2603,6 +2626,42 @@ link, then alternates 16 more requests on exactly one replacement. It requires
 active link, and no replay or third link generation. The 2026-07-18 focused
 reference run completed the exchange in 4,411 ms and recovered the second
 16-request generation in 1,004 ms; the complete lane passed.
+
+The lane also drives the quiet Rust portal from Python through all four request
+and response primitive combinations. The test constrains Python's request
+selector to OMEN's conservative public MDU so both ingress primitives are
+exercised, then verifies exact request correlation and page bytes:
+
+```bash
+OMEN_PYTHON_RNS_SOURCE=/path/to/site-packages \
+  cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  current_python_nomadnet_rust_responder_four_quadrants -- \
+  --ignored --nocapture --test-threads=1
+```
+
+The equivalent pinned lane uses `OMEN_PINNED_RNS_SOURCE` and
+`pinned_python_nomadnet_rust_responder_four_quadrants`.
+
+## omenchatd NomadNet response primitive selection
+
+The server regression matrix sends direct and Resource requests across one
+active Link and requires both direct and Resource responses. Selection depends
+only on the complete packed response length. Boundary tests cover
+`PACKET_MDU - 1`, `PACKET_MDU`, and `PACKET_MDU + 1`; process smoke covers an
+incompressible 32 KiB portal response to a direct request. Constructor and
+dispatch failures must not use the alternate primitive.
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  nomadnet_request_response_four_quadrants_dispatch_once_with_exact_bytes
+bash scripts/smoke/08_nomadnet_page_fetch.sh
+```
+
+The complete response envelope is capped at 4 MiB. These tests do not claim a
+dynamic negotiated payload-MDU selector; production deliberately uses the
+public conservative `PACKET_MDU` boundary.
 These observations have no timing pass threshold. The lane does not establish a
 pinned NomadNet reference.
 
@@ -4213,7 +4272,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.8-2` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.8-3` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -4228,7 +4287,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.8-2` must report
+therefore exits with the expected signal status; current `0.9.8-3` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

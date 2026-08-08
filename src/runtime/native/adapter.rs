@@ -65,6 +65,8 @@ const OMENCHAT_LINK_PATH_WAIT_STEP: Duration = Duration::from_millis(250);
 const OMENCHAT_CLEAN_LINK_PATH_WAIT_STEP: Duration = Duration::from_millis(250);
 #[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_CLEAN_LINK_GATE_STRIPES: usize = 32;
+#[cfg(not(all(feature = "native-rns-net", any())))]
+const OMENCHAT_ROUTE_RECOVERY_WAIT: Duration = Duration::from_millis(1_500);
 const OMENCHAT_RESOURCE_METADATA_PREFIX: &[u8] = b"omenchat-resource:";
 #[cfg(not(all(feature = "native-rns-net", any())))]
 const OMENCHAT_FRAME_RESOURCE_METADATA: &[u8] = b"omenchat-frame:";
@@ -74,6 +76,7 @@ const OMENCHAT_CLEAN_RESOURCE_MAX_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 struct CleanOmenchatResourceGuard {
     active_links: Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    attached_interfaces: Vec<CleanAttachedInterface>,
 }
 #[cfg(feature = "native-lxmf")]
 const PROPAGATION_STAMP_BLOCKING_JOBS: usize = 2;
@@ -155,8 +158,8 @@ use crate::runtime::native::request::native_reticulum09_capability_report;
 use crate::runtime::native::request::NativeLinkResponseFrame;
 #[cfg(not(all(feature = "native-rns-net", any())))]
 use crate::runtime::native::request::{
-    send_reticulum_link_identify, single_output_destination_desc, NativeLinkRequestFrame,
-    NativePageFetchContext,
+    recover_clean_route_after_transfer_failure, send_reticulum_link_identify,
+    single_output_destination_desc, NativeLinkRequestFrame, NativePageFetchContext,
 };
 use crate::runtime::native::request::{
     NativeFetchPlan, NativePageTransportClient, ReticulumPageTransportClient,
@@ -1539,6 +1542,10 @@ impl NativeNetworkRuntime {
             transport.clone(),
             CleanOmenchatResourceGuard {
                 active_links: self.active_omenchat_links.clone(),
+                attached_interfaces: attached_interface_records
+                    .iter()
+                    .map(|record| record.clean.clone())
+                    .collect(),
             },
             self.clean_omenchat_links.clone(),
             self.clean_destination_identities.clone(),
@@ -4288,6 +4295,13 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         identify_identity.clone(),
                         Some(self.event_tx.clone()),
                     )
+                    .with_path_request_interfaces(Arc::<[rns_transport::hash::AddressHash]>::from(
+                        handle
+                            .clean_attached_interfaces
+                            .iter()
+                            .map(|interface| interface.address)
+                            .collect::<Vec<_>>(),
+                    ))
                     .with_operation_id(operation_id.clone())
                 });
             let mut page = self
@@ -4360,6 +4374,13 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         identify_identity.clone(),
                         Some(self.event_tx.clone()),
                     )
+                    .with_path_request_interfaces(Arc::<[rns_transport::hash::AddressHash]>::from(
+                        handle
+                            .clean_attached_interfaces
+                            .iter()
+                            .map(|interface| interface.address)
+                            .collect::<Vec<_>>(),
+                    ))
                     .with_operation_id(operation_id.clone())
                 });
             self.page_transport
@@ -9215,6 +9236,51 @@ async fn close_clean_omenchat_link_entry(entry: &CleanOmenChatLink) -> bool {
 }
 
 #[cfg(not(all(feature = "native-rns-net", any())))]
+async fn recover_clean_omenchat_resource_route(
+    clean_links: &Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
+    active_links: &Arc<Mutex<BTreeSet<[u8; 16]>>>,
+    attached_interfaces: &[CleanAttachedInterface],
+    event_tx: &broadcast::Sender<RuntimeBusEvent>,
+    link_id: [u8; 16],
+    wait: Duration,
+) -> bool {
+    let entry = clean_links
+        .lock()
+        .expect("native clean OMENchat link lock")
+        .remove(&link_id);
+    let Some(entry) = entry else {
+        return false;
+    };
+    active_links
+        .lock()
+        .expect("native active OMENchat link lock")
+        .remove(&link_id);
+    let failed_iface = entry.link.lock().await.ingress_iface();
+    close_clean_omenchat_link_entry(&entry).await;
+    let _ = event_tx.send(RuntimeBusEvent::OmenChatLinkClosed(OmenChatLinkClosed {
+        link_id,
+        reason: Some(
+            "OMENchat Resource transfer failed; alternate path recovery prepared for explicit reconnect"
+                .into(),
+        ),
+    }));
+    let interfaces = attached_interfaces
+        .iter()
+        .map(|interface| interface.address)
+        .collect::<Vec<_>>();
+    recover_clean_route_after_transfer_failure(
+        &entry.transport,
+        &entry.destination_hash,
+        failed_iface,
+        &interfaces,
+        Some(event_tx),
+        "omenchat-resource-failure",
+        wait,
+    )
+    .await
+}
+
+#[cfg(not(all(feature = "native-rns-net", any())))]
 async fn retire_clean_omenchat_destination_links(
     clean_links: &Arc<Mutex<BTreeMap<[u8; 16], CleanOmenChatLink>>>,
     active_links: &Arc<Mutex<BTreeSet<[u8; 16]>>>,
@@ -9736,7 +9802,10 @@ fn spawn_clean_omenchat_event_bridge(
     event_tx: broadcast::Sender<RuntimeBusEvent>,
     #[cfg(feature = "native-lxmf")] pending_lxmf_proofs: PendingLxmfProofs,
 ) {
-    let active_omenchat_links = resource_guard.active_links;
+    let CleanOmenchatResourceGuard {
+        active_links: active_omenchat_links,
+        attached_interfaces,
+    } = resource_guard;
     #[cfg(feature = "native-lxmf")]
     let clean_lxmf_seen_messages: Arc<Mutex<BTreeMap<String, tokio::time::Instant>>> =
         Arc::new(Mutex::new(BTreeMap::new()));
@@ -10156,6 +10225,7 @@ fn spawn_clean_omenchat_event_bridge(
         let pending_lxmf_proofs = pending_lxmf_proofs.clone();
         let active_omenchat_links = active_omenchat_links.clone();
         let clean_omenchat_links = clean_omenchat_links.clone();
+        let attached_interfaces = attached_interfaces.clone();
         #[cfg(feature = "native-lxmf")]
         let clean_destination_identities = clean_destination_identities.clone();
         #[cfg(feature = "native-lxmf")]
@@ -10275,6 +10345,15 @@ fn spawn_clean_omenchat_event_bridge(
                                             peer: Some(hex_encode(&link_id)),
                                         },
                                     ));
+                                    recover_clean_omenchat_resource_route(
+                                        &clean_omenchat_links,
+                                        &active_omenchat_links,
+                                        &attached_interfaces,
+                                        &event_tx,
+                                        link_id,
+                                        OMENCHAT_ROUTE_RECOVERY_WAIT,
+                                    )
+                                    .await;
                                 }
                                 continue;
                             }
@@ -12985,6 +13064,128 @@ mod tests {
             .await,
             0
         );
+    }
+
+    #[cfg(not(all(feature = "native-rns-net", any())))]
+    #[tokio::test]
+    async fn clean_omenchat_resource_failure_closes_link_and_requests_only_alternate_path() {
+        use rns_transport::destination::link::{Link, LinkHandleResult, LinkStatus};
+        use rns_transport::destination::{DestinationName, SingleOutputDestination};
+        use rns_transport::PacketContext;
+
+        let local_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-omenchat-resource-route-recovery-local",
+        );
+        let config = reticulum_rs::runtime::TransportConfig::new(
+            "omenbrowser-omenchat-resource-route-recovery",
+            &local_identity,
+            false,
+        );
+        let transport = Arc::new(reticulum_rs::runtime::Transport::new(config));
+        let (mut failed, mut alternate) = {
+            let manager = transport.iface_manager();
+            let mut manager = manager.lock().await;
+            (
+                manager.new_channel_with_role(8, rns_transport::iface::IfaceRole::Unicast),
+                manager.new_channel_with_role(8, rns_transport::iface::IfaceRole::Unicast),
+            )
+        };
+        let failed_iface = *failed.address();
+        let alternate_iface = *alternate.address();
+        let remote_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-omenchat-resource-route-recovery-remote",
+        );
+        let destination = SingleOutputDestination::new(
+            *remote_identity.as_identity(),
+            DestinationName::new(OMENCHAT_RNS_APP_NAME, OMENCHAT_NODE_ASPECT),
+        );
+        let (outbound_events, _) = broadcast::channel(4);
+        let mut outbound = Link::new(destination.desc, outbound_events);
+        let request = outbound.request();
+        let (inbound_events, _) = broadcast::channel(4);
+        let mut inbound = Link::new_from_request(
+            &request,
+            remote_identity.sign_key().clone(),
+            destination.desc,
+            inbound_events,
+        )
+        .expect("inbound link");
+        assert!(matches!(
+            outbound.handle_packet(&inbound.prove(), failed_iface),
+            LinkHandleResult::Activated
+        ));
+        let link = Arc::new(AsyncMutex::new(outbound));
+        let link_hash = *link.lock().await.id();
+        let link_id = address_hash_to_link_id(link_hash);
+        let active_links = Arc::new(Mutex::new(BTreeSet::from([link_id])));
+        let clean_links = Arc::new(Mutex::new(BTreeMap::from([(
+            link_id,
+            CleanOmenChatLink {
+                destination_hash: destination.desc.address_hash,
+                link_id: link_hash,
+                transport: transport.clone(),
+                link: link.clone(),
+            },
+        )])));
+        let interfaces = vec![
+            CleanAttachedInterface {
+                name: "failed".into(),
+                address: failed_iface,
+                ifac_configured: true,
+            },
+            CleanAttachedInterface {
+                name: "alternate".into(),
+                address: alternate_iface,
+                ifac_configured: false,
+            },
+        ];
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+
+        assert!(
+            !recover_clean_omenchat_resource_route(
+                &clean_links,
+                &active_links,
+                &interfaces,
+                &event_tx,
+                link_id,
+                Duration::ZERO,
+            )
+            .await,
+            "no synthetic alternate-path response was injected"
+        );
+
+        assert_eq!(link.lock().await.status(), LinkStatus::Closed);
+        assert!(!active_links
+            .lock()
+            .expect("active links")
+            .contains(&link_id));
+        assert!(!clean_links
+            .lock()
+            .expect("clean links")
+            .contains_key(&link_id));
+        let close = tokio::time::timeout(Duration::from_secs(1), failed.tx_channel.recv())
+            .await
+            .expect("failed-interface Link close timeout")
+            .expect("failed-interface Link close");
+        assert_eq!(close.packet.context, PacketContext::LinkClose);
+        assert!(failed.tx_channel.try_recv().is_err());
+        let rediscovery = tokio::time::timeout(Duration::from_secs(1), alternate.tx_channel.recv())
+            .await
+            .expect("alternate path request timeout")
+            .expect("alternate path request");
+        assert_eq!(rediscovery.packet.context, PacketContext::None);
+        assert_eq!(
+            rediscovery
+                .packet
+                .data
+                .as_slice()
+                .get(..rns_transport::hash::ADDRESS_HASH_SIZE),
+            Some(destination.desc.address_hash.as_slice())
+        );
+        assert!(matches!(
+            event_rx.recv().await.expect("OMENchat Link closed event"),
+            RuntimeBusEvent::OmenChatLinkClosed(_)
+        ));
     }
 
     #[cfg(not(all(feature = "native-rns-net", any())))]

@@ -642,6 +642,195 @@ async fn split_sentinel_sender_child(root: &Path, nonce: &str, server_port: u16,
     .await;
 }
 
+async fn run_python_nomadnet_rust_responder_matrix(source_env: &str, expected_rns: &str) {
+    let rns_source = std::env::var_os(source_env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{source_env} must name a Python RNS source"));
+    let nonce = format!("{}-{}", std::process::id(), current_epoch_ms());
+    let root = std::env::temp_dir().join(format!("omenchatd-python-responder-{nonce}"));
+    let config = ServerConfig::for_root(root.join("server"));
+    crate::config::init_files(&config).expect("initialize isolated Rust responder");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
+    let port = listener.local_addr().expect("reserved TCP address").port();
+    drop(listener);
+
+    let identity = PrivateIdentity::new_from_name(&format!("omenchatd-python-responder-{nonce}"));
+    let transport = Transport::new(transport_config(
+        "omenchatd-python-nomadnet-responder",
+        &identity,
+    ));
+    let destination = transport
+        .add_destination(
+            identity,
+            DestinationName::new(NOMADNET_RNS_APP_NAME, "node"),
+        )
+        .await;
+    let transport = Arc::new(transport);
+    attach_plain_tcp_server(&transport, port).await;
+
+    let budget = QueueBudget::new(EVENT_QUEUE_BYTES, EVENT_PER_LINK_BYTES);
+    let (payload_tx, _payload_rx) = mpsc::channel(EVENT_QUEUE_ITEMS);
+    let (control_tx, _control_rx) = mpsc::channel(EVENT_CONTROL_ITEMS);
+    let event_tx = EventQueueSender {
+        payload_tx,
+        control_tx,
+        budget,
+        log_path: config.log_path(),
+    };
+    let shutdown = CancellationToken::new();
+    let correlations = Arc::new(Mutex::new(OutboundResourceCorrelations::default()));
+    let link_bridge = spawn_link_event_bridge(
+        transport.clone(),
+        event_tx.clone(),
+        config.clone(),
+        shutdown.clone(),
+        correlations.clone(),
+    );
+    let resource_bridge = spawn_resource_event_bridge(
+        transport.clone(),
+        event_tx,
+        config.clone(),
+        shutdown.clone(),
+        correlations,
+    );
+    let announce_shutdown = CancellationToken::new();
+    let announce_task = {
+        let transport = transport.clone();
+        let destination = destination.clone();
+        let stop = announce_shutdown.clone();
+        tokio::spawn(async move {
+            while !stop.is_cancelled() {
+                transport.send_announce(&destination, None).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+    };
+
+    let destination_hash = destination.lock().await.desc.address_hash.to_hex_string();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/omen-ifac-tcp/tests/fixtures/python_nomadnet_rust_responder_matrix.py");
+    let python_root = root.join("python");
+    let page = config.nomadnet_index_page_path();
+    let expected_rns = expected_rns.to_string();
+    let fixture_expected_rns = expected_rns.clone();
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            Command::new("python3")
+                .arg(fixture)
+                .arg("--rns-source")
+                .arg(rns_source)
+                .arg("--expected-rns")
+                .arg(fixture_expected_rns)
+                .arg("--root")
+                .arg(python_root)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--destination")
+                .arg(destination_hash)
+                .arg("--page")
+                .arg(page)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run Python NomadNet requester")
+        }),
+    )
+    .await
+    .expect("Python NomadNet matrix timeout")
+    .expect("Python NomadNet blocking task");
+
+    assert!(
+        output.status.success(),
+        "Python NomadNet matrix failed status={} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .expect("Python matrix JSON result");
+    assert_eq!(result["passed"], true);
+    assert_eq!(result["requests"], 4);
+    assert_eq!(result["rns"], expected_rns.as_str());
+    assert_eq!(
+        result["matrix"],
+        serde_json::json!([
+            {"request": "direct", "response": "direct", "response_bytes": 43},
+            {"request": "direct", "response": "resource", "response_bytes": 32799},
+            {"request": "resource", "response": "direct", "response_bytes": 43},
+            {"request": "resource", "response": "resource", "response_bytes": 32799}
+        ])
+    );
+
+    assert!(crate::server_log::flush(Duration::from_secs(1)));
+    let log = std::fs::read_to_string(config.log_path()).expect("read Rust responder log");
+    let selected = log
+        .lines()
+        .filter(|line| line.contains("NomadNet response selected"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        selected.len(),
+        4,
+        "one response selection per Python request"
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .filter(|line| line.contains("ingress=direct-packet"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .filter(|line| line.contains("ingress=request-resource"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .filter(|line| line.contains("primitive=direct-packet"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        selected
+            .iter()
+            .filter(|line| line.contains("primitive=response-resource"))
+            .count(),
+        2
+    );
+
+    announce_shutdown.cancel();
+    shutdown.cancel();
+    for task in [announce_task, link_bridge, resource_bridge] {
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("Python matrix task shutdown bounded")
+            .expect("Python matrix task joins");
+    }
+    assert!(transport.detach_interfaces().await >= 1);
+    std::fs::remove_dir_all(&root).expect("remove Python matrix root");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit pinned-Python RNS requester to Rust omenchatd NomadNet matrix"]
+async fn pinned_python_nomadnet_rust_responder_four_quadrants() {
+    run_python_nomadnet_rust_responder_matrix("OMEN_PINNED_RNS_SOURCE", "1.2.2").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit current-Python RNS requester to Rust omenchatd NomadNet matrix"]
+async fn current_python_nomadnet_rust_responder_four_quadrants() {
+    run_python_nomadnet_rust_responder_matrix("OMEN_PYTHON_RNS_SOURCE", "1.4.0").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
     if std::env::var_os(SPLIT_SENTINEL_ENV).is_some() {

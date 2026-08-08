@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rand_core::OsRng;
 use rmpv::Value;
-use rns_transport::destination::link::LinkEvent;
+use rns_transport::destination::link::{LinkEvent, LinkStatus};
 use rns_transport::destination::{DestinationName, SingleInputDestination};
 use rns_transport::hash::AddressHash;
 use rns_transport::identity::PrivateIdentity;
@@ -50,6 +50,45 @@ const OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS: usize = 256;
 const OUTBOUND_RESOURCE_CORRELATION_MAX_ITEMS_PER_LINK: usize = 16;
 const OUTBOUND_RESOURCE_CORRELATION_MAX_BYTES: usize = 1024 * 1024;
 const OUTBOUND_RESOURCE_CORRELATION_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NomadNetRequestIngress {
+    DirectPacket,
+    RequestResource,
+}
+
+impl NomadNetRequestIngress {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectPacket => "direct-packet",
+            Self::RequestResource => "request-resource",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NomadNetResponsePrimitive {
+    DirectPacket,
+    ResponseResource,
+}
+
+impl NomadNetResponsePrimitive {
+    fn for_packed_len(packed_len: usize) -> Self {
+        if packed_len <= rns_transport::packet::PACKET_MDU {
+            Self::DirectPacket
+        } else {
+            Self::ResponseResource
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectPacket => "direct-packet",
+            Self::ResponseResource => "response-resource",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct QueueMetricsSnapshot {
     pub queued_items: usize,
@@ -1830,13 +1869,14 @@ fn spawn_link_event_bridge(
                     }
                     LinkEvent::Data(payload) => {
                         if payload.context() == PacketContext::Request {
-                            send_direct_nomadnet_response(
+                            send_nomadnet_response(
                                 &transport,
                                 &config,
                                 &log_path,
                                 event.id,
-                                payload.request_id(),
+                                payload.request_id().map(|id| id.to_vec()),
                                 payload.as_slice(),
+                                NomadNetRequestIngress::DirectPacket,
                             )
                             .await;
                             continue;
@@ -1916,18 +1956,35 @@ fn spawn_link_event_bridge(
     })
 }
 
-async fn send_direct_nomadnet_response(
+async fn send_nomadnet_response(
     transport: &Transport,
     config: &ServerConfig,
     log_path: &Path,
     link_id: AddressHash,
-    request_id: Option<[u8; 16]>,
+    request_id: Option<Vec<u8>>,
     request_payload: &[u8],
+    ingress: NomadNetRequestIngress,
 ) {
     let Some(request_id) = request_id else {
         append_server_log_warning_path(
             log_path,
-            "reticulum-rs direct NomadNet request ignored: missing request id",
+            format!(
+                "reticulum-rs NomadNet response failed ingress={} link={} terminal_error=missing-request-id",
+                ingress.as_str(),
+                link_id
+            ),
+        );
+        return;
+    };
+    let Ok(request_id): Result<[u8; 16], _> = request_id.as_slice().try_into() else {
+        append_server_log_warning_path(
+            log_path,
+            format!(
+                "reticulum-rs NomadNet response failed ingress={} link={} terminal_error=invalid-request-id bytes={}",
+                ingress.as_str(),
+                link_id,
+                request_id.len()
+            ),
         );
         return;
     };
@@ -1935,7 +1992,8 @@ async fn send_direct_nomadnet_response(
         append_server_log_warning_path(
             log_path,
             format!(
-                "reticulum-rs direct NomadNet request ignored link={} unknown path hash bytes={}",
+                "reticulum-rs NomadNet response failed ingress={} link={} terminal_error=unknown-request-path request_bytes={}",
+                ingress.as_str(),
                 link_id,
                 request_payload.len()
             ),
@@ -1943,21 +2001,24 @@ async fn send_direct_nomadnet_response(
         return;
     };
 
-    // The link-event bridge processes one request at a time, bounding blocking
-    // portal reads to one owned job instead of growing a task per request.
+    // Each owning event bridge awaits its one bounded filesystem job. No
+    // detached task or per-request retry is created.
     let response_config = config.clone();
     let response = tokio::task::spawn_blocking(move || {
-        nomadnet_response_resource_payload(&response_config, &request_id)
+        nomadnet_response_payload(&response_config, &request_id)
     })
     .await;
-    let payload = match response {
+    let packed_response = match response {
         Ok(Ok(payload)) => payload,
         Ok(Err(error)) => {
             append_server_log_error_path(
                 log_path,
                 format!(
-                    "reticulum-rs direct NomadNet response payload failed request_path={} error={error}",
-                    request_path
+                    "reticulum-rs NomadNet response failed ingress={} link={} request_path={} request_id={} terminal_error=envelope-build error={error}",
+                    ingress.as_str(),
+                    link_id,
+                    request_path,
+                    hex_lower(&request_id)
                 ),
             );
             return;
@@ -1966,67 +2027,154 @@ async fn send_direct_nomadnet_response(
             append_server_log_error_path(
                 log_path,
                 format!(
-                    "reticulum-rs direct NomadNet response worker failed request_path={} error={error}",
-                    request_path
+                    "reticulum-rs NomadNet response failed ingress={} link={} request_path={} request_id={} terminal_error=blocking-worker error={error}",
+                    ingress.as_str(),
+                    link_id,
+                    request_path,
+                    hex_lower(&request_id)
                 ),
             );
             return;
         }
     };
-    let Some(link) = transport.find_in_link(&link_id).await else {
-        append_server_log_warning_path(
-            log_path,
-            format!(
-                "reticulum-rs direct NomadNet response ignored link={} request_path={} missing inbound link",
-                link_id, request_path
-            ),
-        );
-        return;
-    };
-    let response_packet = {
-        let link = link.lock().await;
-        let Some(ingress_iface) = link.ingress_iface() else {
-            append_server_log_warning_path(
-                log_path,
-                format!(
-                    "reticulum-rs direct NomadNet response ignored link={} request_path={} missing ingress interface",
-                    link_id, request_path
-                ),
-            );
-            return;
-        };
-        match link.data_packet(&payload) {
-            Ok(mut packet) => {
-                packet.context = PacketContext::Response;
-                Some((ingress_iface, packet))
-            }
-            Err(error) => {
-                append_server_log_error_path(
-                    log_path,
-                    format!(
-                        "reticulum-rs direct NomadNet response packet failed link={} request_path={} bytes={} error={error:?}",
-                        link_id,
-                        request_path,
-                        payload.len()
-                    ),
-                );
-                None
-            }
-        }
-    };
-    let Some((ingress_iface, packet)) = response_packet else {
-        return;
-    };
-    transport.send_direct(ingress_iface, packet).await;
+    let primitive = NomadNetResponsePrimitive::for_packed_len(packed_response.len());
     append_server_log_path(
         log_path,
         format!(
-            "reticulum-rs direct NomadNet response sent link={} request_path={} bytes={}",
+            "reticulum-rs NomadNet response selected ingress={} primitive={} link={} request_path={} request_id={} bytes={}",
+            ingress.as_str(),
+            primitive.as_str(),
             link_id,
             request_path,
-            payload.len()
+            hex_lower(&request_id),
+            packed_response.len()
         ),
     );
+
+    match primitive {
+        NomadNetResponsePrimitive::DirectPacket => {
+            let Some(link) = transport.find_in_link(&link_id).await else {
+                append_server_log_warning_path(
+                    log_path,
+                    format!(
+                        "reticulum-rs NomadNet response failed ingress={} primitive={} link={} request_path={} request_id={} bytes={} terminal_error=missing-inbound-link",
+                        ingress.as_str(),
+                        primitive.as_str(),
+                        link_id,
+                        request_path,
+                        hex_lower(&request_id),
+                        packed_response.len()
+                    ),
+                );
+                return;
+            };
+            let response_packet = {
+                let link = link.lock().await;
+                if link.status() != LinkStatus::Active {
+                    append_server_log_warning_path(
+                        log_path,
+                        format!(
+                            "reticulum-rs NomadNet response failed ingress={} primitive={} link={} request_path={} request_id={} bytes={} terminal_error=inactive-link",
+                            ingress.as_str(),
+                            primitive.as_str(),
+                            link_id,
+                            request_path,
+                            hex_lower(&request_id),
+                            packed_response.len()
+                        ),
+                    );
+                    return;
+                }
+                let Some(ingress_iface) = link.ingress_iface() else {
+                    append_server_log_warning_path(
+                        log_path,
+                        format!(
+                            "reticulum-rs NomadNet response failed ingress={} primitive={} link={} request_path={} request_id={} bytes={} terminal_error=missing-ingress-interface",
+                            ingress.as_str(),
+                            primitive.as_str(),
+                            link_id,
+                            request_path,
+                            hex_lower(&request_id),
+                            packed_response.len()
+                        ),
+                    );
+                    return;
+                };
+                match link.response_packet(&packed_response) {
+                    Ok(packet) => Some((ingress_iface, packet)),
+                    Err(error) => {
+                        append_server_log_error_path(
+                            log_path,
+                            format!(
+                                "reticulum-rs NomadNet response failed ingress={} primitive={} link={} request_path={} request_id={} bytes={} terminal_error=packet-construction error={error:?}",
+                                ingress.as_str(),
+                                primitive.as_str(),
+                                link_id,
+                                request_path,
+                                hex_lower(&request_id),
+                                packed_response.len()
+                            ),
+                        );
+                        None
+                    }
+                }
+            };
+            let Some((ingress_iface, packet)) = response_packet else {
+                return;
+            };
+            transport.send_direct(ingress_iface, packet).await;
+            append_server_log_path(
+                log_path,
+                format!(
+                    "reticulum-rs NomadNet response sent ingress={} primitive={} link={} request_path={} request_id={} bytes={}",
+                    ingress.as_str(),
+                    primitive.as_str(),
+                    link_id,
+                    request_path,
+                    hex_lower(&request_id),
+                    packed_response.len()
+                ),
+            );
+        }
+        NomadNetResponsePrimitive::ResponseResource => {
+            let response_bytes = packed_response.len();
+            match transport
+                .send_response_resource(
+                    &link_id,
+                    request_id.to_vec(),
+                    packed_response,
+                    None,
+                )
+                .await
+            {
+                Ok(response_hash) => append_server_log_path(
+                    log_path,
+                    format!(
+                        "reticulum-rs NomadNet response sent ingress={} primitive={} link={} request_path={} request_id={} response_hash={} bytes={}",
+                        ingress.as_str(),
+                        primitive.as_str(),
+                        link_id,
+                        request_path,
+                        hex_lower(&request_id),
+                        response_hash,
+                        response_bytes
+                    ),
+                ),
+                Err(error) => append_server_log_error_path(
+                    log_path,
+                    format!(
+                        "reticulum-rs NomadNet response failed ingress={} primitive={} link={} request_path={} request_id={} bytes={} terminal_error=resource-dispatch error={error:?}",
+                        ingress.as_str(),
+                        primitive.as_str(),
+                        link_id,
+                        request_path,
+                        hex_lower(&request_id),
+                        response_bytes
+                    ),
+                ),
+            }
+        }
+    }
 }
 
 fn spawn_received_data_bridge(
@@ -2195,69 +2343,16 @@ fn spawn_resource_event_receiver(
                         ResourceEventKind::SegmentComplete(_) => continue,
                     };
                     if complete.is_request {
-                        let Some(request_id) = complete.request_id.clone() else {
-                            append_server_log_warning_path(
-                                &log_path,
-                                format!(
-                                    "reticulum-rs NomadNet resource request ignored link={} hash={} missing request_id",
-                                    event.link_id, event.hash
-                                ),
-                            );
-                            continue;
-                        };
-                        let Some(request_path) =
-                            nomadnet_request_path_for_payload(&config, complete.data.as_slice())
-                        else {
-                            append_server_log_warning_path(
-                                &log_path,
-                                format!(
-                                    "reticulum-rs NomadNet resource request ignored link={} hash={} unknown path hash bytes={}",
-                                    event.link_id,
-                                    event.hash,
-                                    complete.data.len()
-                                ),
-                            );
-                            continue;
-                        };
-                        match nomadnet_response_resource_payload(&config, &request_id) {
-                            Ok(payload) => {
-                                let response_bytes = payload.len();
-                                match transport
-                                    .send_response_resource(
-                                        &event.link_id,
-                                        request_id,
-                                        payload,
-                                        None,
-                                    )
-                                    .await
-                                {
-                                Ok(response_hash) => append_server_log_path(
-                                    &log_path,
-                                    format!(
-                                        "reticulum-rs NomadNet response resource sent link={} request_path={} response_hash={} bytes={}",
-                                        event.link_id,
-                                        request_path,
-                                        response_hash,
-                                        response_bytes
-                                    ),
-                                ),
-                                Err(error) => append_server_log_error_path(
-                                    &log_path,
-                                    format!(
-                                        "reticulum-rs NomadNet response resource failed link={} request_path={} error={error:?}",
-                                        event.link_id, request_path
-                                    ),
-                                ),
-                                }
-                            }
-                            Err(error) => append_server_log_error_path(
-                                &log_path,
-                                format!(
-                                    "reticulum-rs NomadNet response payload failed link={} request_path={} error={error}",
-                                    event.link_id, request_path
-                                ),
-                            ),
-                        }
+                        send_nomadnet_response(
+                            &transport,
+                            &config,
+                            &log_path,
+                            event.link_id,
+                            complete.request_id,
+                            complete.data.as_slice(),
+                            NomadNetRequestIngress::RequestResource,
+                        )
+                        .await;
                         continue;
                     }
                     let Some(metadata) = complete.metadata.clone() else {
@@ -2836,20 +2931,24 @@ fn nomadnet_request_path_for_payload(config: &ServerConfig, payload: &[u8]) -> O
         .find(|path| truncated_sha256(path.as_bytes()) == path_hash)
 }
 
-fn nomadnet_response_resource_payload(
+fn nomadnet_response_payload(
     config: &ServerConfig,
-    request_id: &[u8],
+    request_id: &[u8; 16],
 ) -> ServerResult<Vec<u8>> {
-    if request_id.len() != 16 {
-        return Err(ServerError::Message(
-            "NomadNet request resource id must be 16 bytes".into(),
-        ));
-    }
-    let body = std::fs::read(config.nomadnet_index_page_path())?;
-    pack_msgpack_value(&Value::Array(vec![
+    let body = crate::private_fs::read_private_bounded(
+        &config.nomadnet_index_page_path(),
+        MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES,
+    )?;
+    let packed = pack_msgpack_value(&Value::Array(vec![
         Value::Binary(request_id.to_vec()),
         Value::Binary(body),
-    ]))
+    ]))?;
+    if packed.len() > MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES {
+        return Err(ServerError::Message(
+            "NomadNet response envelope exceeds the 4 MiB limit".into(),
+        ));
+    }
+    Ok(packed)
 }
 
 fn unpack_msgpack_value(
@@ -3540,13 +3639,13 @@ mod tests {
     }
 
     #[test]
-    fn nomadnet_response_resource_payload_roundtrips_request_id_and_body() {
+    fn nomadnet_response_payload_roundtrips_request_id_and_body() {
         let config = test_config("response-payload");
         crate::config::init_files(&config).expect("init");
         std::fs::write(config.nomadnet_index_page_path(), b">Smoke\nPage").expect("write page");
 
         let request_id = [0x42u8; 16];
-        let payload = nomadnet_response_resource_payload(&config, &request_id).expect("payload");
+        let payload = nomadnet_response_payload(&config, &request_id).expect("payload");
         let value = unpack_msgpack_value(
             &payload,
             4 * 1024 * 1024,
@@ -3563,6 +3662,472 @@ mod tests {
         assert_eq!(items[0], Value::Binary(request_id.to_vec()));
         assert_eq!(items[1], Value::Binary(b">Smoke\nPage".to_vec()));
 
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[test]
+    fn nomadnet_response_primitive_uses_only_complete_envelope_length() {
+        use rns_transport::packet::PACKET_MDU;
+
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(PACKET_MDU - 1),
+            NomadNetResponsePrimitive::DirectPacket
+        );
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(PACKET_MDU),
+            NomadNetResponsePrimitive::DirectPacket
+        );
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(PACKET_MDU + 1),
+            NomadNetResponsePrimitive::ResponseResource
+        );
+
+        for ingress in [
+            NomadNetRequestIngress::DirectPacket,
+            NomadNetRequestIngress::RequestResource,
+        ] {
+            assert!(!ingress.as_str().is_empty());
+            assert_eq!(
+                NomadNetResponsePrimitive::for_packed_len(PACKET_MDU),
+                NomadNetResponsePrimitive::DirectPacket
+            );
+            assert_eq!(
+                NomadNetResponsePrimitive::for_packed_len(PACKET_MDU + 1),
+                NomadNetResponsePrimitive::ResponseResource
+            );
+        }
+    }
+
+    #[test]
+    fn packed_nomadnet_response_boundary_selects_minus_one_exact_and_plus_one() {
+        use rns_transport::packet::PACKET_MDU;
+
+        for (target, expected) in [
+            (PACKET_MDU - 1, NomadNetResponsePrimitive::DirectPacket),
+            (PACKET_MDU, NomadNetResponsePrimitive::DirectPacket),
+            (PACKET_MDU + 1, NomadNetResponsePrimitive::ResponseResource),
+        ] {
+            let envelope = (0..=target)
+                .find_map(|body_len| {
+                    let packed = pack_msgpack_value(&Value::Array(vec![
+                        Value::Binary(vec![0x44; 16]),
+                        Value::Binary(vec![0x45; body_len]),
+                    ]))
+                    .expect("pack boundary candidate");
+                    (packed.len() == target).then_some(packed)
+                })
+                .unwrap_or_else(|| panic!("no response envelope for target {target}"));
+
+            assert_eq!(envelope.len(), target);
+            assert_eq!(
+                NomadNetResponsePrimitive::for_packed_len(envelope.len()),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn nomadnet_response_payload_accepts_exact_limit_and_rejects_over_limit() {
+        let config = test_config("response-envelope-limit");
+        crate::config::init_files(&config).expect("init");
+        // MessagePack array + 16-byte request-id binary + bin32 body headers.
+        // This is test evidence only; production validates the packed result
+        // instead of relying on this overhead calculation.
+        let exact_body_len = MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES - 24;
+        std::fs::write(
+            config.nomadnet_index_page_path(),
+            vec![0x57; exact_body_len],
+        )
+        .expect("write exact-limit page");
+        let exact =
+            nomadnet_response_payload(&config, &[0x42; 16]).expect("exact envelope accepted");
+        assert_eq!(exact.len(), MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES);
+
+        std::fs::write(
+            config.nomadnet_index_page_path(),
+            vec![0x58; MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES],
+        )
+        .expect("write bounded page");
+
+        let error = nomadnet_response_payload(&config, &[0x43; 16])
+            .expect_err("complete envelope overhead must remain inside the 4 MiB ceiling");
+
+        assert_eq!(
+            error.to_string(),
+            "NomadNet response envelope exceeds the 4 MiB limit"
+        );
+        let _ = std::fs::remove_dir_all(config.root_dir());
+    }
+
+    #[test]
+    fn public_response_packet_preserves_context_destination_and_exact_envelope() {
+        use rns_transport::destination::link::Link;
+
+        let identity = PrivateIdentity::new_from_name("omenchatd-response-packet-test");
+        let destination = SingleInputDestination::new(
+            identity,
+            DestinationName::new(NOMADNET_RNS_APP_NAME, "response-packet-test"),
+        );
+        let (events, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let mut outbound = Link::new(destination.desc, events.clone());
+        let request = outbound.request();
+        let mut inbound = Link::new_from_request(
+            &request,
+            destination.sign_key().clone(),
+            destination.desc,
+            events,
+        )
+        .expect("inbound link");
+        let iface = AddressHash::new([0x71; 16]);
+        assert!(matches!(
+            outbound.handle_packet(&inbound.prove(), iface),
+            rns_transport::destination::link::LinkHandleResult::Activated
+        ));
+
+        let request_id = [0x72; 16];
+        let envelope = pack_msgpack_value(&Value::Array(vec![
+            Value::Binary(request_id.to_vec()),
+            Value::Binary(b">response packet".to_vec()),
+        ]))
+        .expect("response envelope");
+        let packet = inbound
+            .response_packet(&envelope)
+            .expect("active inbound link builds response");
+
+        assert_eq!(packet.context, PacketContext::Response);
+        assert_eq!(packet.destination, *inbound.id());
+        let _ = outbound.handle_packet(&packet, iface);
+        let received = loop {
+            let event = event_rx.try_recv().expect("response link event");
+            if let LinkEvent::Data(payload) = event.event {
+                break payload;
+            }
+        };
+        assert_eq!(received.context(), PacketContext::Response);
+        assert_eq!(received.as_slice(), envelope);
+    }
+
+    #[test]
+    fn response_constructor_failure_does_not_change_the_selected_primitive() {
+        use rns_transport::destination::link::Link;
+
+        let identity = PrivateIdentity::new_from_name("omenchatd-inactive-response-test");
+        let destination = SingleInputDestination::new(
+            identity,
+            DestinationName::new(NOMADNET_RNS_APP_NAME, "inactive-response-test"),
+        );
+        let (events, _event_rx) = tokio::sync::broadcast::channel(4);
+        let link = Link::new(destination.desc, events);
+        let envelope = vec![0x51; rns_transport::packet::PACKET_MDU];
+
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(envelope.len()),
+            NomadNetResponsePrimitive::DirectPacket
+        );
+        assert!(link.response_packet(&envelope).is_err());
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(envelope.len()),
+            NomadNetResponsePrimitive::DirectPacket,
+            "a direct construction error must not become a Resource fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_resource_dispatch_error_does_not_create_a_direct_fallback() {
+        let identity = PrivateIdentity::new_from_name("omenchatd-missing-response-link-test");
+        let transport = Transport::new(TransportConfig::new(
+            "omenchatd-missing-response-link-test",
+            &identity,
+            true,
+        ));
+        let mut resource_events = transport.resource_events();
+        let envelope = vec![0x52; rns_transport::packet::PACKET_MDU + 1];
+
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(envelope.len()),
+            NomadNetResponsePrimitive::ResponseResource
+        );
+        assert!(transport
+            .send_response_resource(
+                &AddressHash::new([0x53; 16]),
+                vec![0x54; 16],
+                envelope.clone(),
+                None,
+            )
+            .await
+            .is_err());
+        assert!(matches!(
+            resource_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            NomadNetResponsePrimitive::for_packed_len(envelope.len()),
+            NomadNetResponsePrimitive::ResponseResource,
+            "a Resource dispatch error must not become a direct fallback"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn nomadnet_request_response_four_quadrants_dispatch_once_with_exact_bytes() {
+        use rns_transport::delivery::await_link_activation;
+        use rns_transport::iface::udp::UdpInterface;
+        use rns_transport::resource::ResourceEventKind;
+
+        fn reserve_udp_ports() -> (u16, u16) {
+            let first = std::net::UdpSocket::bind("127.0.0.1:0").expect("first UDP port");
+            let second = std::net::UdpSocket::bind("127.0.0.1:0").expect("second UDP port");
+            let first_port = first.local_addr().expect("first address").port();
+            let second_port = second.local_addr().expect("second address").port();
+            assert_ne!(first_port, second_port);
+            (first_port, second_port)
+        }
+
+        async fn attach_udp(transport: &Transport, bind_port: u16, peer_port: u16) {
+            transport.iface_manager().lock().await.spawn(
+                UdpInterface::new(
+                    format!("127.0.0.1:{bind_port}"),
+                    Some(format!("127.0.0.1:{peer_port}")),
+                ),
+                UdpInterface::spawn,
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        fn decode_response_envelope(bytes: &[u8]) -> ([u8; 16], Vec<u8>) {
+            let value = unpack_msgpack_value(
+                bytes,
+                MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES,
+                MAX_NOMADNET_RESPONSE_ENVELOPE_BYTES,
+                8,
+                8,
+                4,
+            )
+            .expect("response envelope");
+            let Value::Array(items) = value else {
+                panic!("response envelope must be an array");
+            };
+            let Value::Binary(request_id) = &items[0] else {
+                panic!("response request id must be binary");
+            };
+            let Value::Binary(body) = &items[1] else {
+                panic!("response body must be binary");
+            };
+            (
+                request_id
+                    .as_slice()
+                    .try_into()
+                    .expect("16-byte response request id"),
+                body.clone(),
+            )
+        }
+
+        let nonce = current_epoch_ms();
+        let config = test_config(&format!("nomadnet-four-quadrants-{nonce}"));
+        let _ = std::fs::remove_dir_all(config.root_dir());
+        crate::config::init_files(&config).expect("isolated config");
+
+        let server_identity =
+            PrivateIdentity::new_from_name(&format!("omenchatd-matrix-server-{nonce}"));
+        let client_identity =
+            PrivateIdentity::new_from_name(&format!("omenchatd-matrix-client-{nonce}"));
+        let mut server_transport_config =
+            TransportConfig::new("omenchatd-nomadnet-matrix-server", &server_identity, true);
+        server_transport_config.set_resource_retry_interval_secs(1);
+        server_transport_config.set_resource_retry_limit(10);
+        let server_transport = Transport::new(server_transport_config);
+        let destination = server_transport
+            .add_destination(
+                server_identity,
+                DestinationName::new(NOMADNET_RNS_APP_NAME, "node"),
+            )
+            .await;
+        let server_transport = Arc::new(server_transport);
+        let mut client_transport_config =
+            TransportConfig::new("omenchatd-nomadnet-matrix-client", &client_identity, true);
+        client_transport_config.set_resource_retry_interval_secs(1);
+        client_transport_config.set_resource_retry_limit(10);
+        let client_transport = Arc::new(Transport::new(client_transport_config));
+
+        let (server_port, client_port) = reserve_udp_ports();
+        attach_udp(&server_transport, server_port, client_port).await;
+        attach_udp(&client_transport, client_port, server_port).await;
+
+        let budget = QueueBudget::new(EVENT_QUEUE_BYTES, EVENT_PER_LINK_BYTES);
+        let (payload_tx, _payload_rx) = mpsc::channel(EVENT_QUEUE_ITEMS);
+        let (control_tx, _control_rx) = mpsc::channel(EVENT_CONTROL_ITEMS);
+        let event_tx = EventQueueSender {
+            payload_tx,
+            control_tx,
+            budget,
+            log_path: config.log_path(),
+        };
+        let shutdown = CancellationToken::new();
+        let correlations = Arc::new(Mutex::new(OutboundResourceCorrelations::default()));
+        let link_bridge = spawn_link_event_bridge(
+            server_transport.clone(),
+            event_tx.clone(),
+            config.clone(),
+            shutdown.clone(),
+            correlations.clone(),
+        );
+        let resource_bridge = spawn_resource_event_bridge(
+            server_transport.clone(),
+            event_tx,
+            config.clone(),
+            shutdown.clone(),
+            correlations,
+        );
+
+        server_transport.send_announce(&destination, None).await;
+        let destination = destination.lock().await.desc;
+        assert!(
+            client_transport
+                .await_path(&destination.address_hash, Duration::from_secs(5), None)
+                .await,
+            "client learns server path"
+        );
+        let mut link_events = client_transport.out_link_events();
+        let mut resource_events = client_transport.resource_events();
+        let link = client_transport.link(destination).await;
+        await_link_activation(&client_transport, &link, Duration::from_secs(5))
+            .await
+            .expect("matrix link activation");
+        let link_id = *link.lock().await.id();
+        let request_payload = pack_request_for_path("/page/index.mu");
+
+        let cases = [
+            (NomadNetRequestIngress::DirectPacket, vec![0x61; 64]),
+            (NomadNetRequestIngress::DirectPacket, vec![0x62; 2 * 1024]),
+            (NomadNetRequestIngress::RequestResource, vec![0x63; 64]),
+            (
+                NomadNetRequestIngress::RequestResource,
+                vec![0x64; 2 * 1024],
+            ),
+        ];
+
+        for (index, (request_ingress, expected_body)) in cases.into_iter().enumerate() {
+            std::fs::write(config.nomadnet_index_page_path(), &expected_body)
+                .expect("replace isolated page");
+            let prepared = nomadnet_response_payload(&config, &[0x70; 16])
+                .expect("prepare matrix response envelope");
+            let expected_primitive = NomadNetResponsePrimitive::for_packed_len(prepared.len());
+            assert_eq!(
+                expected_primitive,
+                if expected_body.len() <= 64 {
+                    NomadNetResponsePrimitive::DirectPacket
+                } else {
+                    NomadNetResponsePrimitive::ResponseResource
+                }
+            );
+
+            let request_id = match request_ingress {
+                NomadNetRequestIngress::DirectPacket => {
+                    let (iface, packet, request_id) = {
+                        let link = link.lock().await;
+                        let iface = link.ingress_iface().expect("bound client link");
+                        let packet = link
+                            .request_packet(&request_payload)
+                            .expect("direct request packet");
+                        let request_id = packet.hash().to_bytes()[..16]
+                            .try_into()
+                            .expect("packet hash request id");
+                        (iface, packet, request_id)
+                    };
+                    client_transport.send_direct(iface, packet).await;
+                    request_id
+                }
+                NomadNetRequestIngress::RequestResource => {
+                    let request_id = [0x80 + index as u8; 16];
+                    client_transport
+                        .send_request_resource(
+                            &link_id,
+                            request_id.to_vec(),
+                            request_payload.clone(),
+                            None,
+                        )
+                        .await
+                        .expect("request Resource dispatch");
+                    request_id
+                }
+            };
+
+            let (actual_primitive, response) = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        event = link_events.recv() => {
+                            let event = event.expect("client link events remain open");
+                            if event.id != link_id {
+                                continue;
+                            }
+                            if let LinkEvent::Data(payload) = event.event {
+                                if payload.context() == PacketContext::Response {
+                                    break (NomadNetResponsePrimitive::DirectPacket, payload.as_slice().to_vec());
+                                }
+                            }
+                        }
+                        event = resource_events.recv() => {
+                            let event = event.expect("client Resource events remain open");
+                            if event.link_id != link_id {
+                                continue;
+                            }
+                            if let ResourceEventKind::Complete(complete) = event.kind {
+                                if complete.is_response {
+                                    break (NomadNetResponsePrimitive::ResponseResource, complete.data);
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("matrix response timeout");
+            assert_eq!(actual_primitive, expected_primitive);
+            let (actual_request_id, actual_body) = decode_response_envelope(&response);
+            assert_eq!(actual_request_id, request_id);
+            assert_eq!(actual_body, expected_body);
+
+            let duplicate = tokio::time::timeout(Duration::from_millis(150), async {
+                loop {
+                    tokio::select! {
+                        event = link_events.recv() => {
+                            let event = event.expect("client link events remain open");
+                            if let LinkEvent::Data(payload) = event.event {
+                                if payload.context() == PacketContext::Response
+                                    && decode_response_envelope(payload.as_slice()).0 == request_id
+                                {
+                                    break true;
+                                }
+                            }
+                        }
+                        event = resource_events.recv() => {
+                            let event = event.expect("client Resource events remain open");
+                            if let ResourceEventKind::Complete(complete) = event.kind {
+                                if complete.is_response
+                                    && decode_response_envelope(&complete.data).0 == request_id
+                                {
+                                    break true;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+            assert!(
+                duplicate.is_err(),
+                "response must be dispatched exactly once"
+            );
+        }
+
+        shutdown.cancel();
+        for task in [link_bridge, resource_bridge] {
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("matrix bridge shutdown bounded")
+                .expect("matrix bridge joins");
+        }
+        assert!(server_transport.detach_interfaces().await >= 1);
+        assert!(client_transport.detach_interfaces().await >= 1);
         let _ = std::fs::remove_dir_all(config.root_dir());
     }
 

@@ -29,6 +29,7 @@ const MAX_NOMADNET_RESPONSE_CONTAINER_ITEMS: usize = 256;
 const MAX_NOMADNET_RESPONSE_TOTAL_VALUES: usize = 512;
 const MAX_NOMADNET_RESPONSE_DEPTH: usize = 8;
 const NOMADNET_PAGE_LINK_GATE_STRIPES: usize = 32;
+const NOMADNET_ROUTE_RECOVERY_WAIT: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePageRequest {
@@ -143,6 +144,8 @@ pub fn native_reticulum09_request_response_probe() -> NativeReticulum09RequestRe
     let _ = rns_transport::transport::Transport::send_to_out_links;
     let _ = rns_transport::transport::Transport::send_channel_message;
     let _ = rns_transport::transport::Transport::send_direct;
+    let _ = rns_transport::destination::link::Link::request_packet;
+    let _ = rns_transport::destination::link::Link::response_packet;
 
     NativeReticulum09RequestResponseProbe {
         request_context_available: true,
@@ -161,7 +164,7 @@ pub fn native_reticulum09_request_response_probe() -> NativeReticulum09RequestRe
         high_level_link_request_send_available: false,
         recommended_adapter:
             "use the current-Python-verified direct request-context packet for small NomadNet requests and retain request-resource for oversized requests",
-        note: "reticulum-rs-transport 0.9 exposes request/response contexts, inbound request IDs, public link packet construction, packet context mutation, send_direct, and request/response resource helpers; OMEN's adapter now matches Python Link.request packet selection for small requests while retaining bounded request resources above the packet MDU",
+        note: "reticulum-rs-transport 0.9 exposes public Link::request_packet and Link::response_packet constructors, inbound request IDs, bound send_direct, and request/response Resource helpers; OMEN's production adapter selects one bounded request primitive, correlates either response primitive, and never retries after possible dispatch; the crate does not provide one automatic high-level Link.request selector/correlation owner",
     }
 }
 
@@ -976,7 +979,7 @@ pub fn native_reticulum09_capability_report() -> NativeReticulum09CapabilityRepo
             NativeRuntimeCapability {
                 name: "bound-link-data",
                 state: NativeRuntimeCapabilityState::Available,
-                note: "0.9 public link packet construction, context mutation, and bound send_direct provide the active small-request path; current Python verifies direct and Resource response selection independently of request primitive",
+                note: "0.9 public Link::request_packet plus bound send_direct provide the active small-request path, and omenchatd uses Link::response_packet for small responses; current Python verifies response selection independently of request primitive",
             },
             NativeRuntimeCapability {
                 name: "link-identify",
@@ -1011,11 +1014,11 @@ pub fn native_reticulum09_capability_report() -> NativeReticulum09CapabilityRepo
             },
         ],
         blockers: vec![
-            "reticulum-rs-transport 0.9 still has no high-level Link.request helper; OMEN composes the verified small direct request from public packet/link primitives",
+            "reticulum-rs-transport 0.9 has packet constructors but no complete high-level Link.request API that owns packet/Resource selection, correlation, and timeout; OMEN retains its bounded production adapter",
             "continue live parity checks against direct, propagated, ticket, and attachment LXMF workflows",
         ],
         recommended_next_step:
-            "retain primitive-independent NomadNet response handling without automatic request retry and advance the native-platform release gates",
+            "keep conservative PACKET_MDU request/response selection without automatic retry and requalify future tagged transport trains before changing the adapter",
     }
 }
 
@@ -1060,6 +1063,7 @@ pub struct NativePageFetchContext {
     pub identify_identity: Option<Arc<rns_transport::identity::PrivateIdentity>>,
     pub event_tx: Option<broadcast::Sender<RuntimeBusEvent>>,
     pub operation_id: Option<String>,
+    pub path_request_interfaces: Arc<[AddressHash]>,
 }
 
 impl NativePageFetchContext {
@@ -1070,6 +1074,7 @@ impl NativePageFetchContext {
             identify_identity: None,
             event_tx: None,
             operation_id: None,
+            path_request_interfaces: Arc::from([]),
         }
     }
 
@@ -1085,11 +1090,20 @@ impl NativePageFetchContext {
             identify_identity,
             event_tx,
             operation_id: None,
+            path_request_interfaces: Arc::from([]),
         }
     }
 
     pub fn with_operation_id(mut self, operation_id: Option<String>) -> Self {
         self.operation_id = operation_id;
+        self
+    }
+
+    pub fn with_path_request_interfaces(
+        mut self,
+        interfaces: impl Into<Arc<[AddressHash]>>,
+    ) -> Self {
+        self.path_request_interfaces = interfaces.into();
         self
     }
 }
@@ -1603,7 +1617,23 @@ impl NativePageTransportClient for ReticulumPageTransportClient {
                     })
                 }
                 Err(error) => {
+                    let failed_iface = match prepared.link.as_ref() {
+                        Some(link) => link.lock().await.ingress_iface(),
+                        None => None,
+                    };
                     close_nomadnet_page_link(&context.transport, &prepared.link).await;
+                    if nomadnet_response_timeout(&error) {
+                        recover_clean_route_after_transfer_failure(
+                            &context.transport,
+                            &prepared.destination_hash,
+                            failed_iface,
+                            &context.path_request_interfaces,
+                            context.event_tx.as_ref(),
+                            "nomadnet-response-timeout",
+                            NOMADNET_ROUTE_RECOVERY_WAIT,
+                        )
+                        .await;
+                    }
                     Err(error)
                 }
             };
@@ -1612,6 +1642,77 @@ impl NativePageTransportClient for ReticulumPageTransportClient {
             "native Reticulum page transport needs a verified Link.request response API",
         )))
     }
+}
+
+fn nomadnet_response_timeout(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::Runtime(message)
+            if message.starts_with("native Reticulum timeout during NomadNet ")
+                && message.ends_with(" request response")
+    )
+}
+
+/// Repairs only the route used by a terminal transfer failure. The failed
+/// application operation is never replayed: this function expires the exact
+/// selected path, requests discovery only on alternate attached interfaces,
+/// and leaves any later application attempt under its normal explicit owner.
+pub(crate) async fn recover_clean_route_after_transfer_failure(
+    transport: &Arc<reticulum_rs::runtime::Transport>,
+    destination_hash: &AddressHash,
+    failed_iface: Option<AddressHash>,
+    attached_interfaces: &[AddressHash],
+    event_tx: Option<&broadcast::Sender<RuntimeBusEvent>>,
+    reason: &str,
+    wait: Duration,
+) -> bool {
+    transport.reset_out_link(destination_hash).await;
+    let before = transport.path_status(destination_hash).await;
+    let selected_failed_iface = failed_iface.is_some() && before.interface == failed_iface;
+    let expired = selected_failed_iface && transport.expire_path(destination_hash).await;
+
+    let mut requested = 0usize;
+    for interface in attached_interfaces.iter().copied() {
+        if Some(interface) == failed_iface {
+            continue;
+        }
+        let trace = transport
+            .request_path(destination_hash, Some(interface), None)
+            .await;
+        requested = requested.saturating_add(trace.sent_ifaces + trace.queued_ifaces);
+    }
+
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut recovered = false;
+    loop {
+        let status = transport.path_status(destination_hash).await;
+        if status.path_found && status.interface != failed_iface {
+            recovered = true;
+            break;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
+    }
+
+    emit_clean_page_debug(
+        event_tx,
+        format!(
+            "native Reticulum route recovery after terminal transfer failure destination={} reason={} failed_iface={} selected_failed_iface={} expired={} alternate_requests={} recovered={} no_application_replay=true",
+            destination_hash,
+            reason,
+            failed_iface
+                .map(|interface| interface.to_hex_string())
+                .unwrap_or_else(|| "-".into()),
+            selected_failed_iface,
+            expired,
+            requested,
+            recovered
+        ),
+    );
+    recovered
 }
 
 pub fn native_transport_api_available() -> bool {
@@ -2953,6 +3054,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_response_timeout_requests_only_alternate_interfaces_without_replay() {
+        let local_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-response-timeout-route-recovery",
+        );
+        let config = reticulum_rs::runtime::TransportConfig::new(
+            "omenbrowser-response-timeout-route-recovery",
+            &local_identity,
+            false,
+        );
+        let transport = Arc::new(reticulum_rs::runtime::Transport::new(config));
+        let (mut failed, mut alternate) = {
+            let manager = transport.iface_manager();
+            let mut manager = manager.lock().await;
+            (
+                manager.new_channel_with_role(8, rns_transport::iface::IfaceRole::Unicast),
+                manager.new_channel_with_role(8, rns_transport::iface::IfaceRole::Unicast),
+            )
+        };
+        let failed_iface = *failed.address();
+        let alternate_iface = *alternate.address();
+        let destination = AddressHash::new([0x91; 16]);
+
+        let recovered = recover_clean_route_after_transfer_failure(
+            &transport,
+            &destination,
+            Some(failed_iface),
+            &[failed_iface, alternate_iface],
+            None,
+            "test-response-timeout",
+            Duration::ZERO,
+        )
+        .await;
+
+        assert!(!recovered, "no synthetic path response was injected");
+        assert!(
+            failed.tx_channel.try_recv().is_err(),
+            "the failed interface must be excluded from rediscovery"
+        );
+        let rediscovery = tokio::time::timeout(Duration::from_secs(1), alternate.tx_channel.recv())
+            .await
+            .expect("alternate path request timeout")
+            .expect("alternate path request");
+        assert_eq!(rediscovery.packet.context, PacketContext::None);
+        assert_eq!(
+            rediscovery
+                .packet
+                .data
+                .as_slice()
+                .get(..rns_transport::hash::ADDRESS_HASH_SIZE),
+            Some(destination.as_slice())
+        );
+        assert!(
+            !matches!(
+                rediscovery.packet.context,
+                PacketContext::Request | PacketContext::ResourceAdvrtisement
+            ),
+            "route recovery must not replay an application request"
+        );
+    }
+
+    #[test]
+    fn only_nomadnet_response_timeout_triggers_route_recovery() {
+        assert!(nomadnet_response_timeout(&AppError::Runtime(
+            "native Reticulum timeout during NomadNet direct request response".into(),
+        )));
+        assert!(nomadnet_response_timeout(&AppError::Runtime(
+            "native Reticulum timeout during NomadNet request-resource request response".into(),
+        )));
+        assert!(!nomadnet_response_timeout(&AppError::Runtime(
+            "native Reticulum operation cancelled".into(),
+        )));
+        assert!(!nomadnet_response_timeout(&AppError::Runtime(
+            "native Reticulum timeout during NomadNet link establishment".into(),
+        )));
+    }
+
+    #[tokio::test]
     async fn nomadnet_page_link_coordinator_serializes_same_stripe_and_is_cancellable() {
         let coordinator = NativePageLinkCoordinator::default();
         let first_destination = AddressHash::new([0x00; 16]);
@@ -3171,8 +3349,9 @@ mod tests {
             .recommended_adapter
             .contains("current-Python-verified"));
         assert!(probe.recommended_adapter.contains("request-resource"));
-        assert!(probe.note.contains("small requests"));
-        assert!(probe.note.contains("packet MDU"));
+        assert!(probe.note.contains("Link::request_packet"));
+        assert!(probe.note.contains("Link::response_packet"));
+        assert!(probe.note.contains("never retries"));
     }
 
     #[test]
@@ -3281,8 +3460,10 @@ mod tests {
             .any(|blocker| blocker.contains("high-level Link.request")));
         assert!(report
             .recommended_next_step
-            .contains("primitive-independent NomadNet response"));
-        assert!(report.recommended_next_step.contains("native-platform"));
+            .contains("PACKET_MDU request/response selection"));
+        assert!(report
+            .recommended_next_step
+            .contains("without automatic retry"));
         assert!(!report
             .blockers
             .iter()
