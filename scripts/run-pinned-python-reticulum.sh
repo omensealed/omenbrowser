@@ -159,6 +159,13 @@ env -u OMEN_PYTHON_RNS_SOURCE -u OMEN_PYTHON_RNS_VERSION \
 
 env -u OMEN_PYTHON_RNS_SOURCE -u OMEN_PYTHON_RNS_VERSION \
   OMEN_PINNED_RNS_SOURCE="$rns_source" \
+  cargo test --locked --manifest-path "$repo_root/src/server/Cargo.toml" \
+  --no-default-features --features server-headless \
+  pinned_python_nomadnet_rust_responder_four_quadrants -- \
+  --ignored --nocapture --test-threads=1
+
+env -u OMEN_PYTHON_RNS_SOURCE -u OMEN_PYTHON_RNS_VERSION \
+  OMEN_PINNED_RNS_SOURCE="$rns_source" \
   OMEN_PINNED_LXMF_SOURCE="$lxmf_source" \
   cargo test --locked --manifest-path "$repo_root/Cargo.toml" --lib \
   --no-default-features --features desktop-product \
@@ -221,4 +228,4 @@ env -u OMEN_PYTHON_RNS_SOURCE -u OMEN_PYTHON_RNS_VERSION \
   pinned_python_lxmf_live_ticket_roundtrip_uses_rust_issued_ticket -- \
   --ignored --nocapture --test-threads=1
 
-echo "pinned Python Reticulum/LXMF vector/TCP/link/proof/propagation/stamp/direct-policy/direct-resource/direct-stamp/ticket/live-ticket/restart-recovery interoperability: pass (RNS $pinned_ref / LXMF $pinned_lxmf_ref)"
+echo "pinned Python Reticulum/LXMF vector/TCP/link/proof/NomadNet-response-matrix/propagation/stamp/direct-policy/direct-resource/direct-stamp/ticket/live-ticket/restart-recovery interoperability: pass (RNS $pinned_ref / LXMF $pinned_lxmf_ref)"

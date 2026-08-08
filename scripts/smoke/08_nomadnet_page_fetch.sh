@@ -102,4 +102,45 @@ if ! grep -q '"live_fetch"' "$SMOKE_LOG_DIR/nomadnet-fetch-report.json"; then
   exit 1
 fi
 
+portal_page="$(find "$server_home" -type f -name index.mu -print -quit)"
+if [[ -z "$portal_page" ]]; then
+  echo "could not locate isolated omenchatd NomadNet portal page" >&2
+  exit 1
+fi
+
+# A small direct request must be allowed to receive a Resource response. Keep
+# the body deterministic and larger than the public PACKET_MDU boundary; the
+# server's complete-envelope selector, not compression or request ingress,
+# owns the response primitive decision.
+dd if=/dev/zero bs=32768 count=1 status=none | tr '\0' 'X' > "$portal_page"
+printf '>Large NomadNet response Resource\n' | \
+  dd of="$portal_page" conv=notrunc status=none
+
+echo "== Running direct-request / large-response Resource smoke =="
+"$browser_bin" \
+  --native-smoke "$portal_url" \
+  --backend reticulum \
+  --tcp-client "$tcp_endpoint" \
+  --path-wait "${OMENBROWSER_SMOKE_NOMADNET_PATH_WAIT:-75}" \
+  --live \
+  --fetch-page \
+  --app-root "$browser_root" \
+  --output "$SMOKE_LOG_DIR/nomadnet-large-fetch-report.json" \
+  > "$SMOKE_LOG_DIR/nomadnet-large-fetch.stdout" \
+  2> "$SMOKE_LOG_DIR/nomadnet-large-fetch.stderr"
+
+if ! grep -q '"outcome": "pass"' "$SMOKE_LOG_DIR/nomadnet-large-fetch-report.json"; then
+  echo "large NomadNet live fetch did not report pass" >&2
+  cat "$SMOKE_LOG_DIR/nomadnet-large-fetch.stderr" >&2
+  cat "$SMOKE_LOG_DIR/nomadnet-large-fetch-report.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"native_request_primitive": "direct-request"' \
+  "$SMOKE_LOG_DIR/nomadnet-large-fetch-report.json"; then
+  echo "large NomadNet fetch did not preserve the direct request primitive" >&2
+  cat "$SMOKE_LOG_DIR/nomadnet-large-fetch-report.json" >&2
+  exit 1
+fi
+
 smoke_pass

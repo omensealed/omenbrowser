@@ -448,7 +448,10 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   separately reported prior-binary live lane.
 - The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.8.
   Isolated current-product OMENchat reconnect/upload and NomadNet portal fetches
-  pass, as does the current Python NomadNet direct/Resource request-response
+  pass. The quiet portal independently selects its response from the complete
+  packed response size, so either request primitive can receive either response
+  primitive. The Rust and current Python four-quadrant matrices pass, as does
+  the current Python NomadNet direct/Resource request-response
   matrix and the pinned/current Python LXMF direct, propagated, ticket/stamp,
   and Resource lanes. Current-Python NomadNet response timeout and explicit
   cancellation also pass without automatic request replay. A bounded retained-

@@ -44,6 +44,14 @@ data from public primitives and sends it directly on the active link's bound
 interface. No automatic Resource retry follows a direct request, because a
 retry could repeat an executable form action whose response was merely lost.
 
+The quiet `omenchatd` portal uses `Link::response_packet()` for a complete
+packed response at or below public `PACKET_MDU`, and
+`Transport::send_response_resource()` above it. Both direct-request and
+request-Resource ingress use that same responder; request ingress never selects
+the response primitive. The portal read and complete `[request_id, body]`
+envelope are bounded to 4 MiB. Dynamic selection from negotiated payload MDU is
+deferred because OMEN does not copy private upstream framing formulas.
+
 The 0.9.8 crate also exposes public request/response Resource helpers.
 OMENbrowser selects `Transport::send_request_resource()` only when the packed
 request exceeds the Reticulum packet MDU, matching Python's primitive-selection
@@ -68,8 +76,9 @@ text and local acceptance checklist.
   `received_data_events()`.
 - public transport request/response resource helpers send on
   `link.ingress_iface()`.
-- public link-data packet construction plus public context mutation and
-  `send_direct()` form the active small NomadNet request path; current Python
+- public `Link::request_packet()` plus `send_direct()` form the active small
+  NomadNet request path, while the server uses `Link::response_packet()`;
+  current Python
   empty and executable-form exchanges preserve exact response bytes.
 - public channel helpers send on `link.ingress_iface()`, but they frame payloads
   as `PacketContext::Channel`.
