@@ -7,11 +7,13 @@ use crate::protocol::{
     ClientInstanceId, DurableMutationEnvelope, Frame, FrameBody, FrameValue, RoomCatalogShape,
     RoomId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
     DURABLE_MUTATION_ENVELOPE_TAG, DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
-    MODERATION_AUDIT_CAPABILITY, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
-    ROOM_MEDIA_POLICY_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
+    MODERATION_AUDIT_CAPABILITY, NICKNAME_COLOURS_CAPABILITY, REACTIONS_CAPABILITY,
+    REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY, ROOM_PINS_CAPABILITY,
+    ROOM_SLOW_MODE_CAPABILITY,
 };
 use crate::session::{
-    DurableMutationPeerContext, PendingUploadFailureMatch, ServerPeer, SessionEngine,
+    DurableMutationDispatch, DurableMutationPeerContext, PendingUploadFailureMatch, ServerPeer,
+    SessionEngine,
 };
 use crate::transport::{
     release_response_resource, send_response_frame_with_context, LinkId, OmenchatTransport,
@@ -168,6 +170,7 @@ struct FrameDispatchOutcome {
     reactions_accepted: bool,
     message_revisions_accepted: bool,
     pins_accepted: bool,
+    nickname_colours_accepted: bool,
     moderation_audit_accepted: bool,
     announcement_rooms_accepted: bool,
     slow_mode_accepted: bool,
@@ -466,6 +469,7 @@ pub struct OmenchatLiveServer<T> {
     announcement_room_links: BTreeMap<LinkId, Vec<u8>>,
     slow_mode_links: BTreeMap<LinkId, Vec<u8>>,
     room_media_policy_links: BTreeMap<LinkId, Vec<u8>>,
+    nickname_colour_links: BTreeMap<LinkId, Vec<u8>>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
     replay_cache: LinkReplayCache,
     stats: LiveServerStats,
@@ -488,6 +492,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             announcement_room_links: BTreeMap::new(),
             slow_mode_links: BTreeMap::new(),
             room_media_policy_links: BTreeMap::new(),
+            nickname_colour_links: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
             replay_cache: LinkReplayCache::default(),
             stats: LiveServerStats::default(),
@@ -533,6 +538,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.announcement_room_links.remove(&link_id);
                 self.slow_mode_links.remove(&link_id);
                 self.room_media_policy_links.remove(&link_id);
+                self.nickname_colour_links.remove(&link_id);
                 self.identified_links.insert(link_id);
                 self.replace_duplicate_peer_links(link_id, &identified);
                 self.peers.insert(link_id, identified);
@@ -633,6 +639,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     self.announcement_room_links.remove(&link_id);
                     self.slow_mode_links.remove(&link_id);
                     self.room_media_policy_links.remove(&link_id);
+                    self.nickname_colour_links.remove(&link_id);
                     if self.identified_links.contains(&link_id) {
                         if let Some(client_instance_id) = dispatch.accepted_client_instance_id {
                             self.durable_sessions.insert(
@@ -662,6 +669,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         }
                         if dispatch.room_media_policy_accepted {
                             self.room_media_policy_links
+                                .insert(link_id, candidate_peer.identity_hash.clone());
+                        }
+                        if dispatch.nickname_colours_accepted {
+                            self.nickname_colour_links
                                 .insert(link_id, candidate_peer.identity_hash.clone());
                         }
                     }
@@ -860,6 +871,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.announcement_room_links.remove(&link_id);
                 self.slow_mode_links.remove(&link_id);
                 self.room_media_policy_links.remove(&link_id);
+                self.nickname_colour_links.remove(&link_id);
                 if let Some(room_id) = room_id {
                     self.broadcast_userlist_for_room(room_id)?;
                 }
@@ -922,6 +934,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         let message_revisions_requested =
             session_open_requests_capability(&frame, MESSAGE_REVISIONS_CAPABILITY);
         let pins_requested = session_open_requests_capability(&frame, ROOM_PINS_CAPABILITY);
+        let nickname_colours_requested =
+            session_open_requests_capability(&frame, NICKNAME_COLOURS_CAPABILITY);
         let moderation_audit_requested =
             session_open_requests_capability(&frame, MODERATION_AUDIT_CAPABILITY);
         let announcement_rooms_requested =
@@ -974,13 +988,20 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .room_media_policy_links
             .get(&link_id)
             .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
-        let mut responses = self.engine.handle_frame_with_negotiated_features(
-            peer,
-            frame,
-            active_room_peers,
-            moderation_audit_active,
-            room_media_policy_active,
-        )?;
+        let nickname_colours_active = self
+            .nickname_colour_links
+            .get(&link_id)
+            .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
+        let mut responses = self
+            .engine
+            .handle_frame_with_negotiated_features_and_nickname_colours(
+                peer,
+                frame,
+                active_room_peers,
+                moderation_audit_active,
+                room_media_policy_active,
+                nickname_colours_active,
+            )?;
         let reply_mentions_active = self.durable_sessions.get(&link_id).is_some_and(|binding| {
             binding.identity_hash == peer.identity_hash && binding.reply_mentions
         });
@@ -1081,6 +1102,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 && responses_accept_capability(&responses, MESSAGE_REVISIONS_CAPABILITY),
             pins_accepted: pins_requested
                 && responses_accept_capability(&responses, ROOM_PINS_CAPABILITY),
+            nickname_colours_accepted: nickname_colours_requested
+                && responses_accept_capability(&responses, NICKNAME_COLOURS_CAPABILITY),
             moderation_audit_accepted: moderation_audit_requested
                 && responses_accept_capability(&responses, MODERATION_AUDIT_CAPABILITY),
             announcement_rooms_accepted: announcement_rooms_requested
@@ -1182,22 +1205,57 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         };
 
         let request_op = frame.op;
-        let dispatch = self.engine.handle_durable_mutation_with_active_peers(
-            DurableMutationPeerContext {
-                peer,
-                active_room_peers,
-                durable_notice_ack: binding.durable_notice_ack,
-                reply_mentions: binding.reply_mentions,
-                reactions: binding.reactions,
-                message_revisions: binding.message_revisions,
-                pins: binding.pins,
-            },
-            frame.seq,
-            frame.room_id,
-            request_op,
-            binding.client_instance_id,
-            envelope,
-        )?;
+        let dispatch = if request_op == ChatOp::NicknameColourSet {
+            let negotiated = self
+                .nickname_colour_links
+                .get(&link_id)
+                .is_some_and(|identity_hash| identity_hash == &peer.identity_hash);
+            if negotiated && frame.room_id.is_none() {
+                self.engine.handle_durable_nickname_colour(
+                    peer,
+                    frame.seq,
+                    binding.client_instance_id,
+                    envelope,
+                )?
+            } else {
+                DurableMutationDispatch {
+                    origin: durable_dispatch_error_frame(
+                        frame.seq,
+                        frame.room_id,
+                        if negotiated {
+                            ChatErrorCode::DurableMutationMalformed
+                        } else {
+                            ChatErrorCode::DurableMutationNotNegotiated
+                        },
+                        if negotiated {
+                            "nickname colour mutation must not identify a room"
+                        } else {
+                            "nickname colours were not negotiated for this authenticated link"
+                        },
+                    ),
+                    broadcasts: Vec::new(),
+                    disconnect_identity: None,
+                    pruned: 0,
+                }
+            }
+        } else {
+            self.engine.handle_durable_mutation_with_active_peers(
+                DurableMutationPeerContext {
+                    peer,
+                    active_room_peers,
+                    durable_notice_ack: binding.durable_notice_ack,
+                    reply_mentions: binding.reply_mentions,
+                    reactions: binding.reactions,
+                    message_revisions: binding.message_revisions,
+                    pins: binding.pins,
+                },
+                frame.seq,
+                frame.room_id,
+                request_op,
+                binding.client_instance_id,
+                envelope,
+            )?
+        };
         let part_succeeded =
             request_op == ChatOp::PartRoom && is_successful_part_response(&dispatch.origin);
         if let Some(identity_hash) = dispatch.disconnect_identity.as_deref() {
@@ -1212,6 +1270,8 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.broadcast_message_revision_event(&broadcast)?;
             } else if broadcast.op == ChatOp::PinEvent {
                 self.broadcast_pin_event(&broadcast)?;
+            } else if broadcast.op == ChatOp::NicknameColourEvent {
+                self.broadcast_nickname_colour_event(peer, &broadcast)?;
             } else {
                 self.broadcast_room_event(link_id, &broadcast)?;
             }
@@ -1242,6 +1302,43 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         };
         let link_ids = self.room_link_ids(room_id, origin_link_id);
         for link_id in link_ids {
+            self.stats.count_outbound_op(response);
+            self.send_response_frame(link_id, response)?;
+        }
+        Ok(())
+    }
+
+    fn broadcast_nickname_colour_event(
+        &mut self,
+        actor: &ServerPeer,
+        response: &crate::protocol::Frame,
+    ) -> ServerResult<()> {
+        if response.op != ChatOp::NicknameColourEvent {
+            return Ok(());
+        }
+        let actor_rooms = self.engine.room_ids_for_identity(&actor.identity_hash)?;
+        if actor_rooms.is_empty() {
+            return Ok(());
+        }
+        let mut targets = Vec::new();
+        for (link_id, identity_hash) in &self.nickname_colour_links {
+            let active = self.identified_links.contains(link_id)
+                && self
+                    .peers
+                    .get(link_id)
+                    .is_some_and(|peer| &peer.identity_hash == identity_hash);
+            if !active {
+                continue;
+            }
+            let target_rooms = self.engine.room_ids_for_identity(identity_hash)?;
+            if actor_rooms
+                .iter()
+                .any(|room_id| target_rooms.contains(room_id))
+            {
+                targets.push(*link_id);
+            }
+        }
+        for link_id in targets {
             self.stats.count_outbound_op(response);
             self.send_response_frame(link_id, response)?;
         }
@@ -1366,12 +1463,22 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             return Ok(());
         }
         let peers = self.active_peers_in_room(room_id);
-        let frame = self.engine.active_userlist_frame(room_id, &peers)?;
-        let send_result = link_ids
-            .into_iter()
-            .try_for_each(|link_id| self.send_response_frame(link_id, &frame));
-        release_response_resource(&self.engine, &frame)?;
-        send_result
+        for link_id in link_ids {
+            let nickname_colours_negotiated = self
+                .nickname_colour_links
+                .get(&link_id)
+                .zip(self.peers.get(&link_id))
+                .is_some_and(|(identity_hash, peer)| identity_hash == &peer.identity_hash);
+            let frame = self.engine.active_userlist_frame_for_colour_capability(
+                room_id,
+                &peers,
+                nickname_colours_negotiated,
+            )?;
+            let send_result = self.send_response_frame(link_id, &frame);
+            release_response_resource(&self.engine, &frame)?;
+            send_result?;
+        }
+        Ok(())
     }
 
     fn send_response_frame(
@@ -1394,6 +1501,11 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .get(&link_id)
             .zip(self.peers.get(&link_id))
             .is_some_and(|(identity_hash, peer)| identity_hash == &peer.identity_hash);
+        let nickname_colours_negotiated = self
+            .nickname_colour_links
+            .get(&link_id)
+            .zip(self.peers.get(&link_id))
+            .is_some_and(|(identity_hash, peer)| identity_hash == &peer.identity_hash);
         let room_catalog_shape = if room_media_policy_negotiated {
             RoomCatalogShape::MediaPolicy
         } else if slow_mode_negotiated {
@@ -1408,7 +1520,16 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .get(&link_id)
             .copied()
             .unwrap_or(OMENCHAT_LINK_CONTEXT);
-        if room_catalog_shape != RoomCatalogShape::Legacy
+        if nickname_colours_negotiated && frame.op == ChatOp::UserDelta {
+            let shaped = self.engine.shape_user_delta_for_colour_capability(frame)?;
+            send_response_frame_with_context(
+                &self.engine,
+                link_id,
+                &shaped,
+                &mut self.transport,
+                context,
+            )
+        } else if room_catalog_shape != RoomCatalogShape::Legacy
             && matches!(
                 frame.op,
                 ChatOp::JoinAccept | ChatOp::RoomDelta | ChatOp::CommandResult
@@ -1550,6 +1671,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             self.announcement_room_links.remove(link_id);
             self.slow_mode_links.remove(link_id);
             self.room_media_policy_links.remove(link_id);
+            self.nickname_colour_links.remove(link_id);
         }
         self.stats.links_closed = self.stats.links_closed.saturating_add(links.len() as u64);
         for room_id in unique_room_ids(affected_rooms) {
@@ -1732,6 +1854,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.announcement_room_links.remove(&link_id);
         self.slow_mode_links.remove(&link_id);
         self.room_media_policy_links.remove(&link_id);
+        self.nickname_colour_links.remove(&link_id);
     }
 
     fn retire_link(&mut self, link_id: LinkId, reason: &str) {
@@ -1762,6 +1885,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
         self.announcement_room_links.remove(&link_id);
         self.slow_mode_links.remove(&link_id);
         self.room_media_policy_links.remove(&link_id);
+        self.nickname_colour_links.remove(&link_id);
     }
 
     fn discard_pending_uploads_for_identity(&mut self, identity_hash: &[u8]) -> usize {
@@ -3648,6 +3772,99 @@ mod tests {
             .collect::<Vec<_>>();
         recipients.sort_unstable();
         assert_eq!(recipients, vec![origin_link, capable_link]);
+    }
+
+    #[test]
+    fn nickname_colour_event_fanout_is_negotiated_and_deduplicated_across_shared_rooms() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let lobby = store
+            .room_by_name("lobby")
+            .expect("lobby lookup")
+            .expect("lobby");
+        let second = store.create_room("second", None).expect("second room");
+        let actor = store
+            .ensure_user(b"colour-actor", "Actor", None)
+            .expect("actor");
+        let observer = store
+            .ensure_user(b"colour-observer", "Observer", None)
+            .expect("observer");
+        let legacy = store
+            .ensure_user(b"colour-legacy", "Legacy", None)
+            .expect("legacy");
+        for user_id in [actor.user_id, observer.user_id, legacy.user_id] {
+            store.join_room(lobby.room_id, user_id).expect("join lobby");
+            store
+                .join_room(second.room_id, user_id)
+                .expect("join second room");
+        }
+
+        let actor_link = [0xa1; 16];
+        let observer_link = [0xa2; 16];
+        let legacy_link = [0xa3; 16];
+        let actor_peer = ServerPeer {
+            identity_hash: b"colour-actor".to_vec(),
+            display_name: "Actor".into(),
+            lxmf_destination: None,
+        };
+        let mut live =
+            OmenchatLiveServer::new(SessionEngine::new(store), CapturedTransport::default());
+        for (link_id, identity_hash, name) in [
+            (actor_link, b"colour-actor".as_slice(), "Actor"),
+            (observer_link, b"colour-observer".as_slice(), "Observer"),
+            (legacy_link, b"colour-legacy".as_slice(), "Legacy"),
+        ] {
+            live.peers.insert(
+                link_id,
+                ServerPeer {
+                    identity_hash: identity_hash.to_vec(),
+                    display_name: name.into(),
+                    lxmf_destination: None,
+                },
+            );
+            live.identified_links.insert(link_id);
+        }
+        live.nickname_colour_links
+            .insert(actor_link, actor_peer.identity_hash.clone());
+        live.nickname_colour_links
+            .insert(observer_link, b"colour-observer".to_vec());
+
+        let event = crate::protocol::NicknameColourEvent {
+            user_id: actor.user_id,
+            profile_revision: 1,
+            colour: Some(crate::protocol::Rgb24::new(0x12_34_56).expect("colour")),
+        };
+        let response = Frame::new(
+            ChatOp::NicknameColourEvent,
+            9,
+            None,
+            event.into_frame_body().expect("event body"),
+        );
+        live.broadcast_nickname_colour_event(&actor_peer, &response)
+            .expect("fanout");
+
+        let event_count = |link_id| {
+            live.transport()
+                .frames
+                .iter()
+                .filter(|captured| captured.link_id == link_id)
+                .filter_map(|captured| decode_frame(&captured.bytes).ok())
+                .filter(|frame| frame.op == ChatOp::NicknameColourEvent)
+                .count()
+        };
+        assert_eq!(event_count(actor_link), 1);
+        assert_eq!(event_count(observer_link), 1);
+        assert_eq!(
+            event_count(legacy_link),
+            0,
+            "legacy Links never receive the negotiated event"
+        );
+
+        live.handle_event(OmenchatLinkEvent::LinkClosed {
+            link_id: observer_link,
+            reason: Some("test replacement".into()),
+        })
+        .expect("close observer generation");
+        assert!(!live.nickname_colour_links.contains_key(&observer_link));
     }
 
     #[test]

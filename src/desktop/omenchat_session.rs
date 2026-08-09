@@ -15,6 +15,10 @@ impl DesktopApp {
             .map(|session| session.server.server_id.clone());
         self.omenchat.chat_drafts.remove(&session_id);
         self.omenchat.omenchat_reply_drafts.remove(&session_id);
+        #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+        self.omenchat
+            .omenchat_nickname_colour_editors
+            .remove(&session_id);
         self.omenchat.omenchat_selected_mentions.remove(&session_id);
         if self
             .omenchat

@@ -660,6 +660,8 @@ impl ChatStore for SqliteChatStore {
                     role_bits: row.get::<_, i64>(3)? as u64,
                     status_bits: row.get::<_, i64>(4)? as u32,
                     lxmf_available: row.get::<_, i64>(5)? != 0,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 })
             },
         )?;
@@ -2785,6 +2787,8 @@ mod tests {
                         role_bits: 1,
                         status_bits: 0,
                         lxmf_available: true,
+                        profile_revision: 0,
+                        nickname_colour_rgb: None,
                     },
                     ChatUserSummary {
                         server_id: server.server_id.clone(),
@@ -2793,6 +2797,8 @@ mod tests {
                         role_bits: 0,
                         status_bits: 0,
                         lxmf_available: false,
+                        profile_revision: 0,
+                        nickname_colour_rgb: None,
                     },
                 ],
             )
@@ -2815,6 +2821,8 @@ mod tests {
                     role_bits: 0,
                     status_bits: 0,
                     lxmf_available: false,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 }],
             )
             .expect("replace userlist again");
@@ -2880,6 +2888,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             })
             .collect();
         store
@@ -2977,6 +2987,8 @@ mod tests {
                         role_bits: 0,
                         status_bits: 0,
                         lxmf_available: false,
+                        profile_revision: 0,
+                        nickname_colour_rgb: None,
                     },
                     ChatUserSummary {
                         server_id: server.server_id.clone(),
@@ -2985,6 +2997,8 @@ mod tests {
                         role_bits: 0,
                         status_bits: 0,
                         lxmf_available: false,
+                        profile_revision: 0,
+                        nickname_colour_rgb: None,
                     },
                 ],
             )
@@ -3024,6 +3038,8 @@ mod tests {
                     role_bits: 1,
                     status_bits: 0,
                     lxmf_available: true,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 }],
             )
             .expect("users");

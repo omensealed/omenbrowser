@@ -15,14 +15,16 @@ use crate::protocol::{
     parse_session_open_negotiation, with_session_accept_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, Compression, DurableMutationEnvelope, Frame, FrameBody, FrameValue,
     MessageRevisionAck, MessageRevisionRequest, MessageRevisionSnapshot, ModerationAuditAction,
-    ModerationAuditRequest, PinAck, PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot,
-    RichMessageBody, RichMessageEventMetadata, RoomCatalogEntry, RoomCatalogShape, RoomId,
-    SessionAcceptNegotiation, UserId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
+    ModerationAuditRequest, NicknameColourAck, NicknameColourEvent, NicknameColourSet, PinAck,
+    PinRequest, ReactionAck, ReactionRequest, ReactionSnapshot, RichMessageBody,
+    RichMessageEventMetadata, RoomCatalogEntry, RoomCatalogShape, RoomId, SessionAcceptNegotiation,
+    UserId, ANNOUNCEMENT_ROOMS_CAPABILITY, DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY,
-    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, MODERATION_AUDIT_CAPABILITY, PROTOCOL_NAME,
-    REACTIONS_CAPABILITY, REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG,
-    REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY, ROOM_PINS_CAPABILITY,
-    ROOM_PIN_SNAPSHOT_MAX_TARGETS, ROOM_SLOW_MODE_CAPABILITY,
+    MESSAGE_REVISION_SNAPSHOT_MAX_TARGETS, MODERATION_AUDIT_CAPABILITY,
+    NICKNAME_COLOURS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY,
+    REACTION_SNAPSHOT_MAX_TARGETS, REPLY_MENTIONS_BODY_TAG, REPLY_MENTIONS_CAPABILITY,
+    ROOM_MEDIA_POLICY_CAPABILITY, ROOM_PINS_CAPABILITY, ROOM_PIN_SNAPSHOT_MAX_TARGETS,
+    ROOM_SLOW_MODE_CAPABILITY,
 };
 use crate::store::durable_replay::{
     DurableMutationEffectCommit, DurableMutationEffectPlan, DurableMutationKey,
@@ -118,6 +120,7 @@ impl SessionLimits {
 enum RateKind {
     Message,
     Command,
+    NicknameColour,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -284,6 +287,11 @@ struct DurablePinEffect {
     admission: Option<RateReservation>,
 }
 
+struct DurableNicknameColourEffect {
+    broadcast: Option<Frame>,
+    admission: Option<RateReservation>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingUpload {
     identity_hash: Vec<u8>,
@@ -419,6 +427,15 @@ impl PendingUploadStore {
 }
 
 impl SessionEngine {
+    pub(crate) fn room_ids_for_identity(
+        &self,
+        identity_hash: &[u8],
+    ) -> ServerResult<std::collections::BTreeSet<RoomId>> {
+        let Some(user) = self.store.user_by_identity(identity_hash)? else {
+            return Ok(std::collections::BTreeSet::new());
+        };
+        self.store.room_ids_for_user(user.user_id)
+    }
     #[cfg(test)]
     pub(crate) fn pin_row_counts(&self) -> ServerResult<(i64, i64)> {
         self.store.pin_row_counts()
@@ -590,6 +607,37 @@ impl SessionEngine {
         Ok(shaped)
     }
 
+    pub(crate) fn shape_user_delta_for_colour_capability(
+        &self,
+        frame: &Frame,
+    ) -> ServerResult<Frame> {
+        if frame.op != ChatOp::UserDelta {
+            return Ok(frame.clone());
+        }
+        let user_id = match &frame.body {
+            FrameBody::Fields(values) => values
+                .first()
+                .and_then(|value| match value {
+                    FrameValue::Array(fields) => Some(fields.as_slice()),
+                    _ => None,
+                })
+                .and_then(|fields| match fields.first() {
+                    Some(FrameValue::U64(value)) => Some(*value),
+                    _ => None,
+                })
+                .and_then(|value| u32::try_from(value).ok()),
+            _ => None,
+        }
+        .ok_or_else(|| ServerError::Message("user delta shape is invalid".into()))?;
+        let user = self
+            .store
+            .user_by_id(user_id)?
+            .ok_or_else(|| ServerError::Message("user delta target is unavailable".into()))?;
+        let mut shaped = frame.clone();
+        shaped.body = FrameBody::Fields(vec![user_to_value_for_colour_capability(&user, true)]);
+        Ok(shaped)
+    }
+
     #[cfg(feature = "omenchat-slow-mode-qualification")]
     pub(crate) fn set_slow_mode_for_qualification(
         &self,
@@ -679,11 +727,34 @@ impl SessionEngine {
         moderation_audit_negotiated: bool,
         room_media_policy_negotiated: bool,
     ) -> ServerResult<Vec<Frame>> {
+        self.handle_frame_with_negotiated_features_and_nickname_colours(
+            peer,
+            frame,
+            active_room_peers,
+            moderation_audit_negotiated,
+            room_media_policy_negotiated,
+            false,
+        )
+    }
+
+    pub(crate) fn handle_frame_with_negotiated_features_and_nickname_colours(
+        &self,
+        peer: &ServerPeer,
+        frame: Frame,
+        active_room_peers: &[ServerPeer],
+        moderation_audit_negotiated: bool,
+        room_media_policy_negotiated: bool,
+        nickname_colours_negotiated: bool,
+    ) -> ServerResult<Vec<Frame>> {
         match frame.op {
             ChatOp::SessionOpen => self.handle_session_open(peer, frame.seq, frame.body),
-            ChatOp::JoinRoom => {
-                self.handle_join_room(peer, frame.seq, frame.body, active_room_peers)
-            }
+            ChatOp::JoinRoom => self.handle_join_room(
+                peer,
+                frame.seq,
+                frame.body,
+                active_room_peers,
+                nickname_colours_negotiated,
+            ),
             ChatOp::PartRoom => self.handle_part_room(peer, frame.seq, frame.room_id),
             ChatOp::RoomMessage => {
                 self.handle_room_text(peer, frame.seq, frame.room_id, frame.body, |body| {
@@ -881,7 +952,20 @@ impl SessionEngine {
         room_id: RoomId,
         active_room_peers: &[ServerPeer],
     ) -> ServerResult<Frame> {
-        let users = self.user_values_for_active_peers(room_id, active_room_peers)?;
+        self.active_userlist_frame_for_colour_capability(room_id, active_room_peers, false)
+    }
+
+    pub(crate) fn active_userlist_frame_for_colour_capability(
+        &self,
+        room_id: RoomId,
+        active_room_peers: &[ServerPeer],
+        nickname_colours_negotiated: bool,
+    ) -> ServerResult<Frame> {
+        let users = self.user_values_for_active_peers(
+            room_id,
+            active_room_peers,
+            nickname_colours_negotiated,
+        )?;
         Ok(Frame::new(
             self.batch_op(
                 ChatOp::UserListSnapshotInline,
@@ -1207,6 +1291,15 @@ impl SessionEngine {
             });
             if durable_requested && pins_requested && ROOM_PINS_SERVER_ENABLED {
                 accepted_capabilities.push(ROOM_PINS_CAPABILITY.into());
+            }
+            let nickname_colours_requested = negotiation.as_ref().is_some_and(|negotiation| {
+                negotiation
+                    .requested_capabilities
+                    .iter()
+                    .any(|capability| capability == NICKNAME_COLOURS_CAPABILITY)
+            });
+            if durable_requested && nickname_colours_requested {
+                accepted_capabilities.push(NICKNAME_COLOURS_CAPABILITY.into());
             }
             response_body = with_session_accept_negotiation(
                 response_body,
@@ -1665,6 +1758,7 @@ impl SessionEngine {
         seq: u32,
         body: FrameBody,
         active_room_peers: &[ServerPeer],
+        nickname_colours_negotiated: bool,
     ) -> ServerResult<Vec<Frame>> {
         let Some(user) = self.ensure_allowed_peer(peer, seq, None)? else {
             return Ok(vec![self.error_frame(
@@ -1685,7 +1779,12 @@ impl SessionEngine {
         };
         self.store.join_room(room.room_id, user.user_id)?;
 
-        let users = self.user_values_for_join(room.room_id, user, active_room_peers)?;
+        let users = self.user_values_for_join(
+            room.room_id,
+            user,
+            active_room_peers,
+            nickname_colours_negotiated,
+        )?;
         let events = self
             .store
             .latest_events(room.room_id, self.limits.join_backlog_events)?
@@ -2340,6 +2439,176 @@ impl SessionEngine {
             DurableRoomEventCommit::Expired => Ok(self.durable_error_dispatch(
                 seq,
                 Some(room_id),
+                ChatErrorCode::DurableMutationResultExpired,
+                "durable client instance has expired replay state",
+            )),
+        }
+    }
+
+    pub(crate) fn handle_durable_nickname_colour(
+        &self,
+        peer: &ServerPeer,
+        seq: u32,
+        client_instance_id: ClientInstanceId,
+        envelope: DurableMutationEnvelope,
+    ) -> ServerResult<DurableMutationDispatch> {
+        let canonical_hash = match canonical_mutation_request_hash(
+            ChatOp::NicknameColourSet,
+            None,
+            &envelope.body,
+        ) {
+            Ok(hash) => hash,
+            Err(_) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    None,
+                    ChatErrorCode::DurableMutationMalformed,
+                    "nickname colour body exceeds canonical bounds",
+                ))
+            }
+        };
+        if canonical_hash != envelope.request_hash {
+            return Ok(self.durable_error_dispatch(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationMalformed,
+                "nickname colour hash does not match its canonical body",
+            ));
+        }
+        let request = match NicknameColourSet::from_frame_body(&envelope.body) {
+            Ok(request) => request,
+            Err(_) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    None,
+                    ChatErrorCode::DurableMutationMalformed,
+                    "nickname colour request is malformed",
+                ))
+            }
+        };
+        let key = DurableMutationKey {
+            identity_hash: &peer.identity_hash,
+            client_instance_id,
+            mutation_id: envelope.mutation_id,
+        };
+        let commit = self.store.commit_durable_mutation_effect_result(
+            key,
+            envelope.request_hash,
+            |transaction| {
+                let user = OmenchatStore::ensure_durable_user(
+                    transaction,
+                    &peer.identity_hash,
+                    &peer.display_name,
+                    peer.lxmf_destination.as_deref(),
+                )?;
+                let admission = match self.reserve_rate(peer, RateKind::NicknameColour)? {
+                    RateAdmission::Admitted(admission) => admission,
+                    RateAdmission::Rejected => {
+                        return Ok(DurableMutationEffectPlan::Response {
+                            result_frame: self.encode_durable_result(self.error_frame(
+                                seq,
+                                None,
+                                ChatErrorCode::RateLimited,
+                                "nickname colour rate limit exceeded",
+                            ))?,
+                        })
+                    }
+                };
+                let (user, changed) = OmenchatStore::set_durable_nickname_colour(
+                    transaction,
+                    user.user_id,
+                    request.colour,
+                )?;
+                let ack = NicknameColourAck {
+                    mutation_id: envelope.mutation_id,
+                    profile_revision: user.profile_revision,
+                    colour: user.nickname_colour_rgb,
+                };
+                let broadcast = changed
+                    .then_some(NicknameColourEvent {
+                        user_id: user.user_id,
+                        profile_revision: user.profile_revision,
+                        colour: user.nickname_colour_rgb,
+                    })
+                    .map(|event| {
+                        Ok::<Frame, ServerError>(Frame::new(
+                            ChatOp::NicknameColourEvent,
+                            seq,
+                            None,
+                            event.into_frame_body().map_err(|error| {
+                                ServerError::Message(format!(
+                                    "nickname colour event encode failed: {error}"
+                                ))
+                            })?,
+                        ))
+                    })
+                    .transpose()?;
+                Ok(DurableMutationEffectPlan::Effect {
+                    result_frame: self.encode_durable_result(Frame::new(
+                        ChatOp::NicknameColourAck,
+                        seq,
+                        None,
+                        ack.into_frame_body(),
+                    ))?,
+                    effect: DurableNicknameColourEffect {
+                        broadcast,
+                        admission,
+                    },
+                })
+            },
+        );
+        let commit = match commit {
+            Ok(commit) => commit,
+            Err(ServerError::Sqlite(error)) if sqlite_is_busy(&error) => {
+                return Ok(self.durable_error_dispatch(
+                    seq,
+                    None,
+                    ChatErrorCode::DurableMutationStoreBusy,
+                    "durable mutation store is busy",
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        match commit {
+            DurableMutationEffectCommit::Stored {
+                result_frame,
+                effect,
+                pruned,
+            } => {
+                if let Some(admission) = effect.admission {
+                    admission.commit();
+                }
+                Ok(DurableMutationDispatch {
+                    origin: decode_durable_result(&result_frame)?,
+                    broadcasts: effect.broadcast.into_iter().collect(),
+                    disconnect_identity: None,
+                    pruned,
+                })
+            }
+            DurableMutationEffectCommit::StoredResponse {
+                result_frame,
+                pruned,
+            } => Ok(DurableMutationDispatch {
+                origin: decode_durable_result(&result_frame)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned,
+            }),
+            DurableMutationEffectCommit::Replayed { result_frame } => Ok(DurableMutationDispatch {
+                origin: decode_durable_replay_result(&result_frame, seq)?,
+                broadcasts: Vec::new(),
+                disconnect_identity: None,
+                pruned: 0,
+            }),
+            DurableMutationEffectCommit::Conflict => Ok(self.durable_error_dispatch(
+                seq,
+                None,
+                ChatErrorCode::DurableMutationConflict,
+                "durable mutation id was reused with different content",
+            )),
+            DurableMutationEffectCommit::Expired => Ok(self.durable_error_dispatch(
+                seq,
+                None,
                 ChatErrorCode::DurableMutationResultExpired,
                 "durable client instance has expired replay state",
             )),
@@ -4143,17 +4412,27 @@ impl SessionEngine {
         room_id: RoomId,
         joined_user: ServerUser,
         active_room_peers: &[ServerPeer],
+        nickname_colours_negotiated: bool,
     ) -> ServerResult<Vec<FrameValue>> {
         if active_room_peers.is_empty() {
             return self
                 .store
                 .users_for_room(room_id)?
                 .into_iter()
-                .map(|user| Ok(user_to_value(&user)))
+                .map(|user| {
+                    Ok(user_to_value_for_colour_capability(
+                        &user,
+                        nickname_colours_negotiated,
+                    ))
+                })
                 .collect();
         }
 
-        let mut users = self.user_values_for_active_peers(room_id, active_room_peers)?;
+        let mut users = self.user_values_for_active_peers(
+            room_id,
+            active_room_peers,
+            nickname_colours_negotiated,
+        )?;
         if !users.iter().any(|value| {
             matches!(
                 value,
@@ -4161,7 +4440,10 @@ impl SessionEngine {
                     if fields.first() == Some(&FrameValue::U64(joined_user.user_id as u64))
             )
         }) {
-            users.push(user_to_value(&joined_user));
+            users.push(user_to_value_for_colour_capability(
+                &joined_user,
+                nickname_colours_negotiated,
+            ));
         }
         Ok(users)
     }
@@ -4170,6 +4452,7 @@ impl SessionEngine {
         &self,
         room_id: RoomId,
         active_room_peers: &[ServerPeer],
+        nickname_colours_negotiated: bool,
     ) -> ServerResult<Vec<FrameValue>> {
         let mut users = Vec::new();
         let mut seen_hashes = Vec::<Vec<u8>>::new();
@@ -4187,7 +4470,10 @@ impl SessionEngine {
                 .cmp(&right.display_name)
                 .then_with(|| left.user_id.cmp(&right.user_id))
         });
-        Ok(users.iter().map(user_to_value).collect())
+        Ok(users
+            .iter()
+            .map(|user| user_to_value_for_colour_capability(user, nickname_colours_negotiated))
+            .collect())
     }
 
     fn handle_history_before(
@@ -4878,6 +5164,7 @@ impl SessionEngine {
                 let message = match kind {
                     RateKind::Message => "message rate limit exceeded",
                     RateKind::Command => "command rate limit exceeded",
+                    RateKind::NicknameColour => "nickname colour rate limit exceeded",
                 };
                 Ok(Some(self.error_frame(
                     seq,
@@ -4893,6 +5180,7 @@ impl SessionEngine {
         let limit = match kind {
             RateKind::Message => self.limits.rate_messages_per_minute,
             RateKind::Command => self.limits.rate_commands_per_minute,
+            RateKind::NicknameColour => 6,
         };
         if limit == 0 {
             return Ok(RateAdmission::Admitted(None));
@@ -5663,6 +5951,24 @@ fn user_to_value(user: &ServerUser) -> FrameValue {
         FrameValue::U64(user.status_bits as u64),
         FrameValue::Bool(user.lxmf_destination.is_some()),
     ])
+}
+
+fn user_to_value_for_colour_capability(user: &ServerUser, negotiated: bool) -> FrameValue {
+    let mut fields = vec![
+        FrameValue::U64(user.user_id as u64),
+        FrameValue::String(user.display_name.clone()),
+        FrameValue::U64(user.role_bits),
+        FrameValue::U64(user.status_bits as u64),
+        FrameValue::Bool(user.lxmf_destination.is_some()),
+    ];
+    if negotiated {
+        fields.push(
+            user.nickname_colour_rgb
+                .map(|colour| FrameValue::U64(u64::from(colour.get())))
+                .unwrap_or(FrameValue::Nil),
+        );
+    }
+    FrameValue::Array(fields)
 }
 
 fn user_delta_frame(seq: u32, room_id: Option<RoomId>, user: &ServerUser) -> Frame {
@@ -9036,6 +9342,186 @@ mod tests {
             crate::protocol::parse_session_accept_negotiation(&legacy[0].body),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn nickname_colours_require_explicit_durable_negotiation() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let request = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    NICKNAME_COLOURS_CAPABILITY.into(),
+                ],
+                client_instance_id: Some(ClientInstanceId::new([31; 16])),
+            },
+        )
+        .expect("nickname colour request");
+        let response = engine
+            .handle_frame(&peer(), Frame::new(ChatOp::SessionOpen, 1, None, request))
+            .expect("session open");
+        assert_eq!(
+            crate::protocol::parse_session_accept_negotiation(&response[0].body),
+            Ok(Some(SessionAcceptNegotiation {
+                accepted_capabilities: vec![
+                    DURABLE_MUTATION_CAPABILITY.into(),
+                    NICKNAME_COLOURS_CAPABILITY.into(),
+                ],
+            }))
+        );
+
+        let colour_only = crate::protocol::with_session_open_negotiation(
+            FrameBody::Text("Alice".into()),
+            &crate::protocol::SessionOpenNegotiation {
+                requested_capabilities: vec![NICKNAME_COLOURS_CAPABILITY.into()],
+                client_instance_id: Some(ClientInstanceId::new([32; 16])),
+            },
+        );
+        assert_eq!(
+            colour_only,
+            Err(crate::protocol::SessionNegotiationError::MissingNicknameColoursDependency)
+        );
+    }
+
+    #[test]
+    fn nickname_colour_user_catalog_preserves_exact_legacy_shape() {
+        let user = ServerUser {
+            user_id: 4,
+            identity_hash: vec![1; 16],
+            display_name: "Alice".into(),
+            role_bits: 2,
+            status_bits: 3,
+            lxmf_destination: Some("lxmf".into()),
+            profile_revision: 7,
+            nickname_colour_rgb: Some(crate::protocol::Rgb24::new(0x12_34_56).expect("colour")),
+        };
+        assert_eq!(
+            user_to_value_for_colour_capability(&user, false),
+            FrameValue::Array(vec![
+                FrameValue::U64(4),
+                FrameValue::String("Alice".into()),
+                FrameValue::U64(2),
+                FrameValue::U64(3),
+                FrameValue::Bool(true),
+            ])
+        );
+        assert_eq!(
+            user_to_value_for_colour_capability(&user, true),
+            FrameValue::Array(vec![
+                FrameValue::U64(4),
+                FrameValue::String("Alice".into()),
+                FrameValue::U64(2),
+                FrameValue::U64(3),
+                FrameValue::Bool(true),
+                FrameValue::U64(0x12_34_56),
+            ])
+        );
+    }
+
+    #[test]
+    fn durable_nickname_colour_replays_exact_ack_without_second_revision_or_broadcast() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let client = ClientInstanceId::new([33; 16]);
+        let body = crate::protocol::NicknameColourSet {
+            colour: Some(crate::protocol::Rgb24::new(0x12_34_56).expect("colour")),
+        }
+        .into_frame_body();
+        let envelope =
+            durable_envelope_optional_room(ChatOp::NicknameColourSet, None, 34, body.clone());
+        let first = engine
+            .handle_durable_nickname_colour(&peer(), 7, client, envelope.clone())
+            .expect("first colour mutation");
+        assert_eq!(first.origin.op, ChatOp::NicknameColourAck);
+        assert_eq!(first.broadcasts.len(), 1);
+        let first_ack = crate::protocol::NicknameColourAck::from_frame_body(&first.origin.body)
+            .expect("first ack");
+        assert_eq!(first_ack.profile_revision, 1);
+
+        let replay = engine
+            .handle_durable_nickname_colour(&peer(), 8, client, envelope)
+            .expect("replayed colour mutation");
+        assert_eq!(replay.origin.op, ChatOp::NicknameColourAck);
+        assert!(replay.broadcasts.is_empty());
+        let replay_ack = crate::protocol::NicknameColourAck::from_frame_body(&replay.origin.body)
+            .expect("replay ack");
+        assert_eq!(replay_ack, first_ack);
+        let user = engine
+            .store
+            .user_by_identity(&peer().identity_hash)
+            .expect("user query")
+            .expect("user");
+        assert_eq!(user.profile_revision, 1);
+
+        let conflict = engine
+            .handle_durable_nickname_colour(
+                &peer(),
+                9,
+                client,
+                durable_envelope_optional_room(
+                    ChatOp::NicknameColourSet,
+                    None,
+                    34,
+                    crate::protocol::NicknameColourSet { colour: None }.into_frame_body(),
+                ),
+            )
+            .expect("conflicting mutation");
+        assert_eq!(
+            frame_error_code(&conflict.origin),
+            Some(ChatErrorCode::DurableMutationConflict as u16 as u64)
+        );
+    }
+
+    #[test]
+    fn nickname_colour_rate_budget_is_bounded_per_authenticated_user() {
+        let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
+        let client = ClientInstanceId::new([35; 16]);
+        for marker in 1_u8..=6 {
+            let colour = crate::protocol::Rgb24::new(u32::from(marker)).expect("colour");
+            let dispatch = engine
+                .handle_durable_nickname_colour(
+                    &peer(),
+                    u32::from(marker),
+                    client,
+                    durable_envelope_optional_room(
+                        ChatOp::NicknameColourSet,
+                        None,
+                        marker,
+                        crate::protocol::NicknameColourSet {
+                            colour: Some(colour),
+                        }
+                        .into_frame_body(),
+                    ),
+                )
+                .expect("admitted colour change");
+            assert_eq!(dispatch.origin.op, ChatOp::NicknameColourAck);
+        }
+        let rejected = engine
+            .handle_durable_nickname_colour(
+                &peer(),
+                7,
+                client,
+                durable_envelope_optional_room(
+                    ChatOp::NicknameColourSet,
+                    None,
+                    7,
+                    crate::protocol::NicknameColourSet {
+                        colour: Some(crate::protocol::Rgb24::new(7).expect("colour")),
+                    }
+                    .into_frame_body(),
+                ),
+            )
+            .expect("rate rejection");
+        assert_eq!(
+            frame_error_code(&rejected.origin),
+            Some(ChatErrorCode::RateLimited as u16 as u64)
+        );
+        let user = engine
+            .store
+            .user_by_identity(&peer().identity_hash)
+            .expect("user query")
+            .expect("user");
+        assert_eq!(user.profile_revision, 6);
     }
 
     #[test]

@@ -1,5 +1,9 @@
 //! Shared OMENchat protocol v1 wire types and compatibility fixtures.
 //!
+//! Crate API version `0.2.0` adds typed, explicitly negotiated nickname-colour
+//! forms. It does not change [`PROTOCOL_VERSION`], [`PROTOCOL_NAME`], or any
+//! legacy frame/user-list shape.
+//!
 //! This crate deliberately contains no transport, runtime, storage, GUI, TUI,
 //! or server policy.
 
@@ -7,6 +11,7 @@ mod durable;
 mod message_revisions;
 mod moderation_audit;
 mod negotiation;
+mod nickname_colours;
 mod pins;
 mod reactions;
 mod rich_message;
@@ -16,6 +21,7 @@ pub use durable::*;
 pub use message_revisions::*;
 pub use moderation_audit::*;
 pub use negotiation::*;
+pub use nickname_colours::*;
 pub use pins::*;
 pub use reactions::*;
 pub use rich_message::*;
@@ -36,19 +42,20 @@ pub const PROTOCOL_NAME: &str = "omenchat-v0.1";
 /// Product-feature-gated room policy and moderation capabilities are appended
 /// separately. Keeping this list in the shared wire crate lets both workspaces
 /// detect capability drift without duplicating string literals.
-pub const BASE_DURABLE_SESSION_CAPABILITIES: [&str; 6] = [
+pub const BASE_DURABLE_SESSION_CAPABILITIES: [&str; 7] = [
     DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY,
     REPLY_MENTIONS_CAPABILITY,
     REACTIONS_CAPABILITY,
     MESSAGE_REVISIONS_CAPABILITY,
     ROOM_PINS_CAPABILITY,
+    NICKNAME_COLOURS_CAPABILITY,
 ];
 
 /// Complete capability vocabulary implemented by the current protocol-v1
 /// client/server pair. Negotiation remains explicit; this is not an
 /// advertisement and does not activate a capability by itself.
-pub const KNOWN_SESSION_CAPABILITIES: [&str; 10] = [
+pub const KNOWN_SESSION_CAPABILITIES: [&str; 11] = [
     DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY,
     REPLY_MENTIONS_CAPABILITY,
@@ -59,6 +66,7 @@ pub const KNOWN_SESSION_CAPABILITIES: [&str; 10] = [
     ROOM_SLOW_MODE_CAPABILITY,
     ROOM_MEDIA_POLICY_CAPABILITY,
     MODERATION_AUDIT_CAPABILITY,
+    NICKNAME_COLOURS_CAPABILITY,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +134,9 @@ pub enum ChatOp {
     UploadFetch = 74,
     UploadResourceOffer = 75,
     UploadInlineChunk = 76,
+    NicknameColourSet = 77,
+    NicknameColourAck = 78,
+    NicknameColourEvent = 79,
     Error = 90,
     Ping = 100,
     Pong = 101,
@@ -191,6 +202,9 @@ impl TryFrom<u64> for ChatOp {
             74 => Ok(Self::UploadFetch),
             75 => Ok(Self::UploadResourceOffer),
             76 => Ok(Self::UploadInlineChunk),
+            77 => Ok(Self::NicknameColourSet),
+            78 => Ok(Self::NicknameColourAck),
+            79 => Ok(Self::NicknameColourEvent),
             90 => Ok(Self::Error),
             100 => Ok(Self::Ping),
             101 => Ok(Self::Pong),
@@ -379,6 +393,9 @@ mod tests {
         assert_eq!(ChatOp::PinSnapshot as u16, 49);
         assert_eq!(ChatOp::ModerationAuditBefore as u16, 52);
         assert_eq!(ChatOp::ModerationAuditEnd as u16, 55);
+        assert_eq!(ChatOp::NicknameColourSet as u16, 77);
+        assert_eq!(ChatOp::NicknameColourAck as u16, 78);
+        assert_eq!(ChatOp::NicknameColourEvent as u16, 79);
         assert_eq!(ChatErrorCode::MalformedFrame as u16, 1007);
         assert_eq!(ChatErrorCode::DurableMutationNotNegotiated as u16, 1011);
         assert_eq!(DURABLE_MUTATION_CAPABILITY, "durable-mutations-v1");
@@ -389,6 +406,7 @@ mod tests {
         assert_eq!(ANNOUNCEMENT_ROOMS_CAPABILITY, "announcement-rooms-v1");
         assert_eq!(ROOM_SLOW_MODE_CAPABILITY, "room-slow-mode-v1");
         assert_eq!(ROOM_MEDIA_POLICY_CAPABILITY, "room-media-policy-v1");
+        assert_eq!(NICKNAME_COLOURS_CAPABILITY, "nickname-colours-v1");
         assert_eq!(ROOM_UPLOAD_MAX_FILE_BYTES, 10 * 1024 * 1024);
         assert_eq!(DURABLE_NOTICE_ACK_CAPABILITY, "durable-room-notice-ack-v1");
         assert_eq!(ChatErrorCode::DurableMutationMalformed as u16, 1012);

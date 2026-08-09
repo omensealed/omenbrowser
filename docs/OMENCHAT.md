@@ -45,7 +45,10 @@ five-second caches; moderation mutations and transactional stale-user pruning
 complete asynchronously through the same worker. The command-driven line
 console waits synchronously on that same bounded owner. Upload-ledger repair
 still uses its existing synchronous maintenance path.
-The current schema is recorded as SQLite `user_version = 8`. Version 2 adds an
+The current schema is recorded as SQLite `user_version = 14`. The following
+version-by-version paragraphs retain the migration history; capability states
+described as dormant at an earlier checkpoint are superseded by the
+authoritative production matrix in `docs/OMENCHAT_PROTOCOL.md`. Version 2 adds an
 actor/time index for upload quota planning. Version 3 adds the
 durable-mutation replay table and creation-order index. Version 4 adds nullable
 reply-event and bounded mention-ID metadata plus a partial reply index. The
@@ -204,7 +207,7 @@ workspace currently represents LXMF conversations, not OMENchat sessions, so
 it does not display OMENchat reaction state.
 Before migrating a non-empty older database, omenchatd creates an owner-only
 SQLite-consistent sibling backup named
-`omenchat.sqlite.pre-v10-from-v<old>.bak`. It never overwrites an existing backup;
+`omenchat.sqlite.pre-v14-from-v<old>.bak`. It never overwrites an existing backup;
 backup failure aborts migration, and a successful backup is retained for
 operator recovery.
 Schema statements and the version update share one immediate transaction, so a
@@ -217,6 +220,14 @@ copy must migrate and pass SQLite integrity/foreign-key checks before atomic
 publication. The selected source remains unchanged and the prior active
 database is retained as an owner-only `pre-restore` backup. Operators must run
 `doctor` before restarting.
+
+Schema 14 adds nullable, checked `users.nickname_colour_rgb` while reusing the
+existing `profile_revision`. `NULL` means deterministic automatic presentation;
+the migration does not backfill random values or rewrite identities. The
+negotiated mutation is self-only, rate bounded, transactionally coupled to its
+durable replay result, and broadcasts only on an actual change. Rolling back to
+v0.9.8-3 requires restoring the automatic schema-13 pre-migration backup before
+starting the old binary.
 
 An offline non-destructive schema-9 downgrade artifact can be created with
 `omenchatd database export-schema9-copy --to <new-path> --confirm --home

@@ -10,8 +10,8 @@ use crate::chat::mutation_intents::{
     OwnedPrepareOutboundMutation,
 };
 use crate::chat::protocol::{
-    ChatOp, FrameBody, MessageRevisionRequest, MutationId, PinAction, PinRequest, ReactionAction,
-    ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
+    ChatOp, FrameBody, MessageRevisionRequest, MutationId, NicknameColourSet, PinAction,
+    PinRequest, ReactionAction, ReactionRequest, ReactionToken, ReplyReference, RichMessageBody,
 };
 use crate::chat::{ChatClientEvent, ChatEventKind, ChatSessionId};
 
@@ -26,6 +26,112 @@ use super::{
 const DURABLE_MUTATION_INTENT_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 impl DesktopApp {
+    pub(in crate::desktop) fn apply_omenchat_nickname_colour(
+        &mut self,
+        session_id: ChatSessionId,
+    ) -> Task<Message> {
+        if !self
+            .omenchat
+            .omenchat_live_state
+            .nickname_colours_negotiated(session_id)
+        {
+            self.set_omenchat_session_status(
+                session_id,
+                "persistent nickname colours are unavailable on this server; automatic local colours remain active"
+                    .into(),
+            );
+            return Task::none();
+        }
+        let colour = match self
+            .omenchat
+            .omenchat_nickname_colour_editors
+            .get(&session_id)
+        {
+            Some(editor) if editor.input.trim().is_empty() => editor.selected,
+            Some(editor) => match crate::chat::nickname_colours::parse_rgb_hex(&editor.input) {
+                Ok([red, green, blue]) => {
+                    let packed = (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
+                    match crate::chat::protocol::Rgb24::new(packed) {
+                        Ok(colour) => Some(colour),
+                        Err(_) => {
+                            self.set_omenchat_session_status(
+                                session_id,
+                                "nickname colour exceeds #FFFFFF".into(),
+                            );
+                            return Task::none();
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.set_omenchat_session_status(session_id, error.into());
+                    return Task::none();
+                }
+            },
+            None => None,
+        };
+        let Some(server_destination) = self
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .map(|session| session.server.destination.clone())
+        else {
+            self.set_omenchat_session_status(session_id, "OMENchat session is unavailable".into());
+            return Task::none();
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "nickname colour was not sent because durable mutation persistence is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let (Some(client_instance_id), Some(authenticated_identity_hash)) = (
+            self.omenchat.omenchat_live_state.client_instance_id(),
+            self.omenchat.omenchat_authenticated_identity_hash.clone(),
+        ) else {
+            self.set_omenchat_session_status(
+                session_id,
+                "nickname colour was not sent because durable mutation identity is unavailable"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let created_at = current_unix_seconds();
+        let reply = match worker.try_prepare(OwnedPrepareOutboundMutation {
+            server_destination,
+            authenticated_identity_hash,
+            client_instance_id,
+            op: ChatOp::NicknameColourSet,
+            room_id: None,
+            body: NicknameColourSet { colour }.into_frame_body(),
+            created_at,
+            expires_at: created_at.saturating_add(DURABLE_MUTATION_INTENT_LIFETIME_SECONDS),
+            correlation_id: None,
+        }) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!("nickname colour was not admitted for durable persistence: {error}"),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "persisting nickname colour intent before transmission".into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::Prepared {
+                    session_id,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
     pub(in crate::desktop) fn prepare_omenchat_reaction_mutation(
         &mut self,
         session_id: ChatSessionId,
@@ -1592,6 +1698,15 @@ impl DesktopApp {
                     session_id,
                     &intent,
                 ),
+                ChatOp::NicknameColourSet => {
+                    crate::chat::live::send_uncertain_durable_nickname_colour(
+                        &mut self.omenchat.chat_client,
+                        &mut self.omenchat.omenchat_live_state,
+                        transport,
+                        session_id,
+                        &intent,
+                    )
+                }
                 ChatOp::PartRoom => crate::chat::live::send_uncertain_durable_part_room(
                     &mut self.omenchat.chat_client,
                     &mut self.omenchat.omenchat_live_state,
@@ -2173,6 +2288,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: vec![ChatEvent {
                 server_id: "server".into(),

@@ -5,6 +5,42 @@ use iced::{Element, Font, Length};
 
 use super::super::*;
 
+fn nickname_colour_for_user(
+    desktop: &DesktopApp,
+    session: &crate::chat::ChatSessionView,
+    user_id: u32,
+) -> iced::Color {
+    let palette = desktop.theme().palette();
+    let background = iced_colour_bytes(palette.background);
+    let foreground = iced_colour_bytes(palette.text);
+    let requested = session
+        .users
+        .iter()
+        .find(|user| user.user_id == user_id)
+        .and_then(|user| user.nickname_colour_rgb)
+        .map(|colour| {
+            let value = colour.get();
+            [
+                ((value >> 16) & 0xff) as u8,
+                ((value >> 8) & 0xff) as u8,
+                (value & 0xff) as u8,
+            ]
+        })
+        .unwrap_or_else(|| {
+            crate::chat::nickname_colours::automatic_nickname_colour(
+                &session.server.server_id,
+                user_id,
+            )
+        });
+    let readable =
+        crate::chat::nickname_colours::readable_nickname_colour(requested, background, foreground);
+    iced::Color::from_rgb8(readable.rgb[0], readable.rgb[1], readable.rgb[2])
+}
+
+fn iced_colour_bytes(colour: iced::Color) -> [u8; 3] {
+    [colour.r, colour.g, colour.b].map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 const OMENCHAT_RECOVERED_INTENTS_VISIBLE_MAX: usize = 4;
 
@@ -44,6 +80,7 @@ fn recovered_mutation_operation(
             Err(_) => "pin mutation",
         },
         ChatOp::PartRoom => "leave room",
+        ChatOp::NicknameColourSet => "nickname colour",
         ChatOp::Command => match body {
             FrameBody::Text(command) => match command.split_whitespace().next() {
                 Some("topic") => "topic update",
@@ -711,8 +748,15 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         &pins,
         &authoritative_pin_targets,
     ) {
+        let actor_colour = group
+            .actor_user_id
+            .map(|user_id| nickname_colour_for_user(desktop, session, user_id));
+        let actor_text = match actor_colour {
+            Some(colour) => text(group.actor).size(ui_size(12)).color(colour),
+            None => text(group.actor).size(ui_size(12)),
+        };
         let header = row![
-            text(group.actor).size(ui_size(12)),
+            actor_text,
             text(chat_event_time_label(group.at_unix)).size(ui_size(11)),
         ]
         .spacing(8)
@@ -932,6 +976,23 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 group_content.push(body_element)
             };
         }
+        let group_content: Element<'_, Message> = if let Some(colour) = actor_colour {
+            row![
+                container(text(""))
+                    .width(Length::Fixed(3.0))
+                    .height(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Color(colour)),
+                        ..Default::default()
+                    }),
+                group_content,
+            ]
+            .spacing(5)
+            .width(Length::Fill)
+            .into()
+        } else {
+            group_content.into()
+        };
         timeline = timeline.push(container(group_content).padding([2, 8]).width(Length::Fill));
     }
 
@@ -944,6 +1005,8 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         .chat_client
         .local_user_id(session.session_id);
     for user in unique_chat_users(&session.users) {
+        let colour = nickname_colour_for_user(desktop, session, user.user_id);
+        let swatch = text("●").size(ui_size(11)).color(colour);
         if rich_composer_available && Some(user.user_id) != local_user_id {
             let selected = desktop
                 .omenchat
@@ -956,7 +1019,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 user.display_label()
             };
             userlist = userlist.push(
-                button(text(label).size(ui_size(13)))
+                button(row![swatch, text(label).size(ui_size(13))].spacing(4))
                     .on_press(Message::OmenChat(OmenChatMessage::ToggleMention {
                         session_id: session.session_id,
                         user_id: user.user_id,
@@ -965,7 +1028,147 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     .style(inline_icon_button_style),
             );
         } else {
-            userlist = userlist.push(text(user.display_label()).size(ui_size(13)));
+            userlist = userlist.push(
+                row![swatch, text(user.display_label()).size(ui_size(13))]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+            );
+        }
+    }
+
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    {
+        let colours_available = desktop
+            .omenchat
+            .omenchat_live_state
+            .nickname_colours_negotiated(session.session_id);
+        userlist = userlist.push(
+            button(text("Nickname colour").size(ui_size(11)))
+                .on_press(Message::OmenChat(
+                    OmenChatMessage::ToggleNicknameColourEditor(session.session_id),
+                ))
+                .padding([3, 5])
+                .style(subtle_button_style),
+        );
+        if let Some(editor) = desktop
+            .omenchat
+            .omenchat_nickname_colour_editors
+            .get(&session.session_id)
+            .filter(|editor| editor.visible)
+        {
+            let mut controls = column![].spacing(5).width(Length::Fill);
+            if colours_available {
+                let preview_user_id = desktop
+                    .omenchat
+                    .chat_client
+                    .local_user_id(session.session_id)
+                    .unwrap_or_default();
+                let preview_name = session
+                    .users
+                    .iter()
+                    .find(|user| user.user_id == preview_user_id)
+                    .map(|user| user.display_name.as_str())
+                    .unwrap_or("Nickname");
+                let preview_requested = editor
+                    .selected
+                    .map(|colour| colour.get())
+                    .or_else(|| {
+                        crate::chat::nickname_colours::parse_rgb_hex(&editor.input)
+                            .ok()
+                            .map(|[red, green, blue]| {
+                                (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue)
+                            })
+                    })
+                    .map(|value| {
+                        [
+                            ((value >> 16) & 0xff) as u8,
+                            ((value >> 8) & 0xff) as u8,
+                            (value & 0xff) as u8,
+                        ]
+                    })
+                    .unwrap_or_else(|| {
+                        crate::chat::nickname_colours::automatic_nickname_colour(
+                            &session.server.server_id,
+                            preview_user_id,
+                        )
+                    });
+                let palette = desktop.theme().palette();
+                let preview = crate::chat::nickname_colours::readable_nickname_colour(
+                    preview_requested,
+                    iced_colour_bytes(palette.background),
+                    iced_colour_bytes(palette.text),
+                );
+                let preview_colour =
+                    iced::Color::from_rgb8(preview.rgb[0], preview.rgb[1], preview.rgb[2]);
+                let mut swatches = row![].spacing(3);
+                for value in [0x4FA3FF, 0x8BD450, 0xF2C14E, 0xE879F9, 0xFF7A59, 0x2DD4BF] {
+                    let Ok(colour) = crate::chat::protocol::Rgb24::new(value) else {
+                        continue;
+                    };
+                    let iced_colour = iced::Color::from_rgb8(
+                        ((value >> 16) & 0xff) as u8,
+                        ((value >> 8) & 0xff) as u8,
+                        (value & 0xff) as u8,
+                    );
+                    swatches = swatches.push(
+                        button(text("●").size(ui_size(15)).color(iced_colour))
+                            .on_press(Message::OmenChat(OmenChatMessage::SelectNicknameColour {
+                                session_id: session.session_id,
+                                colour: Some(colour),
+                            }))
+                            .padding(2)
+                            .style(inline_icon_button_style),
+                    );
+                }
+                let input_session_id = session.session_id;
+                controls = controls
+                    .push(
+                        text(format!("Preview: {preview_name}"))
+                            .size(ui_size(12))
+                            .color(preview_colour),
+                    )
+                    .push(swatches.wrap())
+                    .push(
+                        text_input("#RRGGBB", &editor.input)
+                            .on_input(move |value| {
+                                Message::OmenChat(OmenChatMessage::NicknameColourInputChanged {
+                                    session_id: input_session_id,
+                                    value,
+                                })
+                            })
+                            .size(ui_size(11))
+                            .padding(4),
+                    )
+                    .push(
+                        row![
+                            subtle_button(
+                                "Automatic",
+                                Message::OmenChat(OmenChatMessage::SelectNicknameColour {
+                                    session_id: session.session_id,
+                                    colour: None,
+                                }),
+                            ),
+                            button(text("Apply").size(ui_size(11)))
+                                .on_press(Message::OmenChat(OmenChatMessage::ApplyNicknameColour(
+                                    session.session_id
+                                ),))
+                                .padding([3, 6])
+                                .style(omen_button_style),
+                        ]
+                        .spacing(4),
+                    );
+            } else {
+                controls = controls.push(
+                    text("This server does not negotiate persistent nickname colours. Automatic local colours remain active.")
+                        .size(ui_size(10)),
+                );
+            }
+            userlist = userlist.push(
+                container(controls)
+                    .padding(5)
+                    .width(Length::Fill)
+                    .style(status_container_style),
+            );
         }
     }
 
@@ -1029,7 +1232,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             if room_uploads_disabled {
                 "Uploads disabled by room policy"
             } else if publish_allowed {
-                "Attach file"
+                "Attach file · direct/local Resources are supported; routed multi-hop retransmission is not qualified on Reticulum 0.9.8; retry manually only after route conditions change"
             } else {
                 "Read-only announcement room"
             }

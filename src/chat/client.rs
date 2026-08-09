@@ -2746,6 +2746,8 @@ mod tests {
             role_bits: 0,
             status_bits: 0,
             lxmf_available: false,
+            profile_revision: 0,
+            nickname_colour_rgb: None,
         });
         session.status = "s".repeat(CHAT_STATUS_MAX_BYTES + 1);
 
@@ -2801,6 +2803,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             })
             .collect();
 
@@ -2836,6 +2840,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             })
             .collect();
 
@@ -2895,6 +2901,8 @@ mod tests {
                 role_bits: 1,
                 status_bits: 0,
                 lxmf_available: true,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: vec![ChatEvent {
                 server_id: "server-a".into(),
@@ -3536,6 +3544,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: true,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "left #lobby".into(),

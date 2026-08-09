@@ -71,6 +71,8 @@ fn authorize_moderation_audit(desktop: &mut DesktopApp, session_id: ChatSessionI
         role_bits: crate::chat::CHAT_ROLE_MODERATOR,
         status_bits: 0,
         lxmf_available: false,
+        profile_revision: 0,
+        nickname_colour_rgb: None,
     }];
     assert!(desktop
         .omenchat
@@ -337,7 +339,58 @@ fn omenchat_inbound_resource_failure_releases_pending_offers_but_keeps_link() {
         .status;
     assert!(status.contains("failed"));
     assert!(status.contains("released 2 pending offer(s)"));
-    assert!(status.contains("retry history or reconnect"));
+    assert!(status.contains("no automatic retry occurred"));
+}
+
+#[test]
+fn omenchat_retry_exhaustion_reports_routed_limit_without_automatic_retry() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-omenchat-retry-exhausted");
+    let link_id = [0x83; 16];
+    let session_id = open_connected_session(&mut desktop, link_id, "waiting for attachment");
+    desktop
+        .omenchat
+        .omenchat_live_transports
+        .get_mut(&session_id)
+        .expect("live transport")
+        .defer_resource_offer("upload:pending", vec![0x01])
+        .expect("pending upload offer");
+    assert!(desktop
+        .app
+        .enqueue_runtime_event(RuntimeBusEvent::ResourceLifecycle(
+            ResourceLifecycleEvent {
+                transfer_id: "resource-hash".into(),
+                state: ResourceLifecycleState::Failed,
+                bytes: None,
+                reason: Some("retry_limit_exhausted".into()),
+                operation_id: None,
+                source: Some("omenchat".into()),
+                purpose: Some("omenchat-resource".into()),
+                direction: Some("inbound".into()),
+                peer: Some(hex_bytes(&link_id)),
+            },
+        )));
+    assert_eq!(desktop.app.drain_internal_events(), 1);
+
+    let _ = desktop.drain_omenchat_runtime_events();
+    let status = &desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session")
+        .status;
+    assert!(status.contains("current route"));
+    assert!(status.contains("attachment was not committed"));
+    assert!(status.contains("upstream 0.9.8"));
+    assert!(status.contains("no automatic retry occurred"));
+    assert_eq!(
+        desktop
+            .omenchat
+            .omenchat_live_transports
+            .get(&session_id)
+            .expect("link remains")
+            .pending_resource_offer_count(),
+        0
+    );
 }
 
 #[test]

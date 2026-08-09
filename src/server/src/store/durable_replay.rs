@@ -8,7 +8,8 @@ use super::{
 use crate::error::{ServerError, ServerResult};
 use crate::protocol::codec::decode_frame;
 use crate::protocol::{
-    ClientInstanceId, EventId, MutationId, RequestHash, RichMessageEventMetadata, RoomId, UserId,
+    ClientInstanceId, EventId, MutationId, RequestHash, Rgb24, RichMessageEventMetadata, RoomId,
+    UserId,
 };
 
 /// Maximum encoded origin response retained for one durable mutation.
@@ -249,7 +250,8 @@ impl OmenchatStore {
         transaction: &rusqlite::Transaction<'_>,
     ) -> ServerResult<Vec<ServerUser>> {
         let mut statement = transaction.prepare(
-            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                    profile_revision, nickname_colour_rgb
              FROM users
              ORDER BY display_name, user_id",
         )?;
@@ -292,13 +294,35 @@ impl OmenchatStore {
         Self::durable_user(transaction, user_id)
     }
 
+    pub(crate) fn set_durable_nickname_colour(
+        transaction: &rusqlite::Transaction<'_>,
+        user_id: UserId,
+        nickname_colour_rgb: Option<Rgb24>,
+    ) -> ServerResult<(ServerUser, bool)> {
+        let changed = transaction.execute(
+            "UPDATE users
+             SET nickname_colour_rgb = ?2,
+                 profile_revision = profile_revision + 1
+             WHERE user_id = ?1
+               AND nickname_colour_rgb IS NOT ?2",
+            rusqlite::params![user_id, nickname_colour_rgb.map(|colour| colour.get())],
+        )?;
+        if changed > 1 {
+            return Err(ServerError::Message(
+                "nickname colour update changed more than one user".into(),
+            ));
+        }
+        Ok((Self::durable_user(transaction, user_id)?, changed == 1))
+    }
+
     fn durable_user(
         transaction: &rusqlite::Transaction<'_>,
         user_id: UserId,
     ) -> ServerResult<ServerUser> {
         transaction
             .query_row(
-                "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+                "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                        profile_revision, nickname_colour_rgb
                  FROM users WHERE user_id = ?1",
                 [user_id as i64],
                 user_from_row,

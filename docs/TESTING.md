@@ -4272,7 +4272,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.8-3` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.8-4` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -4287,7 +4287,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.8-3` must report
+therefore exits with the expected signal status; current `0.9.8-4` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 
@@ -6101,3 +6101,50 @@ cargo test --locked --no-default-features --features desktop-product \
 cargo test --locked --no-default-features --features desktop-product \
   transient_native_browser_timeout_requires_explicit_retry
 ```
+
+## v0.9.8-4 negotiated nickname colours
+
+The local `omenchat-protocol` crate is API version 0.2.0 while the wire remains
+protocol version 1. Focused deterministic coverage is available with:
+
+```bash
+cargo test --locked --no-default-features --features desktop-product nickname_colour
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full nickname_colour
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-full \
+  schema_thirteen_migrates_to_fourteen_with_backup_and_preserved_identity
+```
+
+These tests cover strict RGB24 forms, deterministic automatic colours,
+theme-aware 4.5:1 contrast or foreground fallback, exact legacy five-field and
+negotiated six-field user entries, explicit durable set/reset, exact duplicate
+ack replay, no second revision/fan-out, self-only authorization, bounded rate
+admission, stale revision suppression, and schema-13 backup before schema-14
+migration. Mixed versions do not infer the feature: new clients derive an
+automatic local colour with old servers, while old clients receive the exact
+legacy user shape and no colour event.
+
+The routed multi-hop Resource retransmission boundary and maximum-UDP sentinel
+remain independent. Direct/local attachment success is not evidence for routed
+retransmission. Neither colour mutations nor attachments are automatically
+replayed after uncertain dispatch.
+
+Both expected-upstream boundaries remain separately visible in the server test
+inventory and fail when explicitly invoked on 0.9.8:
+
+```bash
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  reticulum_routed_resource_retransmission_survives_fragment_loss \
+  -- --ignored --nocapture
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
+  reticulum_udp_tx_buffer_covers_max_resource_wire_packet \
+  -- --ignored --nocapture
+```
+
+The routed sentinel names the environment-bound three-node fragment-loss
+conformance boundary and points to its exact topology/acceptance document; it
+is not a synthetic claim of transfer success. A future official train must run
+and pass the real topology before the sentinel is promoted.

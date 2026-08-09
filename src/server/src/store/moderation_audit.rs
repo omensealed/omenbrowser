@@ -359,6 +359,8 @@ mod tests {
             role_bits: 0,
             status_bits: 0,
             lxmf_destination: None,
+            profile_revision: 0,
+            nickname_colour_rgb: None,
         }
     }
 

@@ -9,10 +9,10 @@ OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
 and media payloads may use Reticulum resources. LXMF is reserved for private
 contact handoff and async notices, not normal room traffic.
 
-### v0.6.0-1 / v0.9.8-3 compatibility boundary
+### v0.6.0-1 / v0.9.8-4 compatibility boundary
 
 The application release number does not version the OMENchat wire protocol.
-The v0.9.8-3 release retains protocol version `1`, protocol name
+The v0.9.8-4 release retains protocol version `1`, protocol name
 `omenchat-v0.1`, the six-item MessagePack frame layout, operation numbers,
 legacy link context `0x4f`, and `omenchat-resource:` resource metadata.
 
@@ -48,6 +48,10 @@ new API surface. Their bounded codec implementations remain separate and both
 must pass the same shared fixture bytes. The crate contains no transport,
 runtime, storage, GUI, TUI, or server policy and remains part of the relocatable
 standalone omenchatd source tree.
+
+The local crate's API SemVer is `0.2.0`. That crate version is independent of
+the unchanged wire protocol version `1`; it identifies the addition of strict
+RGB24 and negotiated nickname-colour types for the two independent Cargo roots.
 
 The standalone server's quiet NomadNet portal is a separate Reticulum request
 surface. It accepts direct request-context packets for requests within packet
@@ -207,7 +211,7 @@ inbound frame carrying the `SessionOpen` operation number.
 ### Authoritative production capability matrix
 
 This table describes the canonical `desktop-product` client and
-`server-headless`/`server-full` server at 0.9.8-3. Capability names come from
+`server-headless`/`server-full` server at 0.9.8-4. Capability names come from
 `omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
 shared vocabulary, the client's request, and the canonical server's acceptance.
 Definition alone never activates a capability: each Link must request it and
@@ -225,6 +229,7 @@ receive explicit acceptance.
 | `room-slow-mode-v1` | yes | product feature | product feature with durable mutations | yes | room interval and bounded admission | interval/retry evidence | legacy fallback/rejection tests; prior-binary live lane separate | Production behavior |
 | `room-media-policy-v1` | yes | product feature | with durable + announcement + slow mode | yes | nullable room ceiling | attachment admission/effective limit | process and adjacent-shape fallback; prior-binary live lane separate | Production behavior |
 | `moderation-audit-v1` | yes | product feature | product feature | authorized read only | bounded audit records | moderator/administrator panel | downgrade/authorization tests; prior-binary live lane separate | Production behavior |
+| `nickname-colours-v1` | yes | yes | with durable mutations | yes | nullable RGB24 and profile revision | accessible actor text/accent, user-list swatch, explicit editor | exact five-field legacy fallback and negotiated six-field tests | Production behavior |
 
 Persistence means authoritative server or client recovery state survives
 restart; it does not mean unlimited retention. Every store, snapshot, page,
@@ -260,8 +265,29 @@ Exact fixtures pass in both independent codecs. Qualification clients and
 servers prove request/acceptance, authenticated-Link shape ownership,
 identity replacement cleanup, reconnect cleanup, and current/current
 projection over a real isolated Link. Canonical profiles now activate that
-reviewed boundary. omenchatd schema 13 stores the nullable room ceiling and
+reviewed boundary. omenchatd schema 14 stores the nullable room ceiling and
 provides a guarded schema-12 copy export.
+
+### Negotiated nickname colours
+
+`nickname-colours-v1` uses reserved protocol-v1 operations 77 (`Set`), 78
+(`Ack`), and 79 (`Event`). The durable Set body contains one RGB24 integer or
+`nil` for automatic. Ack contains the 16-byte mutation ID, resulting profile
+revision, and resulting RGB24-or-`nil`; Event contains user ID, profile
+revision, and RGB24-or-`nil`. Only the authenticated user may mutate their own
+preference. Exact durable replay returns the prior acknowledgement without a
+second revision or broadcast.
+
+Without explicit negotiation, user entries remain the exact five-field form
+`[user_id, display_name, role_bits, status_bits, lxmf_available]`. Negotiated
+links receive only their own six-field projection with nullable RGB24 appended.
+Legacy links never receive operation 79. The browser derives a stable automatic
+colour locally for old peers, but disables persistence controls.
+
+Colour is presentation metadata, never role, trust, identity, or moderation
+evidence. Stored RGB is preserved verbatim. Rendering adjusts a temporary
+display colour to WCAG contrast 4.5:1 against the active theme or falls back to
+the theme foreground; switching themes does not mutate server state.
 
 The production server applies room upload admission only when the
 current authenticated Link owns negotiated media-policy authority. It rechecks

@@ -12,6 +12,7 @@ pub mod model;
 pub mod mutation_intent_worker;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 pub mod mutation_intents;
+pub mod nickname_colours;
 pub mod notice;
 pub mod permissions;
 pub mod protocol;

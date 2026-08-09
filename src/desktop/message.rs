@@ -510,6 +510,20 @@ pub(in crate::desktop) enum OmenChatMessage {
         action: crate::chat::protocol::PinAction,
     },
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ToggleNicknameColourEditor(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    NicknameColourInputChanged {
+        session_id: ChatSessionId,
+        value: String,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    SelectNicknameColour {
+        session_id: ChatSessionId,
+        colour: Option<crate::chat::protocol::Rgb24>,
+    },
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    ApplyNicknameColour(ChatSessionId),
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     BeginMessageCorrection {
         session_id: ChatSessionId,
         room_id: RoomId,

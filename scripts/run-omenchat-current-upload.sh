@@ -42,8 +42,8 @@ browser_bin="${CARGO_TARGET_DIR:-$repo_root/target}/debug/omenbrowser_rs"
 server_bin="${CARGO_TARGET_DIR:-$repo_root/src/server/target}/debug/omenchatd"
 browser_version=$("$browser_bin" --version | awk '{print $2}')
 server_version=$("$server_bin" --version | awk '{print $2}')
-[[ "$browser_version" == "0.9.8-3" ]]
-[[ "$server_version" == "0.9.8-3" ]]
+[[ "$browser_version" == "0.9.8-4" ]]
+[[ "$server_version" == "0.9.8-4" ]]
 
 port=$(python3 -c \
   'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')

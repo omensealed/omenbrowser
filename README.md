@@ -443,7 +443,8 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 - The authoritative current OMENchat capability matrix is in
   `docs/OMENCHAT_PROTOCOL.md`. Durable mutations, replies/mentions, reactions,
   message revisions, room pins, announcement rooms, slow mode, room media
-  policy, and authorized moderation audit are active only after explicit
+  policy, authorized moderation audit, and accessible persistent nickname
+  colours are active only after explicit
   per-Link negotiation. Deterministic downgrade coverage does not replace the
   separately reported prior-binary live lane.
 - The crates and deterministic suites are aligned at Reticulum/LXMF 0.9.8.
@@ -474,6 +475,12 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   metadata and payload bytes. The temporary 0.9.7 split ceiling and rejection
   markers are removed. The default 512 KiB upload limit and all independent
   product/peer/room bounds remain unchanged; no retry or fragmentation is added.
+  Direct/local Resource attachments remain supported by their qualification
+  gates. Routed multi-hop retransmission is not qualified on 0.9.8 because the
+  upstream duplicate filter can suppress a requested Resource data/proof
+  retransmission. OMEN does not patch that transport or automatically replay an
+  uncertain attachment; retry remains an explicit user action after route or
+  condition change.
 - Native LXMF ticketed sends now include reply tickets, inbound reply tickets
   are captured from received messages, valid remembered reply tickets are reused
   for outbound direct ticket stamps, and propagation stamps are generated when
