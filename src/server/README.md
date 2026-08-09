@@ -722,7 +722,7 @@ priority survival, graceful drain, RSS/FD stability, and the 32 MiB per-writer
 retention cap. The delay is a reproducible slow-disk simulation, not a benchmark
 of a particular storage device.
 
-The schema currently uses SQLite `user_version = 13`. Version 2 added the upload
+The schema currently uses SQLite `user_version = 14`. Version 2 added the upload
 ledger actor/time index used by quota planning. Version 3 adds the
 bounded-shape durable-mutation replay table, client-instance retirement table,
 and their indexes. Version 4 adds nullable reply-event and bounded mention-ID
@@ -767,6 +767,10 @@ adds nullable, constrained `upload_max_file_bytes` room storage. Canonical
 profiles activate its enforcement only after cumulative
 `durable-mutations-v1`, `announcement-rooms-v1`,
 `room-slow-mode-v1`, and `room-media-policy-v1` acceptance.
+Version 14 adds nullable, checked `users.nickname_colour_rgb`, with `NULL`
+meaning automatic. It reuses `profile_revision`; exact durable replay returns
+the stored acknowledgement without a second revision or broadcast. The
+pre-migration schema-13 backup is required for rollback to v0.9.8-3.
 
 The authoritative current client/server capability matrix is maintained in
 `../../docs/OMENCHAT_PROTOCOL.md`. Older “dormant” descriptions in migration

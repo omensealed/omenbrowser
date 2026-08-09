@@ -1,3 +1,4 @@
+pub use super::protocol::Rgb24;
 use super::protocol::{
     EventId, ModerationAuditAction, ModerationAuditPage, ModerationAuditRecord, RoomId, ServerId,
     UserId,
@@ -94,6 +95,8 @@ pub struct ChatUserSummary {
     pub role_bits: u64,
     pub status_bits: u32,
     pub lxmf_available: bool,
+    pub profile_revision: u64,
+    pub nickname_colour_rgb: Option<Rgb24>,
 }
 
 impl ChatUserSummary {
@@ -653,6 +656,8 @@ mod tests {
             role_bits,
             status_bits,
             lxmf_available: false,
+            profile_revision: 0,
+            nickname_colour_rgb: None,
         }
     }
 

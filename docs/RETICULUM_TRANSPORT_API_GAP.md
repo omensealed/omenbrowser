@@ -52,6 +52,15 @@ dispatch. Until an official crate train corrects and qualifies this behavior,
 direct/local attachment smoke must not be described as routed attachment
 qualification.
 
+The OMENchat attachment UI therefore describes direct/local support separately
+from routed multi-hop qualification and requires an explicit user retry after a
+route or condition change. A terminal Resource failure says that no automatic
+retry occurred; generic failures are not reclassified by parsing log text.
+Upstream-ready, source-referenced reproducer material lives in
+`docs/upstream/reticulum-rs-0.9.8-routed-resource-retransmission.md`. The
+independent UDP boundary is documented separately in
+`docs/upstream/reticulum-rs-0.9.8-udp-max-wire-buffer.md`.
+
 The OMENchat client and `omenchatd` `live-reticulum` server have a clean-stack
 transport path now: links are opened against `omenchat.node`, normal OMENchat
 frames are sent as context-zero encrypted link data with

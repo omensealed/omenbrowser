@@ -4,7 +4,7 @@ use rusqlite::OptionalExtension;
 
 use crate::error::ServerResult;
 use crate::protocol::{
-    EventId, RichMessageEventMetadata, RoomId, UserId, ROOM_POLICY_ANNOUNCEMENT,
+    EventId, Rgb24, RichMessageEventMetadata, RoomId, UserId, ROOM_POLICY_ANNOUNCEMENT,
     ROOM_SLOW_MODE_MAX_SECONDS, ROOM_UPLOAD_MAX_FILE_BYTES,
 };
 
@@ -97,6 +97,14 @@ pub struct ServerUser {
     pub role_bits: u64,
     pub status_bits: u32,
     pub lxmf_destination: Option<String>,
+    pub profile_revision: u64,
+    pub nickname_colour_rgb: Option<Rgb24>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NicknameColourUpdate {
+    pub user: ServerUser,
+    pub changed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,7 +209,7 @@ pub struct OmenchatStore {
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const SCHEMA_VERSION: i64 = 13;
+pub(crate) const SCHEMA_VERSION: i64 = 14;
 const ROOM_PUBLISHER_ROLE_MASK: u64 = (1 << 1) | (1 << 2);
 const HISTORY_USAGE_BACKFILL_BATCH: usize = 256;
 const HISTORY_EVENT_FIXED_RETAINED_BYTES: u64 = 64;
@@ -307,7 +315,7 @@ impl OmenchatStore {
         backup_source: Option<&std::path::Path>,
         migration_sql: &str,
     ) -> ServerResult<()> {
-        self.migrate_with_sql_and_step(backup_source, migration_sql, ensure_event_metadata_schema)
+        self.migrate_with_sql_and_step(backup_source, migration_sql, ensure_current_profile_schema)
     }
 
     fn migrate_with_sql_and_step<F>(
@@ -887,7 +895,8 @@ impl OmenchatStore {
 
     pub fn user_by_identity(&self, identity_hash: &[u8]) -> ServerResult<Option<ServerUser>> {
         let mut statement = self.connection.prepare(
-            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                    profile_revision, nickname_colour_rgb
              FROM users
              WHERE rns_identity_hash = ?1",
         )?;
@@ -897,7 +906,8 @@ impl OmenchatStore {
 
     pub fn users(&self) -> ServerResult<Vec<ServerUser>> {
         let mut statement = self.connection.prepare(
-            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                    profile_revision, nickname_colour_rgb
              FROM users
              ORDER BY display_name, user_id",
         )?;
@@ -907,7 +917,8 @@ impl OmenchatStore {
 
     pub fn administrative_users(&self) -> ServerResult<Vec<ServerAdminUser>> {
         let mut statement = self.connection.prepare(
-            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination, first_seen_at, last_seen_at
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                    profile_revision, nickname_colour_rgb, first_seen_at, last_seen_at
              FROM users
              ORDER BY COALESCE(last_seen_at, first_seen_at) DESC, display_name",
         )?;
@@ -947,6 +958,45 @@ impl OmenchatStore {
         )?;
         self.user_by_id(user_id)?
             .ok_or_else(|| crate::error::ServerError::Message("user was not found".into()))
+    }
+
+    pub fn set_nickname_colour(
+        &self,
+        user_id: UserId,
+        nickname_colour_rgb: Option<Rgb24>,
+    ) -> ServerResult<NicknameColourUpdate> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE users
+             SET nickname_colour_rgb = ?2,
+                 profile_revision = profile_revision + 1
+             WHERE user_id = ?1
+               AND nickname_colour_rgb IS NOT ?2",
+            rusqlite::params![user_id, nickname_colour_rgb.map(|colour| colour.get())],
+        )?;
+        if changed > 1 {
+            return Err(crate::error::ServerError::Message(
+                "nickname colour update changed more than one user".into(),
+            ));
+        }
+        let user = transaction
+            .query_row(
+                "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits,
+                        lxmf_destination, profile_revision, nickname_colour_rgb
+                 FROM users WHERE user_id = ?1",
+                [user_id],
+                user_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| crate::error::ServerError::Message("user was not found".into()))?;
+        transaction.commit()?;
+        Ok(NicknameColourUpdate {
+            user,
+            changed: changed == 1,
+        })
     }
 
     pub fn set_user_role_flag(
@@ -1006,9 +1056,22 @@ impl OmenchatStore {
         Ok(count > 0)
     }
 
+    pub fn room_ids_for_user(
+        &self,
+        user_id: UserId,
+    ) -> ServerResult<std::collections::BTreeSet<RoomId>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT room_id FROM room_members WHERE user_id = ?1 ORDER BY room_id")?;
+        let rows = statement.query_map([user_id], |row| row.get::<_, RoomId>(0))?;
+        rows.collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn users_for_room(&self, room_id: RoomId) -> ServerResult<Vec<ServerUser>> {
         let mut statement = self.connection.prepare(
-            "SELECT u.user_id, u.rns_identity_hash, u.display_name, m.role_bits, m.status_bits, u.lxmf_destination
+            "SELECT u.user_id, u.rns_identity_hash, u.display_name, m.role_bits, m.status_bits, u.lxmf_destination,
+                    u.profile_revision, u.nickname_colour_rgb
              FROM room_members m
              JOIN users u ON u.user_id = m.user_id
              WHERE m.room_id = ?1
@@ -1310,7 +1373,8 @@ impl OmenchatStore {
 
     pub fn user_by_id(&self, user_id: UserId) -> ServerResult<Option<ServerUser>> {
         let mut statement = self.connection.prepare(
-            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                    profile_revision, nickname_colour_rgb
              FROM users
              WHERE user_id = ?1",
         )?;
@@ -1413,6 +1477,26 @@ fn ensure_event_metadata_schema(transaction: &rusqlite::Transaction<'_>) -> Serv
          ON room_events(room_id, reply_to_event_id)
          WHERE reply_to_event_id IS NOT NULL;",
     )?;
+    Ok(())
+}
+
+fn ensure_current_profile_schema(transaction: &rusqlite::Transaction<'_>) -> ServerResult<()> {
+    ensure_event_metadata_schema(transaction)?;
+    let mut statement = transaction.prepare("PRAGMA table_info(users)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    drop(statement);
+    if !columns.contains("nickname_colour_rgb") {
+        transaction.execute_batch(
+            "ALTER TABLE users
+             ADD COLUMN nickname_colour_rgb INTEGER DEFAULT NULL
+             CHECK(
+               nickname_colour_rgb IS NULL OR
+               nickname_colour_rgb BETWEEN 0 AND 16777215
+             );",
+        )?;
+    }
     Ok(())
 }
 
@@ -1959,7 +2043,8 @@ fn ensure_user_on(
     )?;
     connection
         .query_row(
-            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination
+            "SELECT user_id, rns_identity_hash, display_name, role_bits, status_bits, lxmf_destination,
+                    profile_revision, nickname_colour_rgb
              FROM users WHERE rns_identity_hash = ?1",
             [identity_hash],
             user_from_row,
@@ -2403,6 +2488,17 @@ fn room_content_mutation_admission_on(
 }
 
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerUser> {
+    let nickname_colour_rgb = row
+        .get::<_, Option<u32>>(7)?
+        .map(Rgb24::new)
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                7,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?;
     Ok(ServerUser {
         user_id: row.get::<_, i64>(0)? as UserId,
         identity_hash: row.get(1)?,
@@ -2410,14 +2506,16 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerUser> {
         role_bits: row.get::<_, i64>(3)? as u64,
         status_bits: row.get::<_, i64>(4)? as u32,
         lxmf_destination: row.get(5)?,
+        profile_revision: row.get::<_, u64>(6)?,
+        nickname_colour_rgb,
     })
 }
 
 fn admin_user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerAdminUser> {
     Ok(ServerAdminUser {
         user: user_from_row(row)?,
-        first_seen_at: row.get(6)?,
-        last_seen_at: row.get(7)?,
+        first_seen_at: row.get(8)?,
+        last_seen_at: row.get(9)?,
     })
 }
 
@@ -3012,6 +3110,117 @@ mod tests {
 
         drop(store);
         remove_database_files(&path);
+    }
+
+    #[test]
+    fn schema_thirteen_migrates_to_fourteen_with_restorable_backup() {
+        let path = isolated_database_path("v13-nickname-colour");
+        let connection = rusqlite::Connection::open(&path).expect("schema thirteen database");
+        connection
+            .execute_batch(
+                "CREATE TABLE users (
+                   user_id INTEGER PRIMARY KEY,
+                   rns_identity_hash BLOB NOT NULL UNIQUE,
+                   display_name TEXT NOT NULL,
+                   role_bits INTEGER NOT NULL DEFAULT 0,
+                   status_bits INTEGER NOT NULL DEFAULT 0,
+                   profile_revision INTEGER NOT NULL DEFAULT 0,
+                   lxmf_destination TEXT,
+                   lxmf_visibility TEXT NOT NULL DEFAULT 'on_request',
+                   first_seen_at INTEGER NOT NULL,
+                   last_seen_at INTEGER
+                 );
+                 INSERT INTO users(
+                   user_id, rns_identity_hash, display_name, profile_revision,
+                   lxmf_destination, first_seen_at
+                 ) VALUES (7, X'01020304', 'Preserved', 3, 'deadbeef', 10);
+                 PRAGMA user_version = 13;",
+            )
+            .expect("schema thirteen fixture");
+        drop(connection);
+
+        let store = OmenchatStore::open(&path).expect("migrated schema fourteen store");
+        let user = store.user_by_id(7).expect("user lookup").expect("user");
+        assert_eq!(user.identity_hash, vec![1, 2, 3, 4]);
+        assert_eq!(user.lxmf_destination.as_deref(), Some("deadbeef"));
+        assert_eq!(user.profile_revision, 3);
+        assert_eq!(user.nickname_colour_rgb, None);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("schema version"),
+            14
+        );
+
+        let backup_path = migration_backup_path(&path, 13);
+        let backup = crate::sqlite::open_read_only(&backup_path).expect("schema thirteen backup");
+        assert_eq!(
+            backup
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .expect("backup schema version"),
+            13
+        );
+        let backup_columns = backup
+            .prepare("PRAGMA table_info(users)")
+            .expect("backup columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("backup column rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("backup columns");
+        assert!(!backup_columns
+            .iter()
+            .any(|name| name == "nickname_colour_rgb"));
+        let backup_user: (Vec<u8>, String, i64) = backup
+            .query_row(
+                "SELECT rns_identity_hash, lxmf_destination, profile_revision FROM users WHERE user_id = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("backup user");
+        assert_eq!(backup_user, (vec![1, 2, 3, 4], "deadbeef".into(), 3));
+
+        drop(backup);
+        drop(store);
+        std::fs::remove_file(backup_path).expect("remove migration backup");
+        remove_database_files(&path);
+    }
+
+    #[test]
+    fn nickname_colour_update_is_bounded_noop_aware_and_checked_by_sqlite() {
+        let store = OmenchatStore::in_memory().expect("store");
+        let user = store.ensure_user(&[9; 16], "Alice", None).expect("user");
+        let black = Rgb24::new(0).expect("black");
+        let white = Rgb24::new(0x00ff_ffff).expect("white");
+
+        let first = store
+            .set_nickname_colour(user.user_id, Some(black))
+            .expect("first colour");
+        assert!(first.changed);
+        assert_eq!(first.user.profile_revision, 1);
+        let duplicate = store
+            .set_nickname_colour(user.user_id, Some(black))
+            .expect("same colour");
+        assert!(!duplicate.changed);
+        assert_eq!(duplicate.user.profile_revision, 1);
+        let second = store
+            .set_nickname_colour(user.user_id, Some(white))
+            .expect("maximum colour");
+        assert!(second.changed);
+        assert_eq!(second.user.profile_revision, 2);
+        let automatic = store
+            .set_nickname_colour(user.user_id, None)
+            .expect("automatic colour");
+        assert!(automatic.changed);
+        assert_eq!(automatic.user.profile_revision, 3);
+        assert_eq!(automatic.user.nickname_colour_rgb, None);
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE users SET nickname_colour_rgb = 16777216 WHERE user_id = ?1",
+                [user.user_id],
+            )
+            .is_err());
     }
 
     #[cfg(unix)]

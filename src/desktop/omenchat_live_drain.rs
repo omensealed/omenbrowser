@@ -108,12 +108,22 @@ impl DesktopApp {
                 crate::runtime::ResourceLifecycleState::Cancelled => "was cancelled",
                 _ => continue,
             };
-            self.set_omenchat_session_status(
-                session_id,
+            let status = if matches!(
+                (&terminal.state, terminal.reason.as_deref()),
+                (
+                    crate::runtime::ResourceLifecycleState::Failed,
+                    Some("retry_limit_exhausted")
+                )
+            ) {
                 format!(
-                    "OMENchat inbound Resource {state}; released {released} pending offer(s); retry history or reconnect"
-                ),
-            );
+                    "OMENchat transfer failed on the current route; attachment was not committed; upstream 0.9.8 routed Resource retransmission limits may apply; released {released} pending offer(s); no automatic retry occurred"
+                )
+            } else {
+                format!(
+                    "OMENchat inbound Resource {state}; released {released} pending offer(s); no automatic retry occurred"
+                )
+            };
+            self.set_omenchat_session_status(session_id, status);
             self.persist_omenchat_session(session_id);
         }
         for data in self.app.drain_omenchat_link_data() {

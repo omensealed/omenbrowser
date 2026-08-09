@@ -152,6 +152,8 @@ fn write_fixture(root: &Path) {
                     role_bits: 0,
                     status_bits: 0,
                     lxmf_available: user % 2 == 0,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 })
                 .collect(),
             events: (0..EVENTS_PER_OMENCHAT_SESSION)

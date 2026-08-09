@@ -21,11 +21,12 @@ use super::protocol::{
     parse_session_accept_negotiation, with_session_open_negotiation, ChatErrorCode, ChatOp,
     ClientInstanceId, DurableMutationEnvelope, EventId, Frame, FrameBody, FrameValue,
     MessageRevisionAck, MessageRevisionEvent, MessageRevisionRequest, MessageRevisionSnapshot,
-    ModerationAuditPage, ModerationAuditRequest, MutationId, PinAck, PinAction, PinEvent,
-    PinRequest, PinSnapshot, ReactionAck, ReactionEvent, ReactionRequest, ReactionSnapshot,
-    RichMessageBody, RoomCatalogEntry, RoomCatalogShape, RoomId, RoomPolicyProjection,
-    SessionOpenNegotiation, ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS,
-    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
+    ModerationAuditPage, ModerationAuditRequest, MutationId, NicknameColourAck,
+    NicknameColourEvent, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck,
+    ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody, RoomCatalogEntry,
+    RoomCatalogShape, RoomId, RoomPolicyProjection, SessionOpenNegotiation,
+    ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
+    DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY, NICKNAME_COLOURS_CAPABILITY,
     PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY,
     ROOM_SLOW_MODE_CAPABILITY,
 };
@@ -89,6 +90,8 @@ pub struct LiveChatClientState {
     message_revision_sessions: BTreeSet<ChatSessionId>,
     pin_requests: BTreeSet<ChatSessionId>,
     pin_sessions: BTreeSet<ChatSessionId>,
+    nickname_colour_requests: BTreeSet<ChatSessionId>,
+    nickname_colour_sessions: BTreeSet<ChatSessionId>,
     moderation_audit_requests: BTreeSet<ChatSessionId>,
     moderation_audit_sessions: BTreeSet<ChatSessionId>,
     pending_moderation_audit_requests: BTreeMap<ChatSessionId, PendingModerationAuditRequest>,
@@ -103,6 +106,7 @@ pub struct LiveChatClientState {
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
     pending_local_echoes: BTreeMap<(ChatSessionId, u32), PendingLocalEcho>,
     pending_pin_confirmations: BTreeMap<(ChatSessionId, RoomId, u64), PinAction>,
+    pending_nickname_colours: BTreeMap<ChatSessionId, (MutationId, Option<super::protocol::Rgb24>)>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
     pending_upload_downloads: BTreeMap<String, PendingLiveUploadDownload>,
     rejected_pending_local_echoes: u64,
@@ -220,6 +224,23 @@ impl LiveChatClientState {
 
     pub fn pins_negotiated(&self, session_id: ChatSessionId) -> bool {
         self.pin_sessions.contains(&session_id)
+    }
+
+    pub fn nickname_colours_negotiated(&self, session_id: ChatSessionId) -> bool {
+        self.nickname_colour_sessions.contains(&session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_nickname_colours_negotiated_for_test(
+        &mut self,
+        session_id: ChatSessionId,
+        negotiated: bool,
+    ) {
+        if negotiated {
+            self.nickname_colour_sessions.insert(session_id);
+        } else {
+            self.nickname_colour_sessions.remove(&session_id);
+        }
     }
 
     pub fn moderation_audit_negotiated(&self, session_id: ChatSessionId) -> bool {
@@ -519,6 +540,7 @@ impl LiveChatClientState {
             .retain(|_, download| download.session_id != session_id);
         self.pending_pin_confirmations
             .retain(|(stored_session, ..), _| *stored_session != session_id);
+        self.pending_nickname_colours.remove(&session_id);
     }
 
     pub fn retire_session_link_state(
@@ -544,6 +566,8 @@ impl LiveChatClientState {
         self.message_revision_sessions.remove(&session_id);
         self.pin_requests.remove(&session_id);
         self.pin_sessions.remove(&session_id);
+        self.nickname_colour_requests.remove(&session_id);
+        self.nickname_colour_sessions.remove(&session_id);
         self.moderation_audit_requests.remove(&session_id);
         self.moderation_audit_sessions.remove(&session_id);
         self.pending_moderation_audit_requests.remove(&session_id);
@@ -1014,6 +1038,8 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.message_revision_sessions.remove(&session_id);
     state.pin_requests.remove(&session_id);
     state.pin_sessions.remove(&session_id);
+    state.nickname_colour_requests.remove(&session_id);
+    state.nickname_colour_sessions.remove(&session_id);
     state.moderation_audit_requests.remove(&session_id);
     state.moderation_audit_sessions.remove(&session_id);
     state.pending_moderation_audit_requests.remove(&session_id);
@@ -1099,6 +1125,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
         state.reaction_requests.insert(session_id);
         state.message_revision_requests.insert(session_id);
         state.pin_requests.insert(session_id);
+        state.nickname_colour_requests.insert(session_id);
         if cfg!(feature = "omenchat-announcement-rooms") || room_media_policy_requested_for_test {
             state.announcement_room_requests.insert(session_id);
         }
@@ -1510,6 +1537,87 @@ pub fn send_uncertain_durable_reaction<T: ChatLinkTransport>(
     );
     if let Some(session) = client.session_mut(session_id) {
         session.status = "reaction request sent; awaiting server result".into();
+    }
+    drain_live_events_with_state(client, state, transport, Some(session_id))
+}
+
+pub fn send_uncertain_durable_nickname_colour<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    intent: &OutboundMutationIntent,
+) -> Vec<ChatClientEvent> {
+    let error = |message: &str| {
+        vec![ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: message.into(),
+        }]
+    };
+    if !state.durable_mutations_negotiated(session_id)
+        || !state.nickname_colours_negotiated(session_id)
+    {
+        return error("persistent nickname colours were not negotiated for this live session");
+    }
+    if intent.op != ChatOp::NicknameColourSet
+        || intent.room_id.is_some()
+        || intent.state != OutboundMutationState::SentUncertain
+        || intent.expires_at <= current_unix_secs()
+    {
+        return error("durable nickname colour mutation is not eligible for transmission");
+    }
+    if state.client_instance_id != Some(intent.client_instance_id) {
+        return error("durable nickname colour mutation belongs to a different client instance");
+    }
+    let Some(session) = client.session(session_id) else {
+        return error("OMENchat live session is not available");
+    };
+    if session.server.destination != intent.server_destination {
+        return error("durable nickname colour mutation belongs to a different server");
+    }
+    let request = match super::protocol::NicknameColourSet::from_frame_body(&intent.body) {
+        Ok(request) => request,
+        Err(_) => return error("durable nickname colour request is invalid"),
+    };
+    if !matches!(
+        canonical_mutation_request_hash(intent.op, None, &intent.body),
+        Ok(request_hash) if request_hash == intent.request_hash
+    ) {
+        return error("durable nickname colour hash does not match its stored request");
+    }
+    if state.pending_nickname_colours.contains_key(&session_id) {
+        return error("a nickname colour mutation is already awaiting a server result");
+    }
+    let seq = match state.reserve_seq(session_id) {
+        Ok(seq) => seq,
+        Err(_) => return vec![sequence_space_exhausted_event(session_id)],
+    };
+    let envelope = match (DurableMutationEnvelope {
+        mutation_id: intent.mutation_id,
+        request_hash: intent.request_hash,
+        body: intent.body.clone(),
+    })
+    .into_frame_body()
+    {
+        Ok(body) => body,
+        Err(envelope_error) => {
+            return error(&format!(
+                "durable nickname colour envelope is invalid: {envelope_error}"
+            ))
+        }
+    };
+    if let Some(event) = send_frame_or_error(
+        transport,
+        Frame::new(ChatOp::NicknameColourSet, seq, None, envelope),
+        Some(session_id),
+    ) {
+        return vec![event];
+    }
+    state
+        .pending_nickname_colours
+        .insert(session_id, (intent.mutation_id, request.colour));
+    if let Some(session) = client.session_mut(session_id) {
+        session.status = "nickname colour sent; awaiting server result".into();
     }
     drain_live_events_with_state(client, state, transport, Some(session_id))
 }
@@ -2790,6 +2898,11 @@ fn apply_live_link_event(
                     .as_deref()
                     .is_some_and(|state| state.pins_negotiated(session_id))
             });
+            let nickname_colours_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.nickname_colours_negotiated(session_id))
+            });
             let moderation_audit_negotiated = preferred_session_id.is_some_and(|session_id| {
                 state
                     .as_deref()
@@ -2848,6 +2961,7 @@ fn apply_live_link_event(
                     reactions: reactions_negotiated,
                     message_revisions: message_revisions_negotiated,
                     pins: pins_negotiated,
+                    nickname_colours: nickname_colours_negotiated,
                     moderation_audit: moderation_audit_negotiated,
                     moderation_audit_before,
                     moderation_audit_limit,
@@ -3002,6 +3116,9 @@ fn apply_frame_with_state(
             let pins_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == super::protocol::ROOM_PINS_CAPABILITY);
+            let nickname_colours_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == NICKNAME_COLOURS_CAPABILITY);
             let moderation_audit_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == MODERATION_AUDIT_CAPABILITY);
@@ -3026,6 +3143,7 @@ fn apply_frame_with_state(
                 let message_revisions_requested =
                     state.message_revision_requests.remove(&session_id);
                 let pins_requested = state.pin_requests.remove(&session_id);
+                let nickname_colours_requested = state.nickname_colour_requests.remove(&session_id);
                 let moderation_audit_requested =
                     state.moderation_audit_requests.remove(&session_id);
                 let announcement_rooms_requested =
@@ -3065,6 +3183,11 @@ fn apply_frame_with_state(
                     } else {
                         state.pin_sessions.remove(&session_id);
                     }
+                    if nickname_colours_requested && nickname_colours_accepted {
+                        state.nickname_colour_sessions.insert(session_id);
+                    } else {
+                        state.nickname_colour_sessions.remove(&session_id);
+                    }
                 } else {
                     state.durable_sessions.remove(&session_id);
                     state.durable_notice_ack_sessions.remove(&session_id);
@@ -3072,6 +3195,7 @@ fn apply_frame_with_state(
                     state.reaction_sessions.remove(&session_id);
                     state.message_revision_sessions.remove(&session_id);
                     state.pin_sessions.remove(&session_id);
+                    state.nickname_colour_sessions.remove(&session_id);
                     state.local_user_ids.remove(&session_id);
                 }
                 if moderation_audit_requested && moderation_audit_accepted {
@@ -3702,7 +3826,18 @@ fn apply_frame_with_state(
             );
         }
         ChatOp::UserDelta => {
-            apply_user_delta(client, preferred_session_id, &frame.body, events);
+            let nickname_colours_negotiated = preferred_session_id.is_some_and(|session_id| {
+                state
+                    .as_deref()
+                    .is_some_and(|state| state.nickname_colours_negotiated(session_id))
+            });
+            apply_user_delta(
+                client,
+                preferred_session_id,
+                &frame.body,
+                nickname_colours_negotiated,
+                events,
+            );
             if let Some(session_id) = preferred_session_id {
                 let local_user_id = client.local_user_id(session_id);
                 let local_role_lost = events.last().is_some_and(|event| {
@@ -3717,6 +3852,12 @@ fn apply_frame_with_state(
                     client.clear_moderation_audit(session_id);
                 }
             }
+        }
+        ChatOp::NicknameColourAck => {
+            apply_nickname_colour_ack(client, state, preferred_session_id, &frame, events);
+        }
+        ChatOp::NicknameColourEvent => {
+            apply_nickname_colour_event(client, state, preferred_session_id, &frame, events);
         }
         ChatOp::UploadAccept => {
             apply_upload_accept(
@@ -4600,6 +4741,7 @@ fn apply_user_delta(
     client: &mut ChatClient,
     preferred_session_id: Option<ChatSessionId>,
     body: &FrameBody,
+    nickname_colours_negotiated: bool,
     events: &mut Vec<ChatClientEvent>,
 ) {
     let Some(session_id) = preferred_session_id else {
@@ -4611,7 +4753,9 @@ fn apply_user_delta(
         .unwrap_or_default();
     let Some(user) = body_values(body)
         .and_then(|values| values.first())
-        .and_then(|value| parse_user(value, server_id))
+        .and_then(|value| {
+            parse_user_for_colour_capability(value, server_id, nickname_colours_negotiated)
+        })
     else {
         if let Some(session) = client.session_mut(session_id) {
             session.status = "server returned an invalid user update".into();
@@ -4640,6 +4784,103 @@ fn apply_user_delta(
         };
     }
     events.push(ChatClientEvent::UserUpdated { session_id, user });
+}
+
+fn apply_nickname_colour_ack(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let (Some(session_id), Some(state)) = (preferred_session_id, state) else {
+        return;
+    };
+    if !state.nickname_colours_negotiated(session_id) {
+        return;
+    }
+    let Ok(ack) = NicknameColourAck::from_frame_body(&frame.body) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "ignored malformed nickname colour acknowledgement".into(),
+        });
+        return;
+    };
+    let Some((pending_id, pending_colour)) =
+        state.pending_nickname_colours.get(&session_id).copied()
+    else {
+        return;
+    };
+    if pending_id != ack.mutation_id || pending_colour != ack.colour {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "ignored mismatched nickname colour acknowledgement".into(),
+        });
+        return;
+    }
+    state.pending_nickname_colours.remove(&session_id);
+    let Some(user_id) = state.local_user_id(session_id) else {
+        return;
+    };
+    if let Some(session) = client.session_mut(session_id) {
+        if let Some(user) = session
+            .users
+            .iter_mut()
+            .find(|user| user.user_id == user_id)
+        {
+            if ack.profile_revision >= user.profile_revision {
+                user.profile_revision = ack.profile_revision;
+                user.nickname_colour_rgb = ack.colour;
+                events.push(ChatClientEvent::UserUpdated {
+                    session_id,
+                    user: user.clone(),
+                });
+            }
+        }
+        session.status = "nickname colour saved".into();
+    }
+    events.push(ChatClientEvent::DurableMutationAcknowledged {
+        session_id,
+        mutation_id: ack.mutation_id,
+    });
+}
+
+fn apply_nickname_colour_event(
+    client: &mut ChatClient,
+    state: Option<&mut LiveChatClientState>,
+    preferred_session_id: Option<ChatSessionId>,
+    frame: &Frame,
+    events: &mut Vec<ChatClientEvent>,
+) {
+    let (Some(session_id), Some(state)) = (preferred_session_id, state) else {
+        return;
+    };
+    if !state.nickname_colours_negotiated(session_id) {
+        return;
+    }
+    let Ok(update) = NicknameColourEvent::from_frame_body(&frame.body) else {
+        events.push(ChatClientEvent::Error {
+            session_id: Some(session_id),
+            message: "ignored malformed nickname colour event".into(),
+        });
+        return;
+    };
+    if let Some(session) = client.session_mut(session_id) {
+        if let Some(user) = session
+            .users
+            .iter_mut()
+            .find(|user| user.user_id == update.user_id)
+        {
+            if update.profile_revision > user.profile_revision {
+                user.profile_revision = update.profile_revision;
+                user.nickname_colour_rgb = update.colour;
+                events.push(ChatClientEvent::UserUpdated {
+                    session_id,
+                    user: user.clone(),
+                });
+            }
+        }
+    }
 }
 
 fn apply_room_delta(
@@ -5009,6 +5250,7 @@ struct BatchCapabilities {
     reactions: bool,
     message_revisions: bool,
     pins: bool,
+    nickname_colours: bool,
     moderation_audit: bool,
     moderation_audit_before: Option<EventId>,
     moderation_audit_limit: Option<u16>,
@@ -5045,7 +5287,13 @@ fn apply_batch(
             }
             let mut users = values
                 .iter()
-                .filter_map(|value| parse_user(value, server_id.clone()))
+                .filter_map(|value| {
+                    parse_user_for_colour_capability(
+                        value,
+                        server_id.clone(),
+                        capabilities.nickname_colours,
+                    )
+                })
                 .collect::<Vec<_>>();
             let dropped = enforce_user_catalog_bounds(&mut users);
             if let Some(session) = client.session_mut(session_id) {
@@ -5545,7 +5793,18 @@ fn parse_room_policy_for_shape(
 }
 
 fn parse_user(value: &FrameValue, server_id: String) -> Option<ChatUserSummary> {
+    parse_user_for_colour_capability(value, server_id, false)
+}
+
+fn parse_user_for_colour_capability(
+    value: &FrameValue,
+    server_id: String,
+    nickname_colours_negotiated: bool,
+) -> Option<ChatUserSummary> {
     let fields = value.as_array()?;
+    if fields.len() != if nickname_colours_negotiated { 6 } else { 5 } {
+        return None;
+    }
     let display_name = fields.get(1)?.as_str()?.trim();
     if display_name.is_empty() || !chat_text_fits(display_name, CHAT_USER_DISPLAY_MAX_BYTES) {
         return None;
@@ -5560,6 +5819,16 @@ fn parse_user(value: &FrameValue, server_id: String) -> Option<ChatUserSummary> 
             .get(4)
             .and_then(FrameValueExt::as_bool)
             .unwrap_or(false),
+        profile_revision: 0,
+        nickname_colour_rgb: if nickname_colours_negotiated {
+            match fields.get(5)? {
+                FrameValue::Nil => None,
+                FrameValue::U64(value) => Some(super::protocol::Rgb24::try_from(*value).ok()?),
+                _ => return None,
+            }
+        } else {
+            None
+        },
     })
 }
 
@@ -5879,6 +6148,7 @@ mod tests {
                 moderation_audit: false,
                 moderation_audit_before: None,
                 moderation_audit_limit: None,
+                nickname_colours: false,
             },
             &mut events,
         );
@@ -6018,6 +6288,7 @@ mod tests {
                 moderation_audit: false,
                 moderation_audit_before: None,
                 moderation_audit_limit: None,
+                nickname_colours: false,
             },
             &mut events,
         );
@@ -6157,6 +6428,7 @@ mod tests {
                 moderation_audit: false,
                 moderation_audit_before: None,
                 moderation_audit_limit: None,
+                nickname_colours: false,
             },
             &mut events,
         );
@@ -7291,6 +7563,164 @@ mod tests {
         }
     }
 
+    fn durable_nickname_colour_intent(
+        client_instance_id: ClientInstanceId,
+        state: OutboundMutationState,
+    ) -> OutboundMutationIntent {
+        let body = super::super::protocol::NicknameColourSet {
+            colour: Some(super::super::protocol::Rgb24::new(0x12_34_56).expect("colour")),
+        }
+        .into_frame_body();
+        OutboundMutationIntent {
+            server_destination: "abcd".into(),
+            authenticated_identity_hash: vec![3; 16],
+            client_instance_id,
+            mutation_id: MutationId::new([0x47; 16]),
+            request_hash: crate::chat::protocol::canonical_mutation_request_hash(
+                ChatOp::NicknameColourSet,
+                None,
+                &body,
+            )
+            .expect("request hash"),
+            op: ChatOp::NicknameColourSet,
+            room_id: None,
+            body,
+            state,
+            created_at: 10,
+            expires_at: i64::MAX,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn durable_nickname_colour_requires_negotiation_dispatches_once_and_applies_exact_ack() {
+        let client_instance_id = ClientInstanceId::new([2; 16]);
+        let (mut client, session_id) = live_test_client();
+        client
+            .session_mut(session_id)
+            .expect("session")
+            .users
+            .push(ChatUserSummary {
+                server_id: "abcd".into(),
+                user_id: 7,
+                display_name: "Alice".into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
+            });
+        assert!(client.bind_local_user_id(session_id, 7));
+        let mut state = LiveChatClientState::default();
+        state.set_client_instance_id(Some(client_instance_id));
+        state.set_durable_mutations_negotiated_for_test(session_id, true);
+        state.local_user_ids.insert(session_id, 7);
+        let intent = durable_nickname_colour_intent(
+            client_instance_id,
+            OutboundMutationState::SentUncertain,
+        );
+        let mut transport = CapturedChatTransport::default();
+
+        let blocked = send_uncertain_durable_nickname_colour(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        );
+        assert!(matches!(
+            blocked.as_slice(),
+            [ChatClientEvent::Error { .. }]
+        ));
+        assert!(transport.sent_frames.is_empty());
+
+        state.set_nickname_colours_negotiated_for_test(session_id, true);
+        assert!(send_uncertain_durable_nickname_colour(
+            &mut client,
+            &mut state,
+            &mut transport,
+            session_id,
+            &intent,
+        )
+        .is_empty());
+        assert_eq!(transport.sent_frames.len(), 1);
+        assert!(matches!(
+            send_uncertain_durable_nickname_colour(
+                &mut client,
+                &mut state,
+                &mut transport,
+                session_id,
+                &OutboundMutationIntent {
+                    mutation_id: MutationId::new([0x48; 16]),
+                    ..intent.clone()
+                },
+            )
+            .as_slice(),
+            [ChatClientEvent::Error { message, .. }] if message.contains("already awaiting")
+        ));
+        assert_eq!(
+            transport.sent_frames.len(),
+            1,
+            "pending mutation must not dispatch again"
+        );
+
+        let sent = decode_frame(&transport.sent_frames[0]).expect("sent frame");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::NicknameColourAck,
+                sent.seq,
+                None,
+                super::super::protocol::NicknameColourAck {
+                    mutation_id: intent.mutation_id,
+                    profile_revision: 1,
+                    colour: Some(super::super::protocol::Rgb24::new(0x12_34_56).expect("colour")),
+                }
+                .into_frame_body(),
+            ))
+            .expect("nickname colour acknowledgement");
+        let events =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatClientEvent::DurableMutationAcknowledged { mutation_id, .. }
+                if *mutation_id == intent.mutation_id
+        )));
+        let user = &client.session(session_id).expect("session").users[0];
+        assert_eq!(user.profile_revision, 1);
+        assert_eq!(
+            user.nickname_colour_rgb.map(|value| value.get()),
+            Some(0x12_34_56)
+        );
+
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::NicknameColourEvent,
+                sent.seq.saturating_add(1),
+                None,
+                super::super::protocol::NicknameColourEvent {
+                    user_id: 7,
+                    profile_revision: 0,
+                    colour: None,
+                }
+                .into_frame_body()
+                .expect("stale event"),
+            ))
+            .expect("stale nickname colour event");
+        assert!(drain_live_events_with_state(
+            &mut client,
+            &mut state,
+            &mut transport,
+            Some(session_id),
+        )
+        .is_empty());
+        assert_eq!(
+            client.session(session_id).expect("session").users[0]
+                .nickname_colour_rgb
+                .map(|value| value.get()),
+            Some(0x12_34_56)
+        );
+    }
+
     #[test]
     fn durable_reaction_requires_both_capabilities_and_never_applies_optimistically() {
         let client_instance_id = ClientInstanceId::new([2; 16]);
@@ -8292,6 +8722,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: CHAT_STATUS_BANNED,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -8469,6 +8901,8 @@ mod tests {
                     role_bits: 0,
                     status_bits: initial_status,
                     lxmf_available: false,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 }],
                 events: Vec::new(),
                 status: "ready".into(),
@@ -10755,6 +11189,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: true,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -11655,6 +12091,8 @@ mod tests {
                     role_bits: 0,
                     status_bits: 0,
                     lxmf_available: false,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 },
                 ChatUserSummary {
                     server_id: "abcd".into(),
@@ -11663,6 +12101,8 @@ mod tests {
                     role_bits: 0,
                     status_bits: 0,
                     lxmf_available: false,
+                    profile_revision: 0,
+                    nickname_colour_rgb: None,
                 },
             ],
             events: Vec::new(),
@@ -11744,6 +12184,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 1,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -11815,6 +12257,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -11886,6 +12330,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -11964,6 +12410,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -12161,6 +12609,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: true,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -12233,6 +12683,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: true,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "ready".into(),
@@ -12559,6 +13011,8 @@ mod tests {
                 role_bits: CHAT_ROLE_TRUSTED,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: Vec::new(),
             status: "opening".into(),
@@ -13241,6 +13695,47 @@ mod tests {
             "server-a".into(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn nickname_colour_user_parser_keeps_legacy_and_negotiated_shapes_exact() {
+        let legacy = FrameValue::Array(vec![
+            FrameValue::U64(7),
+            FrameValue::String("Alice".into()),
+            FrameValue::U64(0),
+            FrameValue::U64(0),
+            FrameValue::Bool(false),
+        ]);
+        let parsed =
+            parse_user_for_colour_capability(&legacy, "server".into(), false).expect("legacy user");
+        assert_eq!(parsed.nickname_colour_rgb, None);
+        assert!(parse_user_for_colour_capability(&legacy, "server".into(), true).is_none());
+
+        let negotiated = FrameValue::Array(vec![
+            FrameValue::U64(7),
+            FrameValue::String("Alice".into()),
+            FrameValue::U64(0),
+            FrameValue::U64(0),
+            FrameValue::Bool(false),
+            FrameValue::U64(0x12_34_56),
+        ]);
+        let parsed = parse_user_for_colour_capability(&negotiated, "server".into(), true)
+            .expect("negotiated user");
+        assert_eq!(
+            parsed.nickname_colour_rgb.map(|value| value.get()),
+            Some(0x12_34_56)
+        );
+        assert!(parse_user_for_colour_capability(&negotiated, "server".into(), false).is_none());
+
+        let overflow = FrameValue::Array(vec![
+            FrameValue::U64(7),
+            FrameValue::String("Alice".into()),
+            FrameValue::U64(0),
+            FrameValue::U64(0),
+            FrameValue::Bool(false),
+            FrameValue::U64(0x01_00_00_00),
+        ]);
+        assert!(parse_user_for_colour_capability(&overflow, "server".into(), true).is_none());
     }
 
     #[test]

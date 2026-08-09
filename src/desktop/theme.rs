@@ -568,6 +568,32 @@ mod tests {
     }
 
     #[test]
+    fn automatic_nickname_colours_meet_contrast_on_every_selectable_theme() {
+        for name in DESKTOP_THEME_CHOICES {
+            let palette = theme_from_name(name).palette();
+            let bytes = |colour: Color| {
+                [colour.r, colour.g, colour.b]
+                    .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+            };
+            let requested = crate::chat::nickname_colours::automatic_nickname_colour("server", 7);
+            let displayed = crate::chat::nickname_colours::readable_nickname_colour(
+                requested,
+                bytes(palette.background),
+                bytes(palette.text),
+            );
+            assert!(
+                displayed.used_foreground_fallback
+                    || crate::chat::nickname_colours::contrast_ratio(
+                        displayed.rgb,
+                        bytes(palette.background),
+                    )
+                    .is_some_and(|ratio| ratio >= 4.5),
+                "theme {name} did not produce readable nickname text"
+            );
+        }
+    }
+
+    #[test]
     fn selected_toggle_uses_a_stronger_border_without_changing_layout_policy() {
         let theme = omen_desktop_theme();
         let inactive = toggle_button_style(&theme, button::Status::Active, false);

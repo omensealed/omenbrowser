@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "omenchat-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2",
  "thiserror 1.0.69",
@@ -872,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "omenchatd"
-version = "0.9.8-3"
+version = "0.9.8-4"
 dependencies = [
  "bzip2 0.5.2",
  "crossterm",

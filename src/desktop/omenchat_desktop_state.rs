@@ -466,6 +466,14 @@ pub(in crate::desktop) struct OmenChatMutationResolutionConfirmation {
     pub(in crate::desktop) next: crate::chat::mutation_intents::OutboundMutationState,
 }
 
+#[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+#[derive(Clone, Debug, Default)]
+pub(in crate::desktop) struct OmenChatNicknameColourEditor {
+    pub(in crate::desktop) visible: bool,
+    pub(in crate::desktop) input: String,
+    pub(in crate::desktop) selected: Option<crate::chat::protocol::Rgb24>,
+}
+
 #[cfg(all(
     feature = "omenchat-moderation-audit",
     any(feature = "chat-client-rns", feature = "chat-client-rns-clean")
@@ -490,6 +498,9 @@ pub(in crate::desktop) struct OmenChatDesktopState {
     #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
     pub(in crate::desktop) omenchat_revision_delete_confirmation:
         Option<OmenChatRevisionDeleteConfirmation>,
+    #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+    pub(in crate::desktop) omenchat_nickname_colour_editors:
+        HashMap<ChatSessionId, OmenChatNicknameColourEditor>,
     pub(in crate::desktop) chat_event_counts: HashMap<(ChatSessionId, RoomId), usize>,
     pub(in crate::desktop) chat_scroll_offsets: HashMap<(ChatSessionId, RoomId), RelativeOffset>,
     pub(in crate::desktop) chat_scroll_bottom_locks: HashSet<(ChatSessionId, RoomId)>,
@@ -641,6 +652,8 @@ impl OmenChatDesktopState {
             omenchat_revision_drafts: HashMap::new(),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             omenchat_revision_delete_confirmation: None,
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            omenchat_nickname_colour_editors: HashMap::new(),
             chat_event_counts,
             chat_scroll_offsets,
             chat_scroll_bottom_locks,

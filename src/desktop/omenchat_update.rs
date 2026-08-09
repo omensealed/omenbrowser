@@ -144,6 +144,49 @@ impl DesktopApp {
                 action,
             }) => Ok(self.prepare_omenchat_pin_mutation(session_id, room_id, event_id, action)),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::ToggleNicknameColourEditor(session_id)) => {
+                let editor = self
+                    .omenchat
+                    .omenchat_nickname_colour_editors
+                    .entry(session_id)
+                    .or_default();
+                editor.visible = !editor.visible;
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::NicknameColourInputChanged {
+                session_id,
+                value,
+            }) => {
+                if value.len() <= 7 && value.is_ascii() {
+                    let editor = self
+                        .omenchat
+                        .omenchat_nickname_colour_editors
+                        .entry(session_id)
+                        .or_default();
+                    editor.input = value;
+                    editor.selected = None;
+                }
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::SelectNicknameColour { session_id, colour }) => {
+                let editor = self
+                    .omenchat
+                    .omenchat_nickname_colour_editors
+                    .entry(session_id)
+                    .or_default();
+                editor.selected = colour;
+                editor.input = colour
+                    .map(|value| format!("#{:06X}", value.get()))
+                    .unwrap_or_default();
+                Ok(Task::none())
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+            Message::OmenChat(OmenChatMessage::ApplyNicknameColour(session_id)) => {
+                Ok(self.apply_omenchat_nickname_colour(session_id))
+            }
+            #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::BeginMessageCorrection {
                 session_id,
                 room_id,
@@ -1039,6 +1082,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events: vec![ChatEvent {
                 server_id: "server".into(),

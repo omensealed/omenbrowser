@@ -913,3 +913,17 @@ fn reticulum_udp_tx_buffer_covers_max_resource_wire_packet() {
         "upstream UDP tx buffer ({upstream_udp_buffer}) cannot serialize a maximum Resource wire packet ({max_type_one_wire_packet})"
     );
 }
+
+#[test]
+#[ignore = "known upstream Reticulum 0.9.8 routed Resource retransmission regression; requires the documented three-node fragment-loss topology"]
+fn reticulum_routed_resource_retransmission_survives_fragment_loss() {
+    // This deliberately failing expected-upstream sentinel keeps the realistic
+    // three-node boundary separately named in normal test inventories. The
+    // deterministic topology and acceptance assertions are maintained in
+    // docs/upstream/reticulum-rs-0.9.8-routed-resource-retransmission.md. It
+    // must be replaced by, and pass as, the real topology gate before OMEN can
+    // claim routed attachment qualification on a future official crate train.
+    panic!(
+        "reticulum-rs-transport 0.9.8 suppresses requested duplicate Resource data/proof packets at a forwarding node"
+    );
+}

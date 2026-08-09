@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS users (
   role_bits INTEGER NOT NULL DEFAULT 0,
   status_bits INTEGER NOT NULL DEFAULT 0,
   profile_revision INTEGER NOT NULL DEFAULT 0,
+  nickname_colour_rgb INTEGER DEFAULT NULL CHECK(
+    nickname_colour_rgb IS NULL OR
+    nickname_colour_rgb BETWEEN 0 AND 16777215
+  ),
   lxmf_destination TEXT,
   lxmf_visibility TEXT NOT NULL DEFAULT 'on_request',
   first_seen_at INTEGER NOT NULL,

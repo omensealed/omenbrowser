@@ -16,6 +16,7 @@ use super::{chat_event_actor_label, human_bytes, is_omenchat_local_echo_event};
 pub(in crate::desktop) struct ChatTimelineGroup {
     pub(in crate::desktop) actor_key: String,
     pub(in crate::desktop) actor: String,
+    pub(in crate::desktop) actor_user_id: Option<u32>,
     pub(in crate::desktop) at_unix: i64,
     pub(in crate::desktop) last_at_unix: i64,
     pub(in crate::desktop) bodies: Vec<ChatTimelineBody>,
@@ -402,6 +403,7 @@ pub(in crate::desktop) fn chat_timeline_groups_for_local_user_reactions_revision
         groups.push(ChatTimelineGroup {
             actor_key,
             actor: chat_event_actor_label(session, event),
+            actor_user_id: event.actor_user_id,
             at_unix: event.at_unix,
             last_at_unix: event.at_unix,
             bodies: vec![body],
@@ -451,6 +453,8 @@ mod tests {
                 role_bits: 0,
                 status_bits: 0,
                 lxmf_available: true,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
             }],
             events,
             status: String::new(),

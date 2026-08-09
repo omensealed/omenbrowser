@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use crate::{
     ClientInstanceId, FrameBody, FrameValue, ANNOUNCEMENT_ROOMS_CAPABILITY,
-    DURABLE_MUTATION_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY,
-    REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
+    DURABLE_MUTATION_CAPABILITY, MESSAGE_REVISIONS_CAPABILITY, NICKNAME_COLOURS_CAPABILITY,
+    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY,
+    ROOM_SLOW_MODE_CAPABILITY,
 };
 
 pub const SESSION_CAPABILITY_MAX_ITEMS: usize = 64;
@@ -208,6 +209,10 @@ fn validate_capability_list(capabilities: &[String]) -> Result<(), SessionNegoti
     {
         return Err(SessionNegotiationError::MissingMessageRevisionsDependency);
     }
+    if unique.contains(NICKNAME_COLOURS_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY)
+    {
+        return Err(SessionNegotiationError::MissingNicknameColoursDependency);
+    }
     if unique.contains(ROOM_SLOW_MODE_CAPABILITY) && !unique.contains(DURABLE_MUTATION_CAPABILITY) {
         return Err(SessionNegotiationError::MissingSlowModeDependency);
     }
@@ -260,6 +265,8 @@ pub enum SessionNegotiationError {
     MissingReactionsDependency,
     #[error("{MESSAGE_REVISIONS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
     MissingMessageRevisionsDependency,
+    #[error("{NICKNAME_COLOURS_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
+    MissingNicknameColoursDependency,
     #[error("{ROOM_SLOW_MODE_CAPABILITY} requires {DURABLE_MUTATION_CAPABILITY}")]
     MissingSlowModeDependency,
     #[error(
