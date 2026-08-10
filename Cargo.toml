@@ -84,7 +84,7 @@ bzip2 = { version = "0.5.2", optional = true }
 crossterm = { version = "0.29", optional = true }
 directories = "5.0"
 fs4 = { version = "=1.1.0", default-features = false, features = ["sync"] }
-iced = { version = "0.14", optional = true, default-features = false, features = ["canvas", "image", "tokio", "wgpu"] }
+iced = { version = "0.14", optional = true, default-features = false, features = ["advanced", "canvas", "image", "tokio", "wgpu"] }
 iced_anim = { version = "0.3.1", optional = true, default-features = false, features = ["widgets"] }
 iced_aw = { version = "0.14.1", optional = true, default-features = false, features = ["badge", "card", "menu", "tabs", "tab_bar", "sidebar", "selection_list", "number_input", "labeled_frame"] }
 iced_drop = { version = "0.2.37", optional = true, default-features = false, features = ["helpers"] }

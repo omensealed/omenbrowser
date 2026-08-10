@@ -145,11 +145,32 @@ impl DesktopApp {
             }) => Ok(self.prepare_omenchat_pin_mutation(session_id, room_id, event_id, action)),
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
             Message::OmenChat(OmenChatMessage::ToggleNicknameColourEditor(session_id)) => {
+                let current_colour = self
+                    .omenchat
+                    .chat_client
+                    .local_user_id(session_id)
+                    .and_then(|user_id| {
+                        self.omenchat
+                            .chat_client
+                            .session(session_id)?
+                            .users
+                            .iter()
+                            .find(|user| user.user_id == user_id)
+                            .and_then(|user| user.nickname_colour_rgb)
+                    });
                 let editor = self
                     .omenchat
                     .omenchat_nickname_colour_editors
                     .entry(session_id)
-                    .or_default();
+                    .or_insert_with(|| {
+                        super::omenchat_desktop_state::OmenChatNicknameColourEditor {
+                            visible: false,
+                            input: current_colour
+                                .map(|colour| format!("#{:06X}", colour.get()))
+                                .unwrap_or_default(),
+                            selected: current_colour,
+                        }
+                    });
                 editor.visible = !editor.visible;
                 Ok(Task::none())
             }

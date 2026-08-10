@@ -13,12 +13,28 @@ use super::super::*;
 
 impl DesktopApp {
     pub(in crate::desktop) fn browser_messages_workspace_view(&self) -> Element<'_, Message> {
-        let controls = action_grid(self.workspace_primary_buttons(), 5);
-        let presets = action_grid(self.workspace_preset_buttons(), 3);
+        let history_search_available = self.app.workspace.active_section
+            == WorkspaceSection::Messages
+            && self.has_visible_lxmf_conversation_pane();
+        let mut toolbar = row![].spacing(8).width(Length::Fill);
+        for button in self.workspace_primary_buttons() {
+            toolbar = toolbar.push(button);
+        }
+        if history_search_available && !self.history_search.visible {
+            toolbar = toolbar.push(tooltip_icon_button(
+                ICON_SEARCH,
+                "Search local message history",
+                Message::HistorySearch(Box::new(HistorySearchMessage::ToggleVisible)),
+            ));
+        }
+        for preset in self.workspace_preset_buttons() {
+            toolbar = toolbar.push(preset);
+        }
+        let controls = toolbar.wrap();
         let hidden_workspace_panes = self.hidden_workspace_pane_buttons();
         let hidden_conversation_panes = self.hidden_conversation_pane_buttons();
         let history_search: Element<'_, Message> =
-            if self.app.workspace.active_section == WorkspaceSection::Messages {
+            if history_search_available && self.history_search.visible {
                 views::history_search::local_history_search_view(self)
             } else {
                 column![].into()
@@ -403,7 +419,6 @@ impl DesktopApp {
         #[cfg(feature = "chat-client")]
         let content = column![
             controls,
-            presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
             omenchat_opener,
@@ -419,7 +434,6 @@ impl DesktopApp {
         #[cfg(not(feature = "chat-client"))]
         let content = column![
             controls,
-            presets,
             hidden_workspace_panes,
             hidden_conversation_panes,
             history_search,
@@ -432,18 +446,33 @@ impl DesktopApp {
         content
     }
 
-    pub(in crate::desktop) fn workspace_preset_buttons(&self) -> Vec<Button<'_, Message>> {
+    pub(in crate::desktop) fn workspace_preset_buttons(&self) -> Vec<Element<'_, Message>> {
         [
-            ("Preset: Browser", DesktopWorkspacePreset::BrowserFocus),
-            ("Preset: Messages", DesktopWorkspacePreset::MessagesFocus),
             (
-                "Preset: Browser + Messages",
+                ICON_LAYOUT_BROWSER,
+                "Browser only",
+                DesktopWorkspacePreset::BrowserFocus,
+            ),
+            (
+                ICON_LAYOUT_MESSAGES,
+                "Messages only",
+                DesktopWorkspacePreset::MessagesFocus,
+            ),
+            (
+                ICON_LAYOUT_SPLIT,
+                "Browser + Messages",
                 DesktopWorkspacePreset::BrowserAndMessages,
+            ),
+            (
+                ICON_LAYOUT_ALL,
+                "Restore Browser, Messages, and all OMENchat panes",
+                DesktopWorkspacePreset::AllActivePanes,
             ),
         ]
         .into_iter()
-        .map(|(label, preset)| {
-            subtle_button(
+        .map(|(icon, label, preset)| {
+            tooltip_icon_button(
+                icon,
                 label,
                 Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(preset)),
             )
@@ -570,7 +599,13 @@ impl DesktopApp {
                 .map(|session| {
                     format!(
                         "{} - OMENchat",
-                        compact_label(&session.server.display_name, 32)
+                        compact_label(
+                            &self.omenchat_server_display_name(
+                                &session.server.destination,
+                                &session.server.display_name,
+                            ),
+                            32,
+                        )
                     )
                 })
                 .unwrap_or_else(|| "closed session - OMENchat".into()),
@@ -718,12 +753,49 @@ impl DesktopApp {
             .map(|session| {
                 let unread = session.active_room.unread > 0
                     || session.rooms.iter().any(|room| room.unread > 0);
+                #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
+                let connection = self.omenchat_connection_state(session.session_id).label();
+                #[cfg(not(any(feature = "chat-client-rns", feature = "chat-client-rns-clean")))]
+                let connection = "offline";
+                let server_name = self.omenchat_server_display_name(
+                    &session.server.destination,
+                    &session.server.display_name,
+                );
                 (
                     session.session_id,
-                    compact_label(&session.server.display_name, 18),
+                    format!(
+                        "{} - OMENchat · {} · #{} · {} users",
+                        compact_label(&server_name, 22),
+                        connection,
+                        compact_label(&session.active_room.name, 14),
+                        unique_chat_users(&session.users).len(),
+                    ),
                     unread,
                 )
             })
             .collect()
+    }
+
+    #[cfg(feature = "chat-client")]
+    fn omenchat_server_display_name(&self, destination: &str, fallback: &str) -> String {
+        let directory_name = self
+            .app
+            .directory_service
+            .find(destination)
+            .filter(|entry| entry.kind == crate::directory::DirectoryKind::OmenChat)
+            .map(|entry| entry.display_name)
+            .or_else(|| {
+                self.app
+                    .directory_state
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        entry.kind == crate::directory::DirectoryKind::OmenChat
+                            && entry.destination_hash.eq_ignore_ascii_case(destination)
+                    })
+                    .map(|entry| entry.display_name.clone())
+            })
+            .filter(|name| !name.trim().is_empty());
+        directory_name.unwrap_or_else(|| fallback.to_owned())
     }
 }

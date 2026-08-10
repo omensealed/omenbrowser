@@ -91,6 +91,41 @@ impl DesktopApp {
                 };
                 (panes, active)
             }
+            DesktopWorkspacePreset::AllActivePanes => {
+                let (mut panes, browser_pane) = pane_grid::State::new(browser);
+                let conversation_pane = panes
+                    .split(
+                        pane_grid::Axis::Vertical,
+                        browser_pane,
+                        conversation.clone(),
+                    )
+                    .map(|(pane, _)| pane)
+                    .unwrap_or(browser_pane);
+                let mut active = if active_kind.as_ref() == Some(&conversation) {
+                    conversation_pane
+                } else {
+                    browser_pane
+                };
+                let mut split_target = conversation_pane;
+                #[cfg(feature = "chat-client")]
+                for chat in self
+                    .omenchat
+                    .chat_client
+                    .sessions()
+                    .iter()
+                    .map(|session| DesktopPane::OmenChat(session.session_id))
+                {
+                    if let Some((chat_pane, _)) =
+                        panes.split(pane_grid::Axis::Horizontal, split_target, chat.clone())
+                    {
+                        if active_kind.as_ref() == Some(&chat) {
+                            active = chat_pane;
+                        }
+                        split_target = chat_pane;
+                    }
+                }
+                (panes, active)
+            }
         };
 
         self.workspace.workspace_panes = workspace_panes;

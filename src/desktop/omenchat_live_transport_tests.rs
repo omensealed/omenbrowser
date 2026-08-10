@@ -2,7 +2,7 @@ use super::*;
 use crate::app::{current_epoch_ms, App};
 use crate::chat::{ChatSessionId, OmenChatDescriptor};
 use crate::chat::rns::ChatLinkTransport;
-use crate::desktop::{hex_bytes, DesktopOmenChatTransport};
+use crate::desktop::{hex_bytes, DesktopOmenChatTransport, OmenChatMessage};
 use crate::runtime::{
     OmenChatLinkClosed, ResourceLifecycleEvent, ResourceLifecycleState, RuntimeBusEvent,
 };
@@ -816,4 +816,75 @@ fn moderation_audit_evidence_is_identity_scoped() {
         .omenchat
         .omenchat_moderation_audit_requests
         .contains_key(&session_id));
+}
+
+#[test]
+fn nickname_colour_editor_opens_on_saved_value_and_tracks_swatch_preview() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-nickname-colour-editor");
+    let session_id = open_connected_session(&mut desktop, [0x95; 16], "connected");
+    let saved = crate::chat::protocol::Rgb24::new(0x4f_a3_ff).expect("saved RGB24");
+    let selected = crate::chat::protocol::Rgb24::new(0xe8_79_f9).expect("selected RGB24");
+    let server_id = desktop
+        .omenchat
+        .chat_client
+        .session(session_id)
+        .expect("session")
+        .server
+        .server_id
+        .clone();
+    desktop
+        .omenchat
+        .chat_client
+        .session_mut(session_id)
+        .expect("session")
+        .users = vec![crate::chat::ChatUserSummary {
+        server_id,
+        user_id: 7,
+        display_name: "Local user".into(),
+        role_bits: 0,
+        status_bits: 0,
+        lxmf_available: false,
+        profile_revision: 1,
+        nickname_colour_rgb: Some(saved),
+    }];
+    assert!(desktop
+        .omenchat
+        .chat_client
+        .bind_local_user_id(session_id, 7));
+
+    let _ = desktop
+        .dispatch_omenchat_message(Message::OmenChat(
+            OmenChatMessage::ToggleNicknameColourEditor(session_id),
+        ))
+        .expect("toggle handled");
+    let editor = desktop
+        .omenchat
+        .omenchat_nickname_colour_editors
+        .get(&session_id)
+        .expect("editor");
+    assert!(editor.visible);
+    assert_eq!(editor.selected, Some(saved));
+    assert_eq!(editor.input, "#4FA3FF");
+
+    let _ = desktop
+        .dispatch_omenchat_message(Message::OmenChat(
+            OmenChatMessage::SelectNicknameColour {
+                session_id,
+                colour: Some(selected),
+            },
+        ))
+        .expect("swatch handled");
+    let editor = desktop
+        .omenchat
+        .omenchat_nickname_colour_editors
+        .get(&session_id)
+        .expect("editor");
+    assert_eq!(editor.selected, Some(selected));
+    assert_eq!(editor.input, "#E879F9");
+    assert_eq!(
+        desktop.omenchat.chat_client.session(session_id).unwrap().users[0]
+            .nickname_colour_rgb,
+        Some(saved),
+        "swatch selection remains a preview until the explicit Apply action"
+    );
 }

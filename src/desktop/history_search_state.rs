@@ -14,6 +14,7 @@ pub(in crate::desktop) struct LocalHistorySearchDesktopState {
     generation: u64,
     active_generation: Option<u64>,
     pending: Option<LocalHistorySearchJob>,
+    pub(in crate::desktop) visible: bool,
     pub(in crate::desktop) draft: String,
     pub(in crate::desktop) source: LocalHistorySourceFilter,
     pub(in crate::desktop) result: Option<LocalHistorySearchPage>,
@@ -21,6 +22,10 @@ pub(in crate::desktop) struct LocalHistorySearchDesktopState {
 }
 
 impl LocalHistorySearchDesktopState {
+    pub(in crate::desktop) fn toggle_visible(&mut self) {
+        self.visible = !self.visible;
+    }
+
     pub(in crate::desktop) fn update_draft(&mut self, value: String) {
         if value.len() <= LOCAL_HISTORY_SEARCH_QUERY_MAX_BYTES
             && !value.chars().any(char::is_control)
@@ -193,5 +198,15 @@ mod tests {
         state.cycle_source();
         assert_eq!(state.source, LocalHistorySourceFilter::All);
         assert!(!state.is_active());
+    }
+
+    #[test]
+    fn search_panel_is_collapsed_by_default_and_can_be_reopened() {
+        let mut state = LocalHistorySearchDesktopState::default();
+        assert!(!state.visible);
+        state.toggle_visible();
+        assert!(state.visible);
+        state.toggle_visible();
+        assert!(!state.visible);
     }
 }

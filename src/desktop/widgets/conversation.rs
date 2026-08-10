@@ -9,10 +9,10 @@ use crate::micron::render::render_document;
 use super::super::{
     desktop_message_valid_actions, failed_message_container_style, format_epoch_secs,
     incoming_message_container_style, lxmf_message_compact_stamp_status,
-    lxmf_message_compact_status, lxmf_message_status_lines, outgoing_message_container_style,
-    selected_message_container_style, status_container_style, ui_size, ConversationMessage,
-    DesktopMessageRetryLabels, Message, CONVERSATION_MICRON_PREVIEW_WIDTH,
-    CONVERSATION_PREVIEW_CHARS, CONVERSATION_PREVIEW_LINES,
+    lxmf_message_compact_status, lxmf_message_is_unconfirmed_expiry, lxmf_message_status_lines,
+    outgoing_message_container_style, selected_message_container_style, status_container_style,
+    ui_size, ConversationMessage, DesktopMessageRetryLabels, Message,
+    CONVERSATION_MICRON_PREVIEW_WIDTH, CONVERSATION_PREVIEW_CHARS, CONVERSATION_PREVIEW_LINES,
 };
 use super::{
     action_grid, conversation_message_attachment_rows, omen_button_owned, section_card,
@@ -96,7 +96,7 @@ pub(in crate::desktop) fn message_bubble<'a>(
     if selected {
         actions.extend(message_valid_action_buttons(conversation_id, message));
     }
-    if message.failed {
+    if message_has_failure_presentation(message) {
         actions.push(subtle_button_owned(
             "Close".into(),
             Message::Conversation(ConversationMessage::DismissPaneRow {
@@ -112,7 +112,7 @@ pub(in crate::desktop) fn message_bubble<'a>(
             selected_message_container_style
         } else if message.incoming {
             incoming_message_container_style
-        } else if message.failed {
+        } else if message_has_failure_presentation(message) {
             failed_message_container_style
         } else {
             outgoing_message_container_style
@@ -129,6 +129,10 @@ pub(in crate::desktop) fn message_bubble<'a>(
             .spacing(8)
             .into()
     }
+}
+
+fn message_has_failure_presentation(message: &crate::messaging::MessageSummary) -> bool {
+    message.failed && !lxmf_message_is_unconfirmed_expiry(message)
 }
 
 pub(in crate::desktop) fn selected_message_details_card(
@@ -356,6 +360,33 @@ mod tests {
         conversation.push_message(message);
 
         let _details = selected_message_details_card(conversation.id, &conversation);
+    }
+
+    #[test]
+    fn expired_receipt_observation_does_not_use_failure_card_presentation() {
+        let message = MessageSummary {
+            peer_hash: "peer".into(),
+            peer_label: "Peer".into(),
+            title: String::new(),
+            content: "Body".into(),
+            timestamp: 1.0,
+            transport_method: TransportMethod::Direct,
+            delivered: false,
+            failed: true,
+            incoming: false,
+            unread: false,
+            message_id: Some("packet-1".into()),
+            fields: BTreeMap::from([
+                ("native_lxmf_sdk_state".into(), "expired".into()),
+                (
+                    "native_lxmf_proof_state".into(),
+                    "rns_packet_proof_peer_unconfirmed".into(),
+                ),
+            ]),
+            attachments: Vec::new(),
+        };
+
+        assert!(!message_has_failure_presentation(&message));
     }
 
     #[test]

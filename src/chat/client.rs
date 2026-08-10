@@ -921,6 +921,33 @@ impl ChatClient {
         self.authoritative_reaction_targets.remove(&server_id);
     }
 
+    pub(crate) fn mark_live_reaction_target_authoritative(
+        &mut self,
+        session_id: ChatSessionId,
+        room_id: RoomId,
+        target_event_id: EventId,
+    ) -> bool {
+        let Some(server_id) = self.session(session_id).and_then(|session| {
+            session
+                .events
+                .iter()
+                .any(|event| {
+                    event.room_id == room_id
+                        && event.event_id == target_event_id
+                        && !is_transient_local_event_id(event.event_id)
+                        && chat_event_supports_reactions(event)
+                })
+                .then(|| session.server.server_id.clone())
+        }) else {
+            return false;
+        };
+        self.prune_reaction_state_for_server(&server_id);
+        self.authoritative_reaction_targets
+            .entry(server_id)
+            .or_default()
+            .insert((room_id, target_event_id))
+    }
+
     pub(crate) fn apply_reaction_event(
         &mut self,
         session_id: ChatSessionId,

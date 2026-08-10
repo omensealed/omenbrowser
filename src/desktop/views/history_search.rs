@@ -62,6 +62,11 @@ pub(in crate::desktop) fn local_history_search_view(desktop: &DesktopApp) -> Ele
             submit_label,
             Message::HistorySearch(Box::new(HistorySearchMessage::SubmitCurrent)),
         ),
+        tooltip_icon_button(
+            ICON_WINDOW_CLOSE,
+            "Close local history search",
+            Message::HistorySearch(Box::new(HistorySearchMessage::ToggleVisible)),
+        ),
     ]
     .spacing(8);
 
