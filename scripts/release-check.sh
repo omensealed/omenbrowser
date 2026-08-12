@@ -116,6 +116,7 @@ if [[ "$mode" == "package" ]]; then
   require_file "$package_dir/START.txt"
   require_file "$package_dir/SHA256SUMS"
   require_file "$package_dir/PACKAGE-METADATA.txt"
+  require_file "$package_dir/docs/CURRENT_STATUS.md"
   require_file "$package_dir/docs/QUICKSTART.md"
   require_file "$package_dir/docs/TESTING.md"
   require_file "$package_dir/docs/OMENCHAT.md"
@@ -251,6 +252,10 @@ bash -n scripts/test-linux-arm64-headless.sh
 bash -n scripts/test-omenchatd-private-service.sh
 bash -n scripts/verify-private-storage-policy.sh
 bash -n scripts/verify-reticulum-resource-compat.sh
+bash -n scripts/verify-documentation.sh
+
+echo "== Current documentation =="
+bash scripts/verify-documentation.sh
 
 echo "== Private storage policy =="
 bash scripts/verify-private-storage-policy.sh

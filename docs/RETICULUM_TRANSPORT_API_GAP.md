@@ -284,7 +284,11 @@ timeouts, and cancellation close it. A stale retained link is closed, removed,
 and replaced before the next dispatch. Current Python proves two sequential
 executable requests use one link and return exact visit-specific bytes.
 
-## Phase 4 workaround decision matrix
+## Historical Phase 4 workaround decision matrix
+
+This matrix records the evidence available during the earlier 0.9 migration.
+Its “current” labels refer to the release named in each row or paragraph, not
+to the product described by [Current Status](CURRENT_STATUS.md).
 
 | Gap/workaround | 0.6 reason | 0.9 candidate | Rust-Rust evidence | Rust-Python evidence | Performance | Current decision | Earliest fallback removal |
 |---|---|---|---|---|---|---|---|
@@ -395,7 +399,7 @@ multiple recipients, mixed versions, and peer delivery after node acceptance
 remain pending. Propagation-node acknowledgement is not peer-level delivery.
 
 Mixed-application direct update (2026-07-17): the hardened `0.6.0-1`
-application at immutable commit `5ba6683` and the current `0.9.5-1` application
+application at immutable commit `5ba6683` and the then-current `0.9.5-1` application
 now pass reciprocal direct Link-packet delivery through isolated Python RNS
 1.3.8 transport. Each process authenticates the other's announce, submits one
 direct message, and admits exactly one matching peer reply with the expected
@@ -439,7 +443,7 @@ SQLite format reopening between the hardened applications; it does not prove a
 mixed live OMENchat link, history Resource transfer, or crash durability.
 
 Mixed live OMENchat update (2026-07-17): both application directions now pass
-over isolated ephemeral loopback Reticulum interfaces. The current `0.9.5-1`
+over isolated ephemeral loopback Reticulum interfaces. The then-current `0.9.5-1`
 canonical desktop client connects to the immutable hardened `0.6.0-1`
 standalone server, and the old client separately connects to the current
 server. Each starts the runtime, opens a link and OMENchat session, joins the

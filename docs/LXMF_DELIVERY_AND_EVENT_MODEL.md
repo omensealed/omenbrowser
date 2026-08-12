@@ -334,8 +334,8 @@ random offer/correlation identifier, not a Reticulum Resource hash: the locked
 0.9.8 public Resource API binds hashes and part requests to an active Link
 transfer rather than exposing a durable object fetch. A future authenticated
 accept exchange must start the actual Resource and bind its observed hash to
-the accepted offer. The detailed activation and storage gates are recorded in
-`docs/design/LXMF_RESOURCE_REFERENCE_ATTACHMENTS_CHECKPOINT.md`.
+the accepted offer. This remains deferred work, not an active or negotiated
+product capability.
 
 Propagation-node diagnostics also project operational evidence already owned
 elsewhere in the application. The current single-flight refresh contributes
@@ -583,7 +583,7 @@ The Linux interoperability harness exports immutable hardened commit
 `5ba6683055fb6c59111919fbad1ac37f56a4c203` into a temporary source root and
 builds its `0.6.0-1` application and lockfile independently. It does not add
 0.6 crates to either current production dependency tree. That process and the
-current `0.9.6-2` process receive separate identities, configuration, storage,
+then-current `0.9.6-2` process receive separate identities, configuration, storage,
 and application roots and connect only through a temporary Python RNS 1.3.8
 transport with public fixture IFAC credentials.
 
@@ -615,7 +615,7 @@ SQLite conversation-history migration. Mixed propagation and 0.6
 release-tag-before-hardening behavior remain separate evidence.
 
 The mixed propagation case now proves one direction without changing either
-application protocol or runtime adapter. The current `0.9.6-2` application
+application protocol or runtime adapter. The then-current `0.9.6-2` application
 submits one propagated message to an isolated Python RNS 1.3.8/LXMF 1.0.1
 transport/propagation node. The immutable hardened `0.6.0-1` application then
 reopens its identity, requests one transient, authenticates and decodes the

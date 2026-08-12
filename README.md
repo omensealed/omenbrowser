@@ -37,7 +37,10 @@ Click a thumbnail to open the full-size workspace screenshot.
   independent from the browser and owns its own storage root.
 - `TESTERS.md`: concise tester sheet included at the root of the packaged
   archive.
-- `docs/TESTING.md`: practical tester path.
+- `docs/CURRENT_STATUS.md`: authoritative current version, capabilities, and
+  limitations.
+- `docs/README.md`: documentation index.
+- `docs/TESTING.md`: current test and qualification commands.
 
 ## Identity And Storage Safety
 

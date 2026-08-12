@@ -41,4 +41,12 @@ Requires `appimagetool`.
 The repository includes:
 
 - `.github/workflows/ci.yml` for the quick gate;
-- `.github/workflows/package.yml` for manual package artifact builds.
+- `.github/workflows/package.yml` for tag-triggered release packages and
+  explicit maintainer package runs;
+- `.github/workflows/python-interop.yml` for pinned/current Python and
+  mixed-release evidence;
+- `.github/workflows/linux-arm64-headless.yml` for native ARM64 `omenchatd`.
+
+Only a tag whose commit has passed the required candidate and post-merge gates
+may publish a release. A successful workflow on another SHA is not evidence for
+the candidate.

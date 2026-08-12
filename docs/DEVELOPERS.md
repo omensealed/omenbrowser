@@ -88,6 +88,12 @@ Fast pre-share gate:
 bash scripts/release-check.sh quick
 ```
 
+Current-documentation consistency:
+
+```bash
+bash scripts/verify-documentation.sh
+```
+
 Optimized cache-index comparison (isolated generated fixtures only):
 
 ```bash

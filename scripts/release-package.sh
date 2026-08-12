@@ -4,6 +4,9 @@ set -euo pipefail
 out_root="${1:-dist}"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+version_token="${version//./_}"
+version_token="${version_token//-/_}"
+release_notes="RELEASE_NOTES_V${version_token}.md"
 target_dir="${out_root%/}/OMENbrowser_rs-${version:-unknown}-${timestamp}"
 browser_features="${OMENBROWSER_BROWSER_FEATURES:-desktop-product}"
 
@@ -15,19 +18,32 @@ echo "== Building omenchatd release =="
 cargo build --release --locked --manifest-path src/server/Cargo.toml --no-default-features --features server-full
 
 echo "== Staging release package =="
-mkdir -p "$target_dir/bin" "$target_dir/docs" "$target_dir/scripts" "$target_dir/src-server" "$target_dir/packaging/systemd"
+mkdir -p "$target_dir/bin" "$target_dir/docs/maintenance" "$target_dir/scripts" "$target_dir/src-server" "$target_dir/packaging/systemd"
 
 cp target/release/omenbrowser_rs "$target_dir/bin/"
 cp src/server/target/release/omenchatd "$target_dir/bin/"
 cp README.md "$target_dir/"
 cp TESTERS.md "$target_dir/"
 cp docs/README.md "$target_dir/docs/"
+cp docs/CURRENT_STATUS.md "$target_dir/docs/"
+cp docs/HISTORY.md "$target_dir/docs/"
 cp docs/QUICKSTART.md "$target_dir/docs/"
+cp docs/GETTING_ONLINE.md "$target_dir/docs/"
 cp docs/TESTING.md "$target_dir/docs/"
 cp docs/OMENCHAT.md "$target_dir/docs/"
 cp docs/OMENCHAT_PROTOCOL.md "$target_dir/docs/"
 cp docs/CONFIGURATION.md "$target_dir/docs/"
+cp docs/NETWORK_BACKENDS.md "$target_dir/docs/"
+cp docs/PRIVATE_STORAGE.md "$target_dir/docs/"
+cp docs/PACKAGING.md "$target_dir/docs/"
+cp docs/RELEASE_VERSIONING.md "$target_dir/docs/"
+cp docs/DEVELOPERS.md "$target_dir/docs/"
+cp docs/LXMF_DELIVERY_AND_EVENT_MODEL.md "$target_dir/docs/"
+cp docs/OPERATIONS_TRANSFERS.md "$target_dir/docs/"
+cp docs/RETICULUM_TRANSPORT_API_GAP.md "$target_dir/docs/"
 cp docs/TROUBLESHOOTING.md "$target_dir/docs/"
+cp docs/maintenance/DEPENDENCY_SECURITY.md "$target_dir/docs/maintenance/"
+cp "docs/$release_notes" "$target_dir/docs/"
 cp assets/fonts/adwaita/OFL.txt "$target_dir/docs/ADWAITA_MONO_OFL.txt"
 cp scripts/release-collect.sh "$target_dir/scripts/"
 cp scripts/release-omenchat-smoke.sh "$target_dir/scripts/"
@@ -210,12 +226,25 @@ rm -rf "$selfcheck_home"
     omenchatd-status-selfcheck.txt \
     omenchatd-doctor-selfcheck.txt \
     docs/README.md \
+    docs/CURRENT_STATUS.md \
+    docs/HISTORY.md \
     docs/QUICKSTART.md \
+    docs/GETTING_ONLINE.md \
     docs/TESTING.md \
     docs/OMENCHAT.md \
     docs/OMENCHAT_PROTOCOL.md \
     docs/CONFIGURATION.md \
+    docs/NETWORK_BACKENDS.md \
+    docs/PRIVATE_STORAGE.md \
+    docs/PACKAGING.md \
+    docs/RELEASE_VERSIONING.md \
+    docs/DEVELOPERS.md \
+    docs/LXMF_DELIVERY_AND_EVENT_MODEL.md \
+    docs/OPERATIONS_TRANSFERS.md \
+    docs/RETICULUM_TRANSPORT_API_GAP.md \
     docs/TROUBLESHOOTING.md \
+    docs/maintenance/DEPENDENCY_SECURITY.md \
+    "docs/$release_notes" \
     docs/ADWAITA_MONO_OFL.txt \
     scripts/release-collect.sh \
     scripts/release-omenchat-smoke.sh \
