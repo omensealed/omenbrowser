@@ -99,8 +99,8 @@ rejects the qualification hook from release graphs.
 
 Neither feature adds a runtime, interface, worker, timer, queue, cache,
 subscription, or dependency. The production activation and rollback decision
-is recorded in
-`audits/omenchat-room-media-policy-activation-review.md`.
+is enforced by the shared capability fixtures, product-feature verifier, and
+current OMENchat test matrix.
 
 ## Security and ownership requirements
 
