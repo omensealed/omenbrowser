@@ -116,7 +116,7 @@ impl DesktopApp {
                 )
             ) {
                 format!(
-                    "OMENchat transfer failed on the current route; attachment was not committed; upstream 0.9.8 routed Resource retransmission limits may apply; released {released} pending offer(s); no automatic retry occurred"
+                    "OMENchat transfer failed on the current route; attachment was not committed; upstream 0.9.9 routed Resource retransmission limits may apply; released {released} pending offer(s); no automatic retry occurred"
                 )
             } else {
                 format!(

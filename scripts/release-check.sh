@@ -274,7 +274,7 @@ bash scripts/verify-release-version.sh
 echo "== Reticulum/LXMF dependency train =="
 bash scripts/verify-reticulum-train.sh
 
-echo "== Reticulum 0.9.8 Resource compatibility =="
+echo "== Reticulum 0.9.9 Resource compatibility =="
 bash scripts/verify-reticulum-resource-compat.sh
 
 echo "== Accepted build-time advisory boundary =="

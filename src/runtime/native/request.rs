@@ -353,7 +353,7 @@ impl RequestEventLagEvidence {
 
 fn resource_assembly_timeout_suffix(resource_activity_observed: bool) -> &'static str {
     if resource_activity_observed {
-        "; Resource assembly did not complete on the current Reticulum 0.9.8 train; no retry was attempted"
+        "; Resource assembly did not complete on the current Reticulum 0.9.9 train; no retry was attempted"
     } else {
         ""
     }
@@ -2367,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn reticulum098_public_link_mtu_reports_legacy_clamped_and_signalled_values() {
+    fn reticulum099_public_link_mtu_reports_legacy_clamped_and_signalled_values() {
         let remote_identity = rns_transport::identity::PrivateIdentity::new_from_name(
             "omenbrowser-phase-5-link-mtu-peer",
         );
@@ -2535,7 +2535,7 @@ mod tests {
 
         assert!(ordinary.is_empty());
         assert!(incomplete.contains("Resource assembly did not complete"));
-        assert!(incomplete.contains("Reticulum 0.9.8"));
+        assert!(incomplete.contains("Reticulum 0.9.9"));
         assert!(incomplete.contains("no retry was attempted"));
         assert!(incomplete.len() < 128);
         assert!(!incomplete.contains("destination"));

@@ -252,7 +252,7 @@ fn pinned_python_reticulum_rejects_forgery_and_orders_stale_current_proofs() {
         })
         .await
         .expect("matching Python announce event");
-        // reticulum-rs-transport 0.9.8 mirrors reference Reticulum by
+        // reticulum-rs-transport 0.9.9 mirrors reference Reticulum by
         // incrementing the packet hop count on receipt before publishing the
         // AnnounceEvent. A directly connected Python peer is therefore one
         // observed network hop away.

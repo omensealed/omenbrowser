@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use tokio::time::timeout;
 
 #[tokio::test]
-async fn locked_098_public_resource_hash_is_observable_before_dispatch_and_cancellable() {
+async fn locked_099_public_resource_hash_is_observable_before_dispatch_and_cancellable() {
     let local_identity =
         PrivateIdentity::new_from_name("omenbrowser-resource-reference-evidence-local");
     let config = reticulum_rs::runtime::TransportConfig::new(
@@ -113,7 +113,7 @@ async fn locked_098_public_resource_hash_is_observable_before_dispatch_and_cance
 }
 
 #[test]
-fn locked_098_resource_complete_retains_payload_and_metadata_as_owned_vectors() {
+fn locked_099_resource_complete_retains_payload_and_metadata_as_owned_vectors() {
     fn owned_buffers(
         complete: rns_transport::resource::ResourceComplete,
     ) -> (Vec<u8>, Option<Vec<u8>>) {

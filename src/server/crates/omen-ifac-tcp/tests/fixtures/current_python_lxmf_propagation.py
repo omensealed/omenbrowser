@@ -11,8 +11,8 @@ import threading
 import time
 
 
-RNS_VERSION = "1.4.0"
-LXMF_VERSION = "1.1.0"
+RNS_VERSION = "1.4.2"
+LXMF_VERSION = "1.1.1"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 TITLE = "Current Python propagated LXMF"
