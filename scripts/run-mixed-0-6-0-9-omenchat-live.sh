@@ -6,6 +6,7 @@ readonly repo_root
 readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
 readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
+readonly expect_legacy_capabilities=${OMEN_MIXED_EXPECT_LEGACY_CAPABILITIES:-1}
 readonly current_expected_version=0.9.9-1
 readonly current_client_features=${OMEN_MIXED_CURRENT_CLIENT_FEATURES:-desktop-product}
 readonly current_server_features=${OMEN_MIXED_CURRENT_SERVER_FEATURES:-server-headless}
@@ -14,6 +15,13 @@ case "$old_server_stop_mode" in
   orderly|sigterm) ;;
   *)
     echo "OMEN_MIXED_OLD_SERVER_STOP_MODE must be orderly or sigterm" >&2
+    exit 2
+    ;;
+esac
+case "$expect_legacy_capabilities" in
+  0|1) ;;
+  *)
+    echo "OMEN_MIXED_EXPECT_LEGACY_CAPABILITIES must be 0 or 1" >&2
     exit 2
     ;;
 esac
@@ -149,7 +157,8 @@ fi
 summary="$temporary_root/summary.json"
 python3 - "$smoke_report" "$summary" "$old_commit" "$client_version" \
   "$server_version" "$direction" "$restart" "$restart_report" \
-  "$restart_stop" "$history_resource" "$history_report" "$((1 - reverse))" <<'PY'
+  "$restart_stop" "$history_resource" "$history_report" "$((1 - reverse))" \
+  "$expect_legacy_capabilities" <<'PY'
 import json
 import pathlib
 import sys
@@ -179,7 +188,8 @@ if room.get("joined") is not True or session.get("event_count", 0) < 1:
     raise RuntimeError("mixed OMENchat live session state was incomplete")
 
 current_client = sys.argv[12] == "1"
-if current_client:
+expect_legacy_capabilities = sys.argv[13] == "1"
+if current_client and expect_legacy_capabilities:
     capabilities = stages.get("capability_observation", {})
     if capabilities.get("announcement_rooms_negotiated") is not False:
         raise RuntimeError("adjacent server unexpectedly negotiated announcement rooms")
@@ -268,7 +278,7 @@ summary = {
     "session_event_count_positive": True,
     "isolated_loopback": True,
 }
-if current_client:
+if current_client and expect_legacy_capabilities:
     summary.update(
         {
             "current_client_legacy_room_projection": True,
@@ -279,8 +289,10 @@ if current_client:
             "room_upload_max_file_bytes": None,
         }
     )
-else:
+elif not current_client:
     summary["adjacent_client_completed_against_current_server"] = True
+else:
+    summary["current_client_completed_against_adjacent_server"] = True
 if restart:
     summary.update(
         {

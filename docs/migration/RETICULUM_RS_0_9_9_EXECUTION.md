@@ -86,6 +86,17 @@ The pre-upgrade command/result and resource anchors are recorded in
 - Linux ARM64 protocol/server tests (484 passed, 15 deliberate ignored, five
   documented host-reexec skips) and the release archive lifecycle passed under
   Cross/QEMU through Podman;
+- the Linux package archive and isolated package smoke passed, including
+  checksum/extraction checks, binary help, isolated server initialization and
+  status, support collection, and two isolated OMENchat clients;
+- adjacent v0.9.8-5/v0.9.9-1 LXMF passed bidirectionally before and after
+  restart with stable identities/destinations, reused state roots, correlated
+  proofs and message identifiers, and no duplicate inbound messages;
+- the OMENchat SQLite store passed old-to-current-to-old-to-current reopening:
+  three ordered events and active-room/server metadata remained intact;
+- live OMENchat passed in both adjacent directions before and after orderly
+  server restart, with stable server destinations, reused client roots, and
+  post-restart link/session/join/message echo;
 - focused SDK/RPC rejection, Resource timeout/no-replay, LXMF topic, IFAC, and
   NomadNet responder tests;
 - zero-vulnerability project advisory policy plus supported `cargo audit` and
@@ -118,7 +129,7 @@ all subsequent IFAC, proof, propagation, stamp, direct-Resource, ticket, and
 restart-recovery checks. No deadline or assertion was weakened; the initial
 transient result remains retained as evidence.
 
-Remaining live process, package, ARM64, and final wrapper results are recorded
-in the retained ignored report under
-`target/upgrade-v0.9.9-1/` and in the final release handoff. A lane not executed
-on this commit is not treated as passing.
+Detailed live-process, package, ARM64, adjacent-version, and final-wrapper
+results are retained under `target/upgrade-v0.9.9-1/`. Native Windows MSVC,
+Intel macOS, and Apple Silicon remain hosted-runner gates and are not treated
+as local passes. A lane not executed on this commit is not treated as passing.

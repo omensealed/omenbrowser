@@ -48,6 +48,8 @@ Reticulum/LXMF crate train: exact official crates.io `0.9.9`.
 - There is no automatic send, request, Resource, or durable-mutation retry;
   no post-dispatch backend/primitive fallback; and no second dispatch.
 - Product limits and negotiated smaller limits are unchanged.
-- Because no persistent format changes, rollback to v0.9.8-5 is binary-only
-  after normal shutdown and preservation of the existing application/server
-  roots.
+- Copied-state qualification passed across v0.9.8-5 and v0.9.9-1 in both
+  directions for OMENchat history and live restart, and the adjacent LXMF lane
+  preserved identities/destinations and reused state roots. Rollback to
+  v0.9.8-5 is therefore binary-only after normal shutdown and preservation of
+  the existing application/server roots.

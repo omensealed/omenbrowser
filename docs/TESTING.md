@@ -166,7 +166,12 @@ bash scripts/run-current-python-drift.sh \
 
 Mixed-release scripts under `scripts/run-mixed-0-6-0-9-*.sh` qualify the
 maintained compatibility boundary. They build immutable historical source in
-isolated targets and must not reuse normal roots.
+isolated targets and must not reuse normal roots. The live OMENchat harness
+defaults to the legacy capability-shape assertions used by the v0.6 boundary.
+For an adjacent release that already implements the negotiated capability
+fabric, set `OMEN_MIXED_EXPECT_LEGACY_CAPABILITIES=0`; this keeps the common
+link/session/join/message/restart assertions while avoiding a false claim that
+the adjacent peer should suppress capabilities it legitimately supports.
 
 ## Resource limitations and sentinels
 

@@ -34,9 +34,11 @@ Released baseline: `v0.9.8-5` / `5de9b897f79fbf2309549c680e05946da0fc9f6c`
 - [x] Local smoke matrix, including two-client OMENchat, Resource transfer,
       integrated LXMF loopback, NomadNet fetch, diagnostics, and scroll.
 - [x] Consolidated full release check.
-- [ ] Linux package candidate and isolated package smoke.
+- [x] Linux package candidate and isolated package smoke.
 - [x] Linux ARM64 Cross/QEMU headless tests and package lifecycle through
       Podman.
+- [x] Adjacent v0.9.8-5/current LXMF restart, OMENchat SQLite reopening, and
+      bidirectional live OMENchat restart lanes with isolated state roots.
 - [ ] Native Windows MSVC, Intel macOS, and Apple Silicon hosted lanes.
 - [ ] Reviewed candidate merged, tagged, packaged, and published.
 
@@ -44,6 +46,9 @@ Unchecked hosted/publication items are not local passing claims.
 
 ## Rollback
 
-After orderly shutdown, preserve both application/server roots and install the
-v0.9.8-5 binaries. No database, configuration, cache, identity, destination,
-message, ticket, upload-content, or Reticulum-storage rollback is required.
+Copied-state evidence passed: v0.9.8-5 wrote state, v0.9.9-1 reopened and
+extended it, v0.9.8-5 reopened the result, and v0.9.9-1 performed the final
+read. After orderly shutdown, preserve both application/server roots and
+install the v0.9.8-5 binaries. No database, configuration, cache, identity,
+destination, message, ticket, upload-content, or Reticulum-storage rollback is
+required.
