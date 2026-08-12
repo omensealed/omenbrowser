@@ -156,7 +156,8 @@ bash scripts/run-pinned-python-reticulum.sh \
   --lxmf-source /path/to/pinned/LXMF
 ```
 
-The current Python drift lane is informational and may identify upstream drift:
+The current Python drift lane is informational and may identify upstream
+drift. For v0.9.9-1 it resolves RNS 1.4.2, LXMF 1.1.1, and NomadNet 1.2.8:
 
 ```bash
 bash scripts/run-current-python-drift.sh \
@@ -169,7 +170,7 @@ isolated targets and must not reuse normal roots.
 
 ## Resource limitations and sentinels
 
-The Reticulum 0.9.8 split-metadata regression is a normal passing test. The
+The Reticulum 0.9.9 split-metadata regression is a normal passing test. The
 independent maximum-UDP wire-buffer limitation remains an explicit ignored
 sentinel:
 
@@ -183,14 +184,19 @@ cargo test --locked --manifest-path src/server/Cargo.toml \
 
 cargo test --locked --manifest-path src/server/Cargo.toml \
   --no-default-features --features server-headless \
+  reticulum_routed_resource_retransmission_survives_fragment_loss \
+  -- --ignored --nocapture
+
+cargo test --locked --manifest-path src/server/Cargo.toml \
+  --no-default-features --features server-headless \
   reticulum_udp_tx_buffer_covers_max_resource_wire_packet \
   -- --ignored --nocapture
 ```
 
-The UDP sentinel is expected to expose the upstream limitation until an
-official fixed crate train is adopted and requalified. Do not weaken, rename,
-or silently skip it. Routed multi-hop Resource retransmission remains a
-separate limitation documented in
+The routed and UDP sentinels are expected to expose their independent upstream
+limitations until an official fixed crate train is adopted and requalified.
+Do not weaken, rename, merge, or silently skip either one. The routed boundary
+is documented in
 [Reticulum Transport API Gaps](RETICULUM_TRANSPORT_API_GAP.md).
 
 ## Hosted and platform evidence

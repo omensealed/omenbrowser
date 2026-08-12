@@ -1,15 +1,15 @@
 # Current product status
 
-This page describes the released `v0.9.8-5` product. Source code and automated
+This page describes the released `v0.9.9-1` product. Source code and automated
 tests outrank prose if a development branch has advanced beyond that tag.
 
 ## Version and compatibility
 
 | Component | Current value |
 |---|---|
-| OMENbrowser_rs | `0.9.8-5` |
-| standalone omenchatd | `0.9.8-5` |
-| Reticulum/LXMF Rust train | exact official crates.io `0.9.8` |
+| OMENbrowser_rs | `0.9.9-1` |
+| standalone omenchatd | `0.9.9-1` |
+| Reticulum/LXMF Rust train | exact official crates.io `0.9.9` |
 | OMENchat wire protocol | version `1` |
 | omenchat-protocol Rust API | `0.2.0` |
 | omenchatd SQLite schema | `14` |
@@ -50,7 +50,7 @@ in [OMENchat Protocol](OMENCHAT_PROTOCOL.md).
 ## Important limitations
 
 - Routed multi-hop Resource retransmission is not fully qualified on upstream
-  Reticulum 0.9.8. Direct/local attachment paths are distinct from routed
+  Reticulum 0.9.9. Direct/local attachment paths are distinct from routed
   qualification, and OMEN never automatically replays an uncertain transfer.
 - The independent maximum-UDP Resource sentinel remains visible: upstream's
   fixed transmit buffer is smaller than the maximum serialized wire packet.
@@ -78,6 +78,6 @@ removal conditions.
 ## Release evidence
 
 The latest release notes are
-[v0.9.8-5](RELEASE_NOTES_V0_9_8_5.md). Current commands are in
+[v0.9.9-1](RELEASE_NOTES_V0_9_9_1.md). Current commands are in
 [Testing](TESTING.md). Hosted CI and package results are evidence only for the
 commit SHA on which they ran.

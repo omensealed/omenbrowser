@@ -66,7 +66,7 @@ omenchatd interfaces tcp-client gateway.example:42420 \
 ```
 
 `--passphrase-prompt` and `--passphrase-stdin` are also supported. Stock
-Reticulum 0.9.8 TCP does not enforce the Python-compatible IFAC transform;
+Reticulum 0.9.9 TCP does not enforce the Python-compatible IFAC transform;
 OMEN retains its narrow project-local TCP client adapter. Run the enforcing
 gateway as the server.
 
@@ -129,7 +129,7 @@ authoritative.
 
 Direct/local Reticulum Resource attachments are supported by the maintained
 smoke matrix. Routed multi-hop retransmission is not fully qualified on the
-official Reticulum 0.9.8 train. A terminal route failure does not trigger an
+official Reticulum 0.9.9 train. A terminal route failure does not trigger an
 automatic retry, alternate primitive, or application-level fragmentation.
 Retry manually after a route or condition change.
 
