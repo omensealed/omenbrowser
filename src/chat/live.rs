@@ -3493,7 +3493,17 @@ fn apply_frame_with_state(
             };
             let gap_detected =
                 live_event_gap_detected(client, session_id, event.room_id, event.event_id);
-            append_event(client, session_id, event.clone(), false);
+            let retained = append_event(client, session_id, event.clone(), false);
+            let reactions_negotiated = state
+                .as_deref()
+                .is_some_and(|state| state.reactions_negotiated(session_id));
+            if retained && reactions_negotiated {
+                client.mark_live_reaction_target_authoritative(
+                    session_id,
+                    event.room_id,
+                    event.event_id,
+                );
+            }
             events.push(ChatClientEvent::EventAppended { session_id, event });
             if gap_detected {
                 events.push(ChatClientEvent::HistorySyncNeeded {
@@ -6170,6 +6180,66 @@ mod tests {
         client.mark_reactions_stale(session_id);
         assert!(!client.reaction_snapshot_complete(session_id, 1, 10));
         assert_eq!(client.reactions_for_targets(session_id, 1, &[10]), retained);
+    }
+
+    #[test]
+    fn negotiated_live_room_event_starts_with_authoritative_empty_reactions() {
+        let (mut client, session_id) = reaction_test_client();
+        let mut state = LiveChatClientState::default();
+        state.set_reactions_negotiated_for_test(session_id, true);
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::RoomEvent,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![event_value(11, 7, "new message")]),
+            ),
+            &mut events,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::EventAppended { event, .. }] if event.event_id == 11
+        ));
+        assert!(client.reaction_snapshot_complete(session_id, 1, 11));
+        assert!(client
+            .reactions_for_targets(session_id, 1, &[11])
+            .is_empty());
+    }
+
+    #[test]
+    fn live_room_event_without_reaction_negotiation_is_not_reaction_authoritative() {
+        let (mut client, session_id) = reaction_test_client();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let mut events = Vec::new();
+
+        apply_frame_with_state(
+            &mut client,
+            Some(&mut state),
+            &mut transport,
+            Some(session_id),
+            Frame::new(
+                ChatOp::RoomEvent,
+                1,
+                Some(1),
+                FrameBody::Fields(vec![event_value(11, 7, "legacy message")]),
+            ),
+            &mut events,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::EventAppended { event, .. }] if event.event_id == 11
+        ));
+        assert!(!client.reaction_snapshot_complete(session_id, 1, 11));
     }
 
     #[test]

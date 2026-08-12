@@ -175,6 +175,49 @@ fn browser_and_messages_preset_persists_a_bounded_two_pane_layout() {
     ));
 }
 
+#[cfg(feature = "chat-client")]
+#[test]
+fn all_active_panes_preset_restores_browser_messages_and_every_omenchat_session() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-all-panes-preset");
+    let first_chat = open_test_omenchat_session(&mut desktop);
+    let second_chat = desktop.open_omenchat_status_session(
+        crate::chat::OmenChatDescriptor {
+            server_destination: "ffeeddccbbaa99887766554433221100".into(),
+            display_name: Some("Second Chat".into()),
+            rooms_hint: vec!["help".into()],
+            local_display_name: Some("tester".into()),
+            ..crate::chat::OmenChatDescriptor::default()
+        },
+        "connected".into(),
+    );
+    let browser = DesktopPane::Browser(desktop.app.active_browser_tab().id);
+    let messages = DesktopPane::Conversation(desktop.app.active_conversation().id);
+
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(
+        DesktopWorkspacePreset::BrowserFocus,
+    )));
+    assert_eq!(desktop.workspace.workspace_panes.len(), 1);
+
+    let _ = desktop.update(Message::WorkspacePane(WorkspacePaneMessage::ApplyPreset(
+        DesktopWorkspacePreset::AllActivePanes,
+    )));
+
+    assert_eq!(desktop.workspace.workspace_panes.len(), 4);
+    for expected in [
+        browser,
+        messages,
+        DesktopPane::OmenChat(first_chat),
+        DesktopPane::OmenChat(second_chat),
+    ] {
+        assert!(desktop
+            .workspace
+            .workspace_panes
+            .iter()
+            .any(|(_, pane)| pane == &expected));
+    }
+    assert_eq!(desktop.app.settings.ui.desktop_workspace_panes.len(), 4);
+}
+
 #[test]
 fn close_pane_does_not_close_backing_browser_tab() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-close-pane");
@@ -501,6 +544,55 @@ fn omenchat_pane_subtitle_does_not_duplicate_room_topic() {
 
 #[cfg(feature = "chat-client")]
 #[test]
+fn omenchat_pane_and_restore_label_prefer_directory_name_and_keep_server_stats() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-directory-title");
+    let session_id = open_test_omenchat_session(&mut desktop);
+    desktop
+        .app
+        .directory_service
+        .ingest_announce(
+            FIXTURE_CHAT_SERVER_HASH,
+            "NEMO",
+            crate::directory::DirectoryKind::OmenChat,
+            None,
+            None,
+        )
+        .expect("directory announce");
+    if let Some(session) = desktop.omenchat.chat_client.session_mut(session_id) {
+        for (user_id, name) in [(7, "Alice"), (8, "Bob")] {
+            session.users.push(crate::chat::ChatUserSummary {
+                server_id: FIXTURE_CHAT_SERVER_HASH.into(),
+                user_id,
+                display_name: name.into(),
+                role_bits: 0,
+                status_bits: 0,
+                lxmf_available: false,
+                profile_revision: 0,
+                nickname_colour_rgb: None,
+            });
+        }
+    }
+
+    assert_eq!(
+        desktop.workspace_pane_title(&DesktopPane::OmenChat(session_id)),
+        "NEMO - OMENchat"
+    );
+
+    let _ = desktop.restore_desktop_pane(DesktopPane::OmenChat(session_id));
+    let pane = desktop
+        .find_workspace_pane(&DesktopPane::OmenChat(session_id))
+        .expect("omenchat pane");
+    desktop.close_workspace_pane(pane);
+    assert!(desktop
+        .hidden_omenchat_panes()
+        .iter()
+        .any(|(hidden_id, label, _)| {
+            *hidden_id == session_id && label == "NEMO - OMENchat · disconnected · #lobby · 2 users"
+        }));
+}
+
+#[cfg(feature = "chat-client")]
+#[test]
 fn hidden_omenchat_panes_report_unread_state_for_restore_tabs() {
     let mut desktop = desktop_with_temp_root("omenbrowser-rs-desktop-hidden-omenchat-unread");
     let session_id = open_test_omenchat_session(&mut desktop);
@@ -521,7 +613,9 @@ fn hidden_omenchat_panes_report_unread_state_for_restore_tabs() {
         .hidden_omenchat_panes()
         .iter()
         .any(|(hidden_id, label, unread)| {
-            *hidden_id == session_id && label == "Test OMENchat" && *unread
+            *hidden_id == session_id
+                && label == "Test OMENchat - OMENchat · disconnected · #lobby · 0 users"
+                && *unread
         }));
 }
 
@@ -981,6 +1075,25 @@ fn workspace_visibility_excludes_nonmaximized_and_inactive_section_panes() {
     assert!(!desktop.workspace_pane_is_visible(&panes[0].1));
     desktop.workspace.workspace_panes.restore();
     assert!(!desktop.workspace_pane_is_visible(&panes[1].1));
+}
+
+#[test]
+fn history_search_context_requires_a_visible_lxmf_conversation_pane() {
+    let mut desktop = desktop_with_temp_root("omenbrowser-rs-history-search-pane-visibility");
+    desktop.app.workspace.active_section = WorkspaceSection::Messages;
+    assert!(desktop.has_visible_lxmf_conversation_pane());
+
+    let browser_pane = desktop
+        .workspace
+        .workspace_panes
+        .iter()
+        .find_map(|(pane, kind)| matches!(kind, DesktopPane::Browser(_)).then_some(*pane))
+        .expect("browser pane");
+    desktop.workspace.workspace_panes.maximize(browser_pane);
+    assert!(!desktop.has_visible_lxmf_conversation_pane());
+
+    desktop.workspace.workspace_panes.restore();
+    assert!(desktop.has_visible_lxmf_conversation_pane());
 }
 
 #[test]

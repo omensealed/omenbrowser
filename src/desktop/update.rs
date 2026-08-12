@@ -768,6 +768,7 @@ mod tests {
     #[test]
     fn history_search_messages_have_one_compile_time_route() {
         for message in [
+            HistorySearchMessage::ToggleVisible,
             HistorySearchMessage::QueryChanged("query".into()),
             HistorySearchMessage::CycleSource,
             HistorySearchMessage::SubmitCurrent,

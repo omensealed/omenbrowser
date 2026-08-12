@@ -125,6 +125,82 @@ fn desktop_omenchat_sessions_restore_from_plugin_store() {
 }
 
 #[test]
+fn identity_scoped_omenchat_store_is_created_and_restores_the_saved_workspace() {
+    let root = std::env::temp_dir().join(format!(
+        "omenbrowser-rs-desktop-scoped-omenchat-restore-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let paths = crate::config::AppPaths::from_root(root.clone());
+    paths.ensure().expect("paths");
+    let identity_path = paths.identities_dir.join("restore-identity");
+    std::fs::write(&identity_path, [7_u8; 64]).expect("identity fixture");
+
+    let settings = AppSettings {
+        identity_path: Some(identity_path),
+        ..AppSettings::default()
+    };
+    let mut first = DesktopApp::new(App::new(crate::config::AppConfig {
+        paths: paths.clone(),
+        settings,
+    }));
+    assert!(first.omenchat.chat_store.is_some());
+    let session_id = first.open_omenchat_status_session(
+        crate::chat::OmenChatDescriptor {
+            server_destination: "abcd1234abcd1234abcd1234abcd1234".into(),
+            display_name: Some("Restored Chat".into()),
+            rooms_hint: vec!["lobby".into()],
+            ..crate::chat::OmenChatDescriptor::default()
+        },
+        "connected".into(),
+    );
+    let session = first
+        .omenchat
+        .chat_client
+        .session_mut(session_id)
+        .expect("created session");
+    session.active_room.joined = true;
+    session.rooms[0].joined = true;
+    first.persist_omenchat_session(session_id);
+    let browser = DesktopPane::Browser(first.app.active_browser_tab().id);
+    let (mut panes, browser_pane) = iced::widget::pane_grid::State::new(browser);
+    let (chat_pane, _) = panes
+        .split(
+            iced::widget::pane_grid::Axis::Vertical,
+            browser_pane,
+            DesktopPane::OmenChat(session_id),
+        )
+        .expect("chat split");
+    first.workspace.workspace_panes = panes;
+    first.workspace.active_workspace_pane = chat_pane;
+    first.persist_workspace_panes("test workspace");
+    assert!(first.app.flush_pending_ui_preferences());
+    drop(first);
+
+    let settings = AppSettings::load_or_default(&paths.settings_file).expect("saved settings");
+    let restored = DesktopApp::new(App::new(crate::config::AppConfig { paths, settings }));
+    assert_eq!(restored.omenchat.chat_client.sessions().len(), 1);
+    assert_eq!(restored.workspace.workspace_panes.len(), 2);
+    assert!(restored
+        .workspace
+        .workspace_panes
+        .iter()
+        .any(|(_, pane)| matches!(pane, DesktopPane::Browser(_))));
+    assert!(restored
+        .workspace
+        .workspace_panes
+        .iter()
+        .any(|(_, pane)| matches!(pane, DesktopPane::OmenChat(_))));
+    assert!(restored
+        .workspace
+        .workspace_panes
+        .iter()
+        .all(|(_, pane)| !matches!(pane, DesktopPane::Conversation(_))));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn desktop_startup_prunes_unrestorable_omenchat_cache_rows() {
     let root = std::env::temp_dir().join(format!(
         "omenbrowser-rs-desktop-prune-omenchat-{}",

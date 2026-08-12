@@ -654,6 +654,7 @@ fn validate_prepare_request(
             | ChatOp::RoomReaction
             | ChatOp::RoomMessageRevision
             | ChatOp::RoomPin
+            | ChatOp::NicknameColourSet
             | ChatOp::PartRoom
             | ChatOp::Command
     ) {
@@ -999,6 +1000,50 @@ mod tests {
         assert_eq!(recovered[0].body, body);
         assert_eq!(recovered[0].request_hash, prepared.request_hash);
         assert_eq!(recovered[0].state, OutboundMutationState::Prepared);
+        drop(reopened);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn nickname_colour_intent_is_roomless_and_restart_safe() {
+        let root = isolated_root("nickname-colour-restart");
+        let store = MutationIntentStore::open_for_identity_storage_root(&root).expect("store");
+        let colour = crate::chat::protocol::Rgb24::new(0x4f_a3_ff).expect("RGB24");
+        let body = crate::chat::protocol::NicknameColourSet {
+            colour: Some(colour),
+        }
+        .into_frame_body();
+        let mutation_id = MutationId::new([0x94; 16]);
+        let prepared = store
+            .persist_prepared_with_id(
+                PrepareOutboundMutation {
+                    server_destination: "0123456789abcdef",
+                    authenticated_identity_hash: b"authenticated-peer",
+                    client_instance_id: ClientInstanceId::new([7; 16]),
+                    op: ChatOp::NicknameColourSet,
+                    room_id: None,
+                    body: body.clone(),
+                    created_at: 100,
+                    expires_at: 200,
+                    correlation_id: None,
+                },
+                mutation_id,
+                PRODUCTION_LIMITS,
+            )
+            .expect("persist nickname colour");
+        assert_eq!(prepared.room_id, None);
+        drop(store);
+
+        let reopened =
+            MutationIntentStore::open_for_identity_storage_root(&root).expect("reopen store");
+        let recovered = reopened
+            .recover_nonterminal()
+            .expect("recover nickname colour");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].op, ChatOp::NicknameColourSet);
+        assert_eq!(recovered[0].room_id, None);
+        assert_eq!(recovered[0].body, body);
+        assert_eq!(recovered[0].request_hash, prepared.request_hash);
         drop(reopened);
         fs::remove_dir_all(root).expect("cleanup");
     }

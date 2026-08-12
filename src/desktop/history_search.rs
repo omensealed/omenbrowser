@@ -55,6 +55,10 @@ impl DesktopApp {
     ) -> Result<Task<Message>, Message> {
         match message {
             Message::HistorySearch(message) => match *message {
+                HistorySearchMessage::ToggleVisible => {
+                    self.history_search.toggle_visible();
+                    Ok(Task::none())
+                }
                 HistorySearchMessage::QueryChanged(value) => {
                     self.history_search.update_draft(value);
                     Ok(Task::none())

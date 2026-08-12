@@ -494,13 +494,17 @@ impl MessageStore {
                     .fields
                     .insert("native_lxmf_state".into(), "expired".into());
                 message.fields.insert(
+                    "native_lxmf_delivery_state".into(),
+                    "peer_delivery_unconfirmed".into(),
+                );
+                message.fields.insert(
                     "native_lxmf_failure_reason".into(),
-                    "local outbound TTL elapsed before authoritative delivery".into(),
+                    "local outbound TTL elapsed without authoritative peer-delivery evidence"
+                        .into(),
                 );
                 message.fields.insert(
                     "native_lxmf_retry_guidance".into(),
-                    "LXMF delivery expired; an explicit retry creates a new bounded operation"
-                        .into(),
+                    "receipt observation window expired; peer delivery remains unconfirmed; an explicit resend creates a new bounded operation and may duplicate delivery".into(),
                 );
                 message.fields.insert(
                     "native_lxmf_next_action".into(),

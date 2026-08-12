@@ -71,6 +71,7 @@ pub(in crate::desktop) enum DesktopWorkspacePreset {
     BrowserFocus,
     MessagesFocus,
     BrowserAndMessages,
+    AllActivePanes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +133,7 @@ pub(in crate::desktop) enum RuntimeMessage {
 
 #[derive(Clone, Debug)]
 pub(in crate::desktop) enum HistorySearchMessage {
+    ToggleVisible,
     QueryChanged(String),
     CycleSource,
     SubmitCurrent,

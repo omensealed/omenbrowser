@@ -1,5 +1,13 @@
 use crate::messaging::MessageSummary;
 
+pub(crate) fn lxmf_message_is_unconfirmed_expiry(message: &MessageSummary) -> bool {
+    !message.incoming
+        && message
+            .fields
+            .get("native_lxmf_sdk_state")
+            .is_some_and(|state| state == "expired")
+}
+
 pub(crate) fn lxmf_message_compact_status(message: &MessageSummary) -> Option<String> {
     if message.incoming {
         return Some(if message.unread {
@@ -25,7 +33,7 @@ pub(crate) fn lxmf_message_compact_status(message: &MessageSummary) -> Option<St
                 .map(|reason| format!("LXMF failed: {reason}"))
                 .unwrap_or_else(|| "LXMF delivery failed".into()),
             "cancelled" => "LXMF delivery cancelled".into(),
-            "expired" => "LXMF delivery expired".into(),
+            "expired" => "Receipt window expired; peer delivery unconfirmed".into(),
             "rejected" => message
                 .fields
                 .get("native_lxmf_sdk_reason_code")
@@ -237,6 +245,49 @@ mod tests {
         assert_eq!(
             lxmf_message_compact_status(&message).as_deref(),
             Some("LXMF rejected: stamp_required")
+        );
+    }
+
+    #[test]
+    fn lxmf_message_compact_status_does_not_call_unconfirmed_resource_delivery_expired() {
+        let mut message = message_with_fields(BTreeMap::from([
+            ("native_lxmf_sdk_state".into(), "expired".into()),
+            (
+                "native_lxmf_delivery_state".into(),
+                "peer_delivery_unconfirmed".into(),
+            ),
+            (
+                "native_lxmf_direct_transfer_state".into(),
+                "resource_completed".into(),
+            ),
+        ]));
+        message.failed = true;
+
+        assert_eq!(
+            lxmf_message_compact_status(&message).as_deref(),
+            Some("Receipt window expired; peer delivery unconfirmed")
+        );
+    }
+
+    #[test]
+    fn lxmf_message_compact_status_keeps_proven_transport_expiry_non_authoritative() {
+        let mut message = message_with_fields(BTreeMap::from([
+            ("native_lxmf_sdk_state".into(), "expired".into()),
+            (
+                "native_lxmf_proof_state".into(),
+                "rns_packet_proof_peer_unconfirmed".into(),
+            ),
+            (
+                "native_lxmf_delivery_evidence_kind".into(),
+                "rns_packet_proof".into(),
+            ),
+        ]));
+        message.failed = true;
+
+        assert!(lxmf_message_is_unconfirmed_expiry(&message));
+        assert_eq!(
+            lxmf_message_compact_status(&message).as_deref(),
+            Some("Receipt window expired; peer delivery unconfirmed")
         );
     }
 }

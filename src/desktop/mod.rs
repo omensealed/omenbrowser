@@ -113,7 +113,7 @@ use fonts::*;
 use icons::*;
 use layout::*;
 use message::*;
-use message_compact::lxmf_message_compact_status;
+use message_compact::{lxmf_message_compact_status, lxmf_message_is_unconfirmed_expiry};
 pub(in crate::desktop) use message_retry::{
     desktop_message_valid_actions, DesktopMessageRetryLabels,
 };

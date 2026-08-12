@@ -4272,7 +4272,7 @@ under one explicit temporary root and is deleted; the retained report contains
 only versions, counts, and validation booleans.
 
 The live OMENchat command builds the selected client/server pair from the
-immutable hardened `0.6.0-1` source and current `0.9.8-4` source. The default
+immutable hardened `0.6.0-1` source and current `0.9.8-5` source. The default
 case is current client to old server; `--reverse` is old client to current
 server. Each starts both binaries with separate isolated roots over an
 ephemeral loopback TCP interface, then requires the client to start its
@@ -4287,7 +4287,7 @@ deadline, reopens the same server home on the same interface, requires an
 unchanged destination, and runs the client again with its original application
 root. The second process must repeat link/session/join/message/echo
 successfully. Hardened `0.6.0-1` predates the owned SIGTERM drain path and
-therefore exits with the expected signal status; current `0.9.8-4` must report
+therefore exits with the expected signal status; current `0.9.8-5` must report
 an orderly stop. Neither test claims that a continuously running desktop
 automatically reconnected.
 

@@ -73,6 +73,12 @@ impl DesktopApp {
         })
     }
 
+    pub(in crate::desktop) fn has_visible_lxmf_conversation_pane(&self) -> bool {
+        self.workspace.workspace_panes.iter().any(|(_, pane)| {
+            matches!(pane, DesktopPane::Conversation(_)) && self.workspace_pane_is_visible(pane)
+        })
+    }
+
     pub(in crate::desktop) fn schedule_visible_workspace_scroll_restore(&mut self, ticks: u8) {
         self.workspace.restore_workspace_scrolls_pending = true;
         self.workspace.restore_workspace_scrolls_remaining = self

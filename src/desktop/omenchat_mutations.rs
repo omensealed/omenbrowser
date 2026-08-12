@@ -2527,6 +2527,90 @@ mod tests {
             .contains("authoritative permission evidence"));
     }
 
+    #[test]
+    fn nickname_colour_picker_apply_persists_roomless_intent_before_send() {
+        let root = std::env::temp_dir().join(format!(
+            "omenbrowser-nickname-colour-picker-{}-{}",
+            std::process::id(),
+            current_epoch_ms()
+        ));
+        let paths = crate::config::AppPaths::from_root(root.clone());
+        paths.ensure().expect("isolated paths");
+        let mut desktop = DesktopApp::new(App::new(crate::config::AppConfig {
+            paths,
+            settings: crate::storage::settings::AppSettings::default(),
+        }));
+        let session_id = desktop.omenchat.chat_client.reserve_session_id();
+        let room = ChatRoomSummary {
+            server_id: "server".into(),
+            room_id: 1,
+            name: "lobby".into(),
+            topic: None,
+            unread: 0,
+            joined: true,
+        };
+        desktop.omenchat.chat_client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "server".into(),
+                destination: "00112233445566778899aabbccddeeff".into(),
+                display_name: "Server".into(),
+            },
+            rooms: vec![room.clone()],
+            active_room: room,
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "ready".into(),
+        });
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_nickname_colours_negotiated_for_test(session_id, true);
+        desktop
+            .omenchat
+            .omenchat_live_state
+            .set_client_instance_id(Some(ClientInstanceId::new([0x31; 16])));
+        desktop.omenchat.omenchat_authenticated_identity_hash = Some(vec![0x42; 16]);
+        desktop.omenchat.omenchat_mutation_intent_worker = Some(
+            crate::chat::mutation_intent_worker::MutationIntentWorker::start(
+                desktop.app.paths.identity_storage_root(),
+            )
+            .expect("intent worker"),
+        );
+        let colour = crate::chat::protocol::Rgb24::new(0x4f_a3_ff).expect("RGB24");
+        desktop.omenchat.omenchat_nickname_colour_editors.insert(
+            session_id,
+            crate::desktop::omenchat_desktop_state::OmenChatNicknameColourEditor {
+                visible: true,
+                input: "#4FA3FF".into(),
+                selected: Some(colour),
+            },
+        );
+
+        let _completion = desktop.apply_omenchat_nickname_colour(session_id);
+        let intents = recover_intents(&desktop);
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].op, ChatOp::NicknameColourSet);
+        assert_eq!(intents[0].room_id, None);
+        assert_eq!(
+            NicknameColourSet::from_frame_body(&intents[0].body),
+            Ok(NicknameColourSet {
+                colour: Some(colour)
+            })
+        );
+        assert_eq!(intents[0].state, OutboundMutationState::Prepared);
+
+        desktop
+            .omenchat
+            .omenchat_mutation_intent_worker
+            .take()
+            .expect("worker")
+            .shutdown()
+            .expect("worker shutdown");
+        drop(desktop);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     #[tokio::test]
     async fn negotiated_room_send_persists_before_transport_and_persists_ack() {
         let root = std::env::temp_dir().join(format!(

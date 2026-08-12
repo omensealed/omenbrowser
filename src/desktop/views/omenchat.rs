@@ -1,7 +1,7 @@
-use iced::widget::{button, column, container, mouse_area, row, stack, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, text, text_input};
 #[cfg(feature = "desktop-qr")]
 use iced::widget::{qr_code, text::Wrapping};
-use iced::{Element, Font, Length};
+use iced::{Element, Font, Length, Padding};
 
 use super::super::*;
 
@@ -240,6 +240,16 @@ fn reaction_token_presentation(
     }
 }
 
+const OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING: u16 = 3;
+const OMENCHAT_MESSAGE_ACTION_BUTTON_HORIZONTAL_PADDING: u16 = 4;
+const OMENCHAT_MESSAGE_ACTION_SURFACE_TOP_PADDING: f32 = 4.0;
+const OMENCHAT_MESSAGE_ACTION_SURFACE_BOTTOM_PADDING: f32 = 2.0;
+const OMENCHAT_MESSAGE_ACTION_SURFACE_HORIZONTAL_PADDING: f32 = 8.0;
+
+fn omenchat_message_action_button_height() -> f32 {
+    (ui_size(25) as f32).max(25.0)
+}
+
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 fn omenchat_reaction_controls(
     session_id: crate::chat::ChatSessionId,
@@ -261,12 +271,16 @@ fn omenchat_reaction_controls(
                 event_id,
                 token,
             }))
-            .padding([1, 3])
+            .height(Length::Fixed(omenchat_message_action_button_height()))
+            .padding([
+                OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING,
+                OMENCHAT_MESSAGE_ACTION_BUTTON_HORIZONTAL_PADDING,
+            ])
             .style(inline_icon_button_style),
             presentation.label,
         ));
     }
-    controls.wrap().into()
+    controls.into()
 }
 
 fn omenchat_reply_control(
@@ -281,7 +295,11 @@ fn omenchat_reply_control(
                 room_id,
                 event_id,
             }))
-            .padding([1, 3])
+            .height(Length::Fixed(omenchat_message_action_button_height()))
+            .padding([
+                OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING,
+                OMENCHAT_MESSAGE_ACTION_BUTTON_HORIZONTAL_PADDING,
+            ])
             .style(inline_icon_button_style),
         "Reply",
     )
@@ -304,7 +322,11 @@ fn omenchat_message_revision_controls(
                     room_id,
                     event_id,
                 }))
-                .padding([1, 3])
+                .height(Length::Fixed(omenchat_message_action_button_height()))
+                .padding([
+                    OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING,
+                    OMENCHAT_MESSAGE_ACTION_BUTTON_HORIZONTAL_PADDING,
+                ])
                 .style(inline_icon_button_style),
             "Correct this message",
         ));
@@ -317,7 +339,11 @@ fn omenchat_message_revision_controls(
                     room_id,
                     event_id,
                 }))
-                .padding([1, 3])
+                .height(Length::Fixed(omenchat_message_action_button_height()))
+                .padding([
+                    OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING,
+                    OMENCHAT_MESSAGE_ACTION_BUTTON_HORIZONTAL_PADDING,
+                ])
                 .style(inline_icon_button_style),
             "Delete this message",
         ));
@@ -344,7 +370,11 @@ fn omenchat_pin_control(
                 event_id,
                 action,
             }))
-            .padding([1, 3])
+            .height(Length::Fixed(omenchat_message_action_button_height()))
+            .padding([
+                OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING,
+                OMENCHAT_MESSAGE_ACTION_BUTTON_HORIZONTAL_PADDING,
+            ])
             .style(inline_icon_button_style),
         label,
     )
@@ -889,8 +919,11 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     }
                 }
             }
-            let mut body_element: Element<'_, Message> =
-                container(body_content).width(Length::Fill).into();
+            let mut body_container = container(body_content).width(Length::Fill);
+            if message_hovered {
+                body_container = body_container.style(omenchat_message_hover_container_style);
+            }
+            let body_element: Element<'_, Message> = body_container.into();
             let mut hover_controls = row![].spacing(4).align_y(iced::Alignment::Center);
             let mut has_hover_controls = false;
             #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -949,15 +982,19 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 ));
                 has_hover_controls = true;
             }
-            if has_hover_controls {
-                body_element = stack![
-                    body_element,
-                    container(hover_controls).align_right(Length::Fill)
-                ]
-                .into();
-            }
             group_content = if let Some(event_id) = hover_target {
-                group_content.push(
+                let action_surface = has_hover_controls.then(|| {
+                    container(hover_controls)
+                        .padding(
+                            Padding::default()
+                                .top(OMENCHAT_MESSAGE_ACTION_SURFACE_TOP_PADDING)
+                                .right(OMENCHAT_MESSAGE_ACTION_SURFACE_HORIZONTAL_PADDING)
+                                .bottom(OMENCHAT_MESSAGE_ACTION_SURFACE_BOTTOM_PADDING)
+                                .left(OMENCHAT_MESSAGE_ACTION_SURFACE_HORIZONTAL_PADDING),
+                        )
+                        .style(message_action_container_style)
+                });
+                group_content.push(HoverActions::new(
                     mouse_area(body_element)
                         .on_enter(Message::OmenChat(OmenChatMessage::MessageActionsHovered {
                             session_id: session.session_id,
@@ -971,7 +1008,8 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                                 event_id,
                             },
                         )),
-                )
+                    action_surface,
+                ))
             } else {
                 group_content.push(body_element)
             };
@@ -1004,6 +1042,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
         .omenchat
         .chat_client
         .local_user_id(session.session_id);
+    let mut user_rows = column![].spacing(6).width(Length::Fill);
     for user in unique_chat_users(&session.users) {
         let colour = nickname_colour_for_user(desktop, session, user.user_id);
         let swatch = text("●").size(ui_size(11)).color(colour);
@@ -1018,7 +1057,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             } else {
                 user.display_label()
             };
-            userlist = userlist.push(
+            user_rows = user_rows.push(
                 button(row![swatch, text(label).size(ui_size(13))].spacing(4))
                     .on_press(Message::OmenChat(OmenChatMessage::ToggleMention {
                         session_id: session.session_id,
@@ -1028,7 +1067,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     .style(inline_icon_button_style),
             );
         } else {
-            userlist = userlist.push(
+            user_rows = user_rows.push(
                 row![swatch, text(user.display_label()).size(ui_size(13))]
                     .spacing(4)
                     .align_y(iced::Alignment::Center),
@@ -1127,6 +1166,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                             .size(ui_size(12))
                             .color(preview_colour),
                     )
+                    .push(text("Select, then Apply").size(ui_size(9)))
                     .push(swatches.wrap())
                     .push(
                         text_input("#RRGGBB", &editor.input)
@@ -1141,6 +1181,12 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                     )
                     .push(
                         row![
+                            button(text("Apply").size(ui_size(11)))
+                                .on_press(Message::OmenChat(OmenChatMessage::ApplyNicknameColour(
+                                    session.session_id
+                                ),))
+                                .padding([3, 6])
+                                .style(omen_button_style),
                             subtle_button(
                                 "Automatic",
                                 Message::OmenChat(OmenChatMessage::SelectNicknameColour {
@@ -1148,14 +1194,9 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                                     colour: None,
                                 }),
                             ),
-                            button(text("Apply").size(ui_size(11)))
-                                .on_press(Message::OmenChat(OmenChatMessage::ApplyNicknameColour(
-                                    session.session_id
-                                ),))
-                                .padding([3, 6])
-                                .style(omen_button_style),
                         ]
-                        .spacing(4),
+                        .spacing(4)
+                        .wrap(),
                     );
             } else {
                 controls = controls.push(
@@ -1171,6 +1212,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             );
         }
     }
+    userlist = userlist.push(user_rows);
 
     let draft = desktop
         .omenchat
@@ -1822,9 +1864,12 @@ mod accessibility_tests {
     use super::omenchat_moderation_audit_record_line;
     use super::{
         compact_recovery_destination, omenchat_media_animation_allowed,
-        omenchat_message_actions_visible, omenchat_slow_mode_indicator,
-        reaction_token_presentation, recovered_mutation_expiry_label, recovered_mutation_notice,
-        recovered_mutation_operation,
+        omenchat_message_action_button_height, omenchat_message_actions_visible,
+        omenchat_slow_mode_indicator, reaction_token_presentation, recovered_mutation_expiry_label,
+        recovered_mutation_notice, recovered_mutation_operation,
+        OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING,
+        OMENCHAT_MESSAGE_ACTION_SURFACE_BOTTOM_PADDING,
+        OMENCHAT_MESSAGE_ACTION_SURFACE_TOP_PADDING,
     };
     use crate::chat::protocol::{
         ChatOp, FrameBody, ReactionToken, RoomPolicyProjection, ROOM_POLICY_ANNOUNCEMENT,
@@ -1938,6 +1983,23 @@ mod accessibility_tests {
             ]
         );
         assert_eq!(crate::desktop::ICON_REPLY, "\u{f086}");
+    }
+
+    #[test]
+    fn message_action_surface_leaves_vertical_clearance_around_emoji_buttons() {
+        let glyph_and_button_inset = super::ui_size(15) as f32
+            + f32::from(OMENCHAT_MESSAGE_ACTION_BUTTON_VERTICAL_PADDING) * 2.0;
+        assert!(omenchat_message_action_button_height() >= glyph_and_button_inset);
+        let surface_height = omenchat_message_action_button_height()
+            + OMENCHAT_MESSAGE_ACTION_SURFACE_TOP_PADDING
+            + OMENCHAT_MESSAGE_ACTION_SURFACE_BOTTOM_PADDING;
+        assert!(surface_height >= glyph_and_button_inset + 6.0);
+        const {
+            assert!(
+                OMENCHAT_MESSAGE_ACTION_SURFACE_BOTTOM_PADDING
+                    < OMENCHAT_MESSAGE_ACTION_SURFACE_TOP_PADDING
+            );
+        }
     }
 
     #[test]

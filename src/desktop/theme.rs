@@ -207,6 +207,24 @@ pub(super) fn status_container_style(theme: &Theme) -> container::Style {
         })
 }
 
+pub(super) fn message_action_container_style(theme: &Theme) -> container::Style {
+    container::Style::default()
+        .background(mix_color(theme.palette().background, omen_status(), 0.82))
+        .color(theme.palette().text)
+        .border(Border {
+            color: mix_color(theme.palette().primary, omen_accent(), 0.55),
+            width: 1.0,
+            radius: 4.0.into(),
+        })
+        .shadow(Shadow::default())
+}
+
+pub(super) fn omenchat_message_hover_container_style(theme: &Theme) -> container::Style {
+    container::Style::default()
+        .background(mix_color(theme.palette().background, omen_surface(), 0.48))
+        .color(theme.palette().text)
+}
+
 pub(super) fn address_display_container_style(theme: &Theme) -> container::Style {
     container::Style::default()
         .background(mix_color(theme.palette().background, Color::BLACK, 0.75))
@@ -602,5 +620,31 @@ mod tests {
         assert_eq!(active.border.width, 2.0);
         assert_ne!(inactive.border.color, active.border.color);
         assert_eq!(inactive.border.radius, active.border.radius);
+    }
+
+    #[test]
+    fn message_action_strip_has_an_opaque_surface_on_every_selectable_theme() {
+        for name in DESKTOP_THEME_CHOICES {
+            let style = message_action_container_style(&theme_from_name(name));
+            assert!(matches!(
+                style.background,
+                Some(Background::Color(colour)) if colour.a == 1.0
+            ));
+            assert!(style.border.width > 0.0);
+        }
+    }
+
+    #[test]
+    fn omenchat_message_hover_wash_is_opaque_and_distinct_on_every_theme() {
+        for name in DESKTOP_THEME_CHOICES {
+            let theme = theme_from_name(name);
+            let style = omenchat_message_hover_container_style(&theme);
+            assert!(matches!(
+                style.background,
+                Some(Background::Color(colour))
+                    if colour.a == 1.0 && colour != theme.palette().background
+            ));
+            assert_eq!(style.border.width, 0.0);
+        }
     }
 }

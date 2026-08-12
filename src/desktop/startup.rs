@@ -93,7 +93,15 @@ pub(in crate::desktop) fn restore_omenchat_startup_state(app: &App) -> OmenChatS
         .join("plugins")
         .join(crate::plugins::BUILTIN_OMENCHAT_PLUGIN_ID)
         .join("chat.sqlite");
-    let (chat_client, chat_store) = match SqliteChatStore::open(&chat_store_path) {
+    let chat_store_result = chat_store_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("OMENchat store path has no parent"))
+        .and_then(|parent| {
+            crate::private_fs::ensure_private_dir(parent)
+                .map_err(anyhow::Error::from)
+                .and_then(|()| SqliteChatStore::open(&chat_store_path))
+        });
+    let (chat_client, chat_store) = match chat_store_result {
         Ok(mut store) => {
             prune_unrestorable_omenchat_servers(&mut store);
             let mut client = ChatClient::new();
