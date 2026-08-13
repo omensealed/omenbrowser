@@ -1,14 +1,14 @@
 # Current product status
 
-This page describes the released `v0.9.9-1` product. Source code and automated
-tests outrank prose if a development branch has advanced beyond that tag.
+This page describes the release-qualified `v0.9.9-2` candidate. Source code
+and automated tests outrank prose if a development branch has advanced.
 
 ## Version and compatibility
 
 | Component | Current value |
 |---|---|
-| OMENbrowser_rs | `0.9.9-1` |
-| standalone omenchatd | `0.9.9-1` |
+| OMENbrowser_rs | `0.9.9-2` |
+| standalone omenchatd | `0.9.9-2` |
 | Reticulum/LXMF Rust train | exact official crates.io `0.9.9` |
 | OMENchat wire protocol | version `1` |
 | omenchat-protocol Rust API | `0.2.0` |
@@ -77,7 +77,7 @@ removal conditions.
 
 ## Release evidence
 
-The latest release notes are
-[v0.9.9-1](RELEASE_NOTES_V0_9_9_1.md). Current commands are in
+The current candidate notes are
+[v0.9.9-2](RELEASE_NOTES_V0_9_9_2.md). Current commands are in
 [Testing](TESTING.md). Hosted CI and package results are evidence only for the
 commit SHA on which they ran.

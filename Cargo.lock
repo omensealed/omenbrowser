@@ -3907,7 +3907,7 @@ dependencies = [
 
 [[package]]
 name = "omenbrowser_rs"
-version = "0.9.9-1"
+version = "0.9.9-2"
 dependencies = [
  "anyhow",
  "async-trait",
