@@ -58,6 +58,27 @@ fn reserve_udp_ports() -> (u16, u16) {
     (first_port, second_port)
 }
 
+fn reserve_tcp_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve TCP port");
+    listener.local_addr().expect("reserved TCP address").port()
+}
+
+async fn await_tcp_listener(port: u16, wait: Duration) {
+    tokio::time::timeout(wait, async move {
+        loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(stream) => {
+                    drop(stream);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("split sentinel TCP listener readiness timeout");
+}
+
 fn child_value(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("missing child environment {name}"))
 }
@@ -866,7 +887,13 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
         .collect::<Vec<_>>();
     payload[second_segment_offset..second_segment_offset + 3].copy_from_slice(&[0, 0, 8]);
     std::fs::write(root.join("split-expected.bin"), payload).expect("write split fixture");
-    let (server_port, client_port) = reserve_udp_ports();
+    // This sentinel uses TCP only. Selecting the port through a UDP socket is
+    // not a TCP reservation because the protocols have separate namespaces;
+    // on Windows that allowed a false readiness marker followed by a path
+    // timeout. The bounded connect barrier proves the spawned TCP listener is
+    // accepting before the sender process starts.
+    let server_port = reserve_tcp_port();
+    let client_port = 0;
     let receiver = spawn_split_sentinel_role("receiver", &root, &nonce, server_port, client_port);
     tokio::time::timeout(Duration::from_secs(10), async {
         while !marker(&root, "split-receiver-ready").is_file() {
@@ -875,6 +902,7 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
     })
     .await
     .expect("split receiver readiness");
+    await_tcp_listener(server_port, Duration::from_secs(10)).await;
     let sender = spawn_split_sentinel_role("sender", &root, &nonce, server_port, client_port);
     let (sender_output, sender_timed_out) = wait_child(sender, Duration::from_secs(40)).await;
     let (receiver_output, receiver_timed_out) = wait_child(receiver, Duration::from_secs(40)).await;
