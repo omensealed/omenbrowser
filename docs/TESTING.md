@@ -102,6 +102,8 @@ bash scripts/verify-tui-dependencies.sh
 bash scripts/verify-private-storage-policy.sh
 bash scripts/verify-accepted-advisories.sh
 bash scripts/verify-workflow-security.sh
+bash scripts/verify-reticulum-resource-compat.sh
+bash scripts/verify-reticulum-capability-docs.sh
 cargo audit --locked
 cargo audit --locked --file src/server/Cargo.lock
 cargo deny --locked --all-features check licenses bans sources
@@ -157,7 +159,7 @@ bash scripts/run-pinned-python-reticulum.sh \
 ```
 
 The current Python drift lane is informational and may identify upstream
-drift. For v0.9.9-1 it resolves RNS 1.4.2, LXMF 1.1.1, and NomadNet 1.2.8:
+drift. For v0.9.9-2 it resolves RNS 1.4.2, LXMF 1.1.1, and NomadNet 1.2.8:
 
 ```bash
 bash scripts/run-current-python-drift.sh \
@@ -203,6 +205,10 @@ limitations until an official fixed crate train is adopted and requalified.
 Do not weaken, rename, merge, or silently skip either one. The routed boundary
 is documented in
 [Reticulum Transport API Gaps](RETICULUM_TRANSPORT_API_GAP.md).
+The full release gate also runs fixture tests that prove both structural
+verifiers reject a renamed, unignored, or weakened limitation and reject stale
+or promoted capability claims. These checks do not treat an arbitrary failing
+`cargo test` result as expected upstream evidence.
 
 ## Hosted and platform evidence
 

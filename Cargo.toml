@@ -1,6 +1,6 @@
 [package]
 name = "omenbrowser_rs"
-version = "0.9.9-1"
+version = "0.9.9-2"
 edition = "2021"
 rust-version = "1.85"
 description = "OMENbrowser Rust Desktop/TUI"

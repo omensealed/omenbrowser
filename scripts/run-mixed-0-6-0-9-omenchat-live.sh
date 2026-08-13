@@ -7,7 +7,7 @@ readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
 readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
 readonly expect_legacy_capabilities=${OMEN_MIXED_EXPECT_LEGACY_CAPABILITIES:-1}
-readonly current_expected_version=0.9.9-1
+readonly current_expected_version=0.9.9-2
 readonly current_client_features=${OMEN_MIXED_CURRENT_CLIENT_FEATURES:-desktop-product}
 readonly current_server_features=${OMEN_MIXED_CURRENT_SERVER_FEATURES:-server-headless}
 
