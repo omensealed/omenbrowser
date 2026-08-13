@@ -2960,6 +2960,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_rpc_099_rejects_each_lossy_guarantee_before_connection() {
+        let base = NativeLxmfSdkSendPlan {
+            send_request: lxmf_sdk::SendRequest::new("source", "peer", serde_json::json!({})),
+            rpc_delivery: rns_rpc::OutboundDeliveryOptions::default(),
+        };
+        let cases = [
+            ("TTL", {
+                let mut plan = base.clone();
+                plan.send_request.ttl_ms = Some(1_000);
+                plan
+            }),
+            ("idempotency key", {
+                let mut plan = base.clone();
+                plan.send_request.idempotency_key = Some("bounded-idempotency".into());
+                plan
+            }),
+            ("correlation identifier", {
+                let mut plan = base.clone();
+                plan.send_request.correlation_id = Some("bounded-correlation".into());
+                plan
+            }),
+            ("extensions", {
+                let mut plan = base.clone();
+                plan.send_request
+                    .extensions
+                    .insert("bounded".into(), serde_json::json!(true));
+                plan
+            }),
+            ("explicit reply ticket", {
+                let mut plan = base.clone();
+                plan.rpc_delivery.ticket = Some("not-logged".into());
+                plan
+            }),
+        ];
+
+        for (guarantee, plan) in cases {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind isolated per-guarantee RPC sentinel");
+            listener
+                .set_nonblocking(true)
+                .expect("set per-guarantee RPC sentinel nonblocking");
+            let endpoint = format!(
+                "tcp://127.0.0.1:{}/rpc",
+                listener.local_addr().expect("RPC sentinel address").port()
+            );
+
+            let error = RpcNativeLxmfSdkSender::new(endpoint)
+                .send_plan(plan)
+                .await
+                .expect_err("lossy guarantee must be rejected before connection");
+            assert!(error.to_string().contains(guarantee));
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn external_rpc_099_rejects_combined_guarantees_before_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
         listener

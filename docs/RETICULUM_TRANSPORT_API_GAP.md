@@ -187,8 +187,11 @@ it derives the request ID from the final encrypted packet hash, dispatches the
 packet directly on the link's ingress interface, and accepts only a matching
 `PacketContext::Response`. Above the packet MDU it sends a request Resource and
 waits for a response Resource with matching correlation. The direct path is
-live-verified for an empty request and field/variable form data against current
-Python NomadNet; the oversized Python path is not yet qualified.
+live-verified for empty and field/variable form data against current Python
+NomadNet. The current-Python four-quadrant matrix also verifies oversized
+request Resources and independently selected response Resources with exact
+request correlation and response bytes. This does not qualify routed Resource
+retransmission after fragment loss or the independent maximum-UDP boundary.
 
 For encrypted link data, the destination is the link id. That link id is not a
 normal destination path-table entry. In broadcast-enabled transport configs,

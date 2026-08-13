@@ -252,6 +252,9 @@ bash -n scripts/test-linux-arm64-headless.sh
 bash -n scripts/test-omenchatd-private-service.sh
 bash -n scripts/verify-private-storage-policy.sh
 bash -n scripts/verify-reticulum-resource-compat.sh
+bash -n scripts/test-reticulum-resource-compat-verifier.sh
+bash -n scripts/verify-reticulum-capability-docs.sh
+bash -n scripts/test-reticulum-capability-docs-verifier.sh
 bash -n scripts/verify-documentation.sh
 
 echo "== Current documentation =="
@@ -276,6 +279,15 @@ bash scripts/verify-reticulum-train.sh
 
 echo "== Reticulum 0.9.9 Resource compatibility =="
 bash scripts/verify-reticulum-resource-compat.sh
+
+echo "== Reticulum capability documentation =="
+bash scripts/verify-reticulum-capability-docs.sh
+
+if [[ "$mode" == "full" ]]; then
+  echo "== Reticulum verifier fixture tests =="
+  bash scripts/test-reticulum-resource-compat-verifier.sh
+  bash scripts/test-reticulum-capability-docs-verifier.sh
+fi
 
 echo "== Accepted build-time advisory boundary =="
 bash scripts/verify-accepted-advisories.sh --no-fetch

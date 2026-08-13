@@ -636,7 +636,9 @@ mod tests {
         let engine = SessionEngine::new(OmenchatStore::in_memory().expect("store"));
         let resource_id = "history:exact-boundary".to_owned();
         let metadata = resource_metadata(&resource_id);
-        let payload_len = rns_transport::resource::MAX_EFFICIENT_SIZE
+        // Keep this test available in the storage-only feature closure used by
+        // the crash-recovery lane, where the optional transport crate is absent.
+        let payload_len = 1_048_575usize
             .checked_sub(3 + metadata.len())
             .expect("metadata fits");
         engine
