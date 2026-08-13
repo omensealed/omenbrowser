@@ -109,12 +109,11 @@ an unchanged complete rerun then passed 484 tests with 15 deliberate ignores,
 followed by the cross-built ARM64 archive and QEMU lifecycle smoke. This is
 emulated ARM64 evidence, not a claim of physical-device testing.
 
-Package candidate:
-
-- `dist/OMENbrowser_rs-0.9.9-2-20260813T190012Z.tar.gz`
-- SHA-256 `5b7f1ebf15b648d015de7a057a4d52684cd6b7d89ee03f9b0a936d4d4abc4a34`
-- archive extraction, help/version, isolated server init/status, and two-client
-  OMENchat package smoke passed.
+The pre-commit package qualification passed archive extraction, help/version,
+isolated server init/status, and two-client OMENchat package smoke. Final
+candidate artifact names and digests are generated from the committed candidate
+and recorded outside this source document so the package can identify its exact
+source commit.
 
 The installed `cargo-audit` does not implement its newer `--locked` option.
 The root implicit lockfile and explicit `src/server/Cargo.lock` forms both
