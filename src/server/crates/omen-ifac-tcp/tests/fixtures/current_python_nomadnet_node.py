@@ -13,8 +13,8 @@ import threading
 import time
 
 
-RNS_VERSION = "1.4.0"
-NOMADNET_VERSION = "1.2.7"
+RNS_VERSION = "1.4.2"
+NOMADNET_VERSION = "1.2.8"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 INDEX_PAGE = ">Current Python NomadNet\nempty request passed\n"

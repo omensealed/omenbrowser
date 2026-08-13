@@ -1414,7 +1414,7 @@ impl AdminTui {
                     "live server running | drained {drained} event(s) | {}",
                     stats.summary_line()
                 );
-                // reticulum-rs 0.9.8 prints Link-close diagnostics directly to
+                // reticulum-rs 0.9.9 prints Link-close diagnostics directly to
                 // stdout. Invalidate Ratatui's diff buffer after live events so
                 // its alternate-screen surface is restored on this same tick.
                 self.force_full_redraw = true;

@@ -1978,7 +1978,7 @@ fn render_status_json(config: &config::ServerConfig) -> ServerResult<String> {
             "version": env!("CARGO_PKG_VERSION"),
         },
         "dependency_train": {
-            "reticulum_rs": "0.9.8",
+            "reticulum_rs": "0.9.9",
             "lxmf": null,
         },
         "runtime": {
@@ -2472,7 +2472,7 @@ mod tests {
             status_value["application"]["version"],
             env!("CARGO_PKG_VERSION")
         );
-        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.8");
+        assert_eq!(status_value["dependency_train"]["reticulum_rs"], "0.9.9");
         assert_eq!(status_value["runtime"]["mode"], runtime_mode_label());
         assert_eq!(status_value["history_retention"]["enabled"], false);
         assert_eq!(

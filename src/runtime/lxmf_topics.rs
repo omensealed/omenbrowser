@@ -346,7 +346,7 @@ mod tests {
 
     #[cfg(feature = "native-lxmf-sdk")]
     #[test]
-    fn locked_098_sdk_exposes_topic_calls_but_only_generic_event_provenance() {
+    fn locked_099_sdk_exposes_topic_calls_but_only_generic_event_provenance() {
         use lxmf_sdk::LxmfSdkTopics;
 
         fn assert_topics_trait<T: LxmfSdkTopics>() {}
@@ -403,7 +403,7 @@ mod tests {
 
     #[cfg(feature = "native-lxmf-sdk")]
     #[test]
-    fn locked_098_daemon_reproducer_has_no_publisher_or_subscription_cursor_proof() {
+    fn locked_099_daemon_reproducer_has_no_publisher_or_subscription_cursor_proof() {
         fn request(id: u64, method: &str, params: serde_json::Value) -> rns_rpc::RpcRequest {
             rns_rpc::RpcRequest {
                 id,
@@ -444,7 +444,7 @@ mod tests {
                 .as_ref()
                 .and_then(|value| value["accepted"].as_bool()),
             Some(true),
-            "0.9.8 accepts but does not validate or apply the subscription cursor"
+            "0.9.9 accepts but does not validate or apply the subscription cursor"
         );
 
         let published = daemon

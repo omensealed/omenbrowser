@@ -12588,8 +12588,8 @@ mod tests {
                 .expect("current Python NomadNet readiness");
             assert_eq!(ready["ready"], true);
             assert_eq!(ready["port"], port);
-            assert_eq!(ready["rns"], "1.4.0");
-            assert_eq!(ready["nomadnet"], "1.2.7");
+            assert_eq!(ready["rns"], "1.4.2");
+            assert_eq!(ready["nomadnet"], "1.2.8");
             Self {
                 child,
                 json_lines,
@@ -16189,8 +16189,8 @@ enable_transport = No
             "current-python-lxmf-propagation",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.4.0",
-            "1.1.0",
+            "1.4.2",
+            "1.1.1",
         );
     }
 
@@ -16923,8 +16923,8 @@ enable_transport = No
             "current-python-lxmf-propagation-stamp",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.4.0",
-            "1.1.0",
+            "1.4.2",
+            "1.1.1",
         );
     }
 
@@ -16962,8 +16962,8 @@ enable_transport = No
             "current-python-network-propagation-stamp",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.4.0",
-            "1.1.0",
+            "1.4.2",
+            "1.1.1",
         );
     }
 
@@ -16988,8 +16988,8 @@ enable_transport = No
             "current-python-lxmf-ticket",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.4.0",
-            "1.1.0",
+            "1.4.2",
+            "1.1.1",
         );
     }
 
@@ -17789,8 +17789,8 @@ enable_transport = No
             "current-python-first-direct-policy",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.4.0",
-            "1.1.0",
+            "1.4.2",
+            "1.1.1",
         );
     }
 
@@ -17976,8 +17976,8 @@ enable_transport = No
             "current-python-direct-resource",
             "OMEN_PYTHON_RNS_SOURCE",
             None,
-            "1.4.0",
-            "1.1.0",
+            "1.4.2",
+            "1.1.1",
         );
     }
 

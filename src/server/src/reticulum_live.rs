@@ -2588,7 +2588,7 @@ fn validate_reticulum_interfaces(interfaces: &[ReticulumInterface]) -> ServerRes
             Some("TCPServerInterface") | Some("tcp_server") => {
                 if interface.network_name.is_some() || interface.passphrase.is_some() {
                     return Err(ServerError::Message(format!(
-                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.8 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
+                        "enabled TCP server interface {} configures IFAC, but the published reticulum-rs 0.9.9 TCP server does not enforce the Python IFAC wire transform; use an IFAC TCP client or disable this interface",
                         interface.name
                     )));
                 }

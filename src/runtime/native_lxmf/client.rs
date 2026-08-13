@@ -1541,7 +1541,7 @@ fn validate_external_rpc_delivery_options(plan: &NativeLxmfSdkSendPlan) -> AppRe
     }
     if !missing_guarantees.is_empty() {
         return Err(AppError::Unsupported(format!(
-            "external LXMF SDK/RPC 0.9.8 cannot preserve required send guarantees: {}",
+            "external LXMF SDK/RPC 0.9.9 cannot preserve required send guarantees: {}",
             missing_guarantees.join(", ")
         )));
     }
@@ -1823,9 +1823,9 @@ mod tests {
                         "max_extension_keys": 16,
                         "idempotency_ttl_ms": 43200000
                     },
-                    "contract_release": "0.9.8",
+                    "contract_release": "0.9.9",
                     "schema_namespace": "lxmf-sdk-v2",
-                    "sdk_version": "0.9.8",
+                    "sdk_version": "0.9.9",
                     "python_reference": lxmf_sdk::ParityReference::default()
                 })),
                 error: None,
@@ -2827,7 +2827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upstream_rpc_098_send_capture_proves_preserved_and_dropped_fields() {
+    async fn upstream_rpc_099_send_capture_proves_preserved_and_dropped_fields() {
         let (endpoint, captured_rx, capture_worker) = capture_rpc_requests(2);
         let mut operation =
             OutboundOperationIdentity::validated("idem-external".into(), "corr-external".into())
@@ -2887,7 +2887,7 @@ mod tests {
         assert_eq!(params["include_ticket"], true);
         assert_eq!(params["try_propagation_on_fail"], true);
 
-        // The published lxmf-sdk 0.9.8 RpcBackendClient still drops
+        // The published lxmf-sdk 0.9.9 RpcBackendClient still drops
         // these SendRequest fields before constructing sdk_send_v2 params.
         for absent in [
             "idempotency_key",
@@ -2914,7 +2914,7 @@ mod tests {
     }
 
     #[test]
-    fn external_rpc_098_rejects_each_lossy_send_guarantee() {
+    fn external_rpc_099_rejects_each_lossy_send_guarantee() {
         let base = NativeLxmfSdkSendPlan {
             send_request: lxmf_sdk::SendRequest::new("source", "peer", serde_json::json!({})),
             rpc_delivery: rns_rpc::OutboundDeliveryOptions::default(),
@@ -2953,14 +2953,14 @@ mod tests {
             let error = validate_external_rpc_delivery_options(&plan)
                 .expect_err("lossy external guarantee must fail closed");
             let message = error.to_string();
-            assert!(message.contains("external LXMF SDK/RPC 0.9.8"));
+            assert!(message.contains("external LXMF SDK/RPC 0.9.9"));
             assert!(message.contains(guarantee));
             assert!(!message.contains("not-logged"));
         }
     }
 
     #[tokio::test]
-    async fn external_rpc_098_rejects_combined_guarantees_before_connection() {
+    async fn external_rpc_099_rejects_combined_guarantees_before_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
         listener
             .set_nonblocking(true)
@@ -3007,7 +3007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_rpc_098_rejects_explicit_reply_ticket_before_connection() {
+    async fn external_rpc_099_rejects_explicit_reply_ticket_before_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind isolated RPC sentinel");
         listener
             .set_nonblocking(true)
