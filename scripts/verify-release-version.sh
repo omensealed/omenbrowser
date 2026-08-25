@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-expected="${OMEN_RELEASE_VERSION:-0.9.9-2}"
+expected="${OMEN_RELEASE_VERSION:-0.10.0-1}"
 expected_protocol="${OMENCHAT_PROTOCOL_CRATE_VERSION:-0.2.0}"
 expected_schema="${OMENCHATD_SCHEMA_VERSION:-14}"
 

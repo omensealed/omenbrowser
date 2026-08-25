@@ -1,6 +1,6 @@
 # Reticulum Transport API Gap
 
-OMENbrowser_rs now builds against the exact `reticulum-rs` / `lxmf` 0.9.9
+OMENbrowser_rs now builds against the exact `reticulum-rs` / `lxmf` 0.10.0
 train. Small NomadNet requests now use direct `PacketContext::Request` packets;
 oversized packed requests retain the bounded request-resource path. Exact empty
 and executable-form exchanges pass against current Python RNS 1.4.2 and
@@ -11,11 +11,16 @@ This project intentionally uses the published crates as-is. Do not add a local
 the upstream transport maintainer and should not depend on private forked APIs
 for normal builds.
 
-## Split metadata Resource boundary remains resolved on 0.9.9
+Typed queue occupancy/capacity/drop, traffic, violations/filter hits, active
+Links, and medium timeout are mapped into bounded/redacted project-owned
+snapshots. Unknown remains different from zero. These values are diagnostics
+and reconnect/load evidence only, never delivery or durable commit evidence.
 
-Official `reticulum-rs-transport 0.9.9` retains the correction for upstream
+## Split metadata Resource boundary remains resolved on 0.10.0
+
+Official `reticulum-rs-transport 0.10.0` retains the correction for upstream
 issue #553 / PR #556. The unchanged registry sentinel passed first. Because
-0.9.9 may auto-compress repetitive data, the promoted regression additionally
+0.10.0 may auto-compress repetitive data, the promoted regression additionally
 uses incompressible data over TCP, asserts that more than one segment was
 observed, and verifies exact metadata and application bytes. It passes without
 a fork or patch. OMEN's exact-0.9.7 `1_048_575`-byte metadata ceiling,
@@ -27,7 +32,7 @@ The maximum-UDP Resource sentinel is independent and still fails because the
 remains ignored and visible. Product upload, Resource, queue, parser, negotiated
 peer/room, cancellation, timeout, and retention limits are unchanged.
 
-### Routed Resource retransmission boundary on 0.9.9
+### Routed Resource retransmission boundary on 0.10.0
 
 The split-metadata correction does not prove reliable Resource retransmission
 through a forwarding gateway. An isolated direct/local transport transferred
@@ -36,7 +41,7 @@ client on a multi-hop TCP-gateway route also transferred the 873-byte fixture,
 but a 13,613-byte incompressible attachment stalled after repeated Resource
 requests and terminated at the existing bounded retry limit.
 
-The exact registry `reticulum-rs-transport 0.9.9` duplicate filter admits
+The exact registry `reticulum-rs-transport 0.10.0` duplicate filter admits
 repeated `ResourceRequest` packets but does not admit repeated `Resource` data
 packets. Python Reticulum's transport filter explicitly admits both. Resource
 data packets are deterministic for the same fragment, so an intermediate Rust
@@ -57,9 +62,9 @@ from routed multi-hop qualification and requires an explicit user retry after a
 route or condition change. A terminal Resource failure says that no automatic
 retry occurred; generic failures are not reclassified by parsing log text.
 Upstream-ready, source-referenced reproducer material lives in
-`docs/upstream/reticulum-rs-0.9.9-routed-resource-retransmission.md`. The
+`docs/upstream/reticulum-rs-0.10.0-routed-resource-retransmission.md`. The
 independent UDP boundary is documented separately in
-`docs/upstream/reticulum-rs-0.9.9-udp-max-wire-buffer.md`.
+`docs/upstream/reticulum-rs-0.10.0-udp-max-wire-buffer.md`.
 
 The OMENchat client and `omenchatd` `live-reticulum` server have a clean-stack
 transport path now: links are opened against `omenchat.node`, normal OMENchat
@@ -71,7 +76,7 @@ frame. This is intentionally separate from the legacy `0x4f` OMENchat packet
 context because `reticulum-rs-transport` 0.6.0 does not expose an arbitrary
 custom packet context variant.
 
-The 0.9.9 transport library exposes public `Link::request_packet` and
+The 0.10.0 transport library exposes public `Link::request_packet` and
 `Link::response_packet` helpers. OMENbrowser uses `request_packet` for efficient
 small encrypted `PacketContext::Request` link
 data from public primitives and sends it directly on the active link's bound
@@ -93,7 +98,7 @@ the response primitive. The portal read and complete `[request_id, body]`
 envelope are bounded to 4 MiB. Dynamic selection from negotiated payload MDU is
 deferred because OMEN does not copy private upstream framing formulas.
 
-The 0.9.9 crate also exposes public request/response Resource helpers.
+The 0.10.0 crate also exposes public request/response Resource helpers.
 OMENbrowser selects `Transport::send_request_resource()` only when the packed
 request exceeds the Reticulum packet MDU, matching Python's primitive-selection
 boundary. Current Python verifies that oversized path and also verifies that
@@ -132,7 +137,7 @@ text and local acceptance checklist.
 
 ### IFAC/private gateway support
 
-Published `reticulum-rs-transport` 0.9.9 still exposes IFAC-related shared
+Published `reticulum-rs-transport` 0.10.0 still exposes IFAC-related shared
 configuration, but source inspection confirms that its stock TCP client and
 server wire paths serialize/deserialize `Packet` values directly through HDLC.
 They do not apply or verify the Python Reticulum IFAC transform. Shared IFAC
@@ -364,7 +369,7 @@ safety ceiling, and reply-ticket precedence. Pinned/current Python and mixed
 The upstream default propagation cost is not substituted for a raised live
 relay cost.
 
-Reticulum 0.9.9 requalification preserves both boundaries independently. The
+Reticulum 0.10.0 requalification preserves both boundaries independently. The
 strengthened TCP multi-segment metadata regression passes with exact bytes, so
 the split guard is retired. The unchanged maximum-UDP sentinel still fails at
 456 versus 483 bytes, and the project-local IFAC adapter remains required. The

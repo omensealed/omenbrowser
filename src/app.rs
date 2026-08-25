@@ -3099,7 +3099,7 @@ fn native_network_smoke_test_verdicts(
             live_report,
             execute_live_probe,
             PageFetchProbeStage::LinkSetup,
-            "run Diagnostics L or X to perform an explicit live probe; if it fails, inspect Reticulum 0.9 link setup"
+            "run Diagnostics L or X to perform an explicit live probe; if it fails, inspect Reticulum 0.10.0 link setup"
         ),
         "request_send": live_or_skipped_stage_verdict(
             live_report,
@@ -3205,7 +3205,7 @@ fn native_network_smoke_test_classification(
             "link_setup",
             "fail",
             "live link setup failed",
-            "inspect Reticulum 0.9 link setup details in live_page_probe or run with --live --fetch-page --stdout",
+            "inspect Reticulum 0.10.0 link setup details in live_page_probe or run with --live --fetch-page --stdout",
         ),
         (
             "request_send",
@@ -3348,7 +3348,7 @@ fn page_fetch_stage_next_step(stage: Option<&PageFetchProbeStage>) -> &'static s
             "request the destination path, use --warm-path, and retry after Reticulum path discovery"
         }
         Some(PageFetchProbeStage::LinkSetup) => {
-            "inspect Reticulum 0.9 link setup details in live_page_probe"
+            "inspect Reticulum 0.10.0 link setup details in live_page_probe"
         }
         Some(PageFetchProbeStage::RequestSend) => {
             "inspect request payload/path traces and clean Reticulum request send behavior"
@@ -23010,6 +23010,7 @@ mod tests {
 
         let interface_events = network_doctor_facade_events_from_runtime_bus_event(
             &RuntimeBusEvent::InterfaceStats(InterfaceStats {
+                transport_health: None,
                 available: true,
                 reason: None,
                 interfaces: vec!["PrivateGateway".into()],
@@ -23353,6 +23354,7 @@ mod tests {
 
         assert!(
             app.handle_runtime_bus_event(RuntimeBusEvent::InterfaceStats(InterfaceStats {
+                transport_health: None,
                 available: true,
                 reason: None,
                 interfaces: vec!["PrivateGateway".into()],
@@ -31193,7 +31195,7 @@ side
     fn native_browser_load_failure_reports_exact_link_request_response_stage() {
         let cases = [
             (
-                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during link setup: Reticulum 0.9 failed to create page request link"),
+                format!("native Reticulum page fetch failed for {FIXTURE_NODE_HASH} during link setup: Reticulum 0.10.0 failed to create page request link"),
                 PageFetchProbeStage::LinkSetup,
                 "native-load",
                 "link setup failed",

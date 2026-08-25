@@ -2745,7 +2745,7 @@ fn write_known_destinations_fixture(
 ) -> anyhow::Result<()> {
     let _ = (path, destination);
     Err(anyhow::anyhow!(
-        "known_destinations fixture generation is not available in the clean Reticulum 0.9 build"
+        "known_destinations fixture generation is not available in the clean Reticulum 0.10.0 build"
     ))
 }
 
@@ -3773,7 +3773,7 @@ fn semantic_known_destinations_check(
     serde_json::json!({
         "available": false,
         "ok": true,
-        "detail": "semantic known_destinations parsing is not available in the clean Reticulum 0.9 build",
+        "detail": "semantic known_destinations parsing is not available in the clean Reticulum 0.10.0 build",
     })
 }
 

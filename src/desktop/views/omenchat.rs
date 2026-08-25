@@ -1274,7 +1274,7 @@ pub(in crate::desktop) fn omenchat_view_for_session(
             if room_uploads_disabled {
                 "Uploads disabled by room policy"
             } else if publish_allowed {
-                "Attach file · direct/local Resources are supported; routed multi-hop retransmission is not qualified on Reticulum 0.9.9; retry manually only after route conditions change"
+                "Attach file · direct/local Resources are supported; routed multi-hop retransmission is not qualified on Reticulum 0.10.0; retry manually only after route conditions change"
             } else {
                 "Read-only announcement room"
             }

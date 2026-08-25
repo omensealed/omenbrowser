@@ -6,7 +6,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/omen-capability-docs.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
 cp "$repo_root/docs/RETICULUM_TRANSPORT_API_GAP.md" "$tmp/gap.md"
-cp "$repo_root/docs/upstream/RETICULUM_0_9_9_OMEN_CAPABILITY_LEDGER.md" "$tmp/ledger.md"
+cp "$repo_root/docs/upstream/RETICULUM_0_10_0_OMEN_CAPABILITY_LEDGER.md" "$tmp/ledger.md"
 
 run_verifier() {
   OMEN_RETICULUM_GAP_DOC="$tmp/gap.md" \
@@ -30,7 +30,7 @@ cp "$repo_root/docs/RETICULUM_TRANSPORT_API_GAP.md" "$tmp/gap.md"
 
 sed -i 's/resource-routed-fragment-loss=unsupported/resource-routed-fragment-loss=supported/' "$tmp/ledger.md"
 expect_failure "routed limitation promoted"
-cp "$repo_root/docs/upstream/RETICULUM_0_9_9_OMEN_CAPABILITY_LEDGER.md" "$tmp/ledger.md"
+cp "$repo_root/docs/upstream/RETICULUM_0_10_0_OMEN_CAPABILITY_LEDGER.md" "$tmp/ledger.md"
 
 sed -i 's/resource-maximum-udp=unsupported/resource-maximum-udp=supported/' "$tmp/ledger.md"
 expect_failure "UDP limitation promoted"

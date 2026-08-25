@@ -50,7 +50,7 @@ under_run_dir=$(bash "$repo_root/scripts/release-omenchat-smoke.sh" \
   --browser-bin "$browser_bin" \
   --server-bin "$server_bin" \
   --tcp "127.0.0.1:$under_port" \
-  --path-wait 10 \
+  --path-wait 45 \
   --out "$temporary_root/under-smoke" \
   --message "current/current room media-policy under-limit qualification" \
   --room-media-policy-smoke 262144 \
@@ -69,7 +69,7 @@ over_run_dir=$(bash "$repo_root/scripts/release-omenchat-smoke.sh" \
   --browser-bin "$browser_bin" \
   --server-bin "$server_bin" \
   --tcp "127.0.0.1:$over_port" \
-  --path-wait 10 \
+  --path-wait 45 \
   --out "$temporary_root/over-smoke" \
   --message "current/current room media-policy over-limit qualification" \
   --room-media-policy-smoke 262144 \
@@ -85,7 +85,7 @@ disabled_run_dir=$(bash "$repo_root/scripts/release-omenchat-smoke.sh" \
   --browser-bin "$browser_bin" \
   --server-bin "$server_bin" \
   --tcp "127.0.0.1:$disabled_port" \
-  --path-wait 10 \
+  --path-wait 45 \
   --out "$temporary_root/disabled-smoke" \
   --message "current/current disabled room upload qualification" \
   --room-media-policy-smoke 0 \
@@ -137,9 +137,11 @@ restart_capabilities = restart_stages.get("capability_observation", {})
 upload_complete = under_stages.get("upload_complete_wait", {})
 upload_fetch = under_stages.get("upload_fetch_wait", {})
 rejection = over_stages.get("room_media_policy_upload_rejection_wait", {})
+over_offer = over_stages.get("announcement_upload_offer_frame", {})
 disabled_rejection = disabled_stages.get(
     "room_media_policy_upload_rejection_wait", {}
 )
+disabled_offer = disabled_stages.get("announcement_upload_offer_frame", {})
 report = {
     "status": "pass",
     "isolated_loopback": True,
@@ -160,10 +162,12 @@ report = {
         and restart_capabilities.get("room_media_policy_negotiated") is True
         and restart_capabilities.get("room_upload_max_file_bytes") == 262144
     ),
-    "over_limit_typed_rejection": (
+    "over_limit_pre_dispatch_rejection": (
         over["classification"]["outcome"] == "pass"
         and rejection.get("ok") is True
         and rejection.get("policy_upload_rejected") is True
+        and rejection.get("pre_dispatch_rejected") is True
+        and over_offer.get("pre_dispatch_rejected") is True
         and rejection.get("upload_accepted") is False
         and rejection.get("upload_completed") is False
         and rejection.get("committed_upload_seen") is False
@@ -171,10 +175,12 @@ report = {
     "over_limit_ledger_clean": (
         over_run_dir / "omenchatd-upload-rejection-doctor-room-media-policy.txt"
     ).is_file(),
-    "disabled_typed_rejection": (
+    "disabled_pre_dispatch_rejection": (
         disabled["classification"]["outcome"] == "pass"
         and disabled_rejection.get("ok") is True
         and disabled_rejection.get("policy_upload_rejected") is True
+        and disabled_rejection.get("pre_dispatch_rejected") is True
+        and disabled_offer.get("pre_dispatch_rejected") is True
         and disabled_rejection.get("upload_accepted") is False
         and disabled_rejection.get("upload_completed") is False
         and disabled_rejection.get("committed_upload_seen") is False
@@ -192,9 +198,9 @@ if not all((
     report["under_limit_resource_committed"],
     report["under_limit_resource_fetched"],
     report["restart_projection_recovered"],
-    report["over_limit_typed_rejection"],
+    report["over_limit_pre_dispatch_rejection"],
     report["over_limit_ledger_clean"],
-    report["disabled_typed_rejection"],
+    report["disabled_pre_dispatch_rejection"],
     report["disabled_ledger_clean"],
 )):
     raise SystemExit("room media-policy process evidence is incomplete")

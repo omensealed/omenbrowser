@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gap_doc="${OMEN_RETICULUM_GAP_DOC:-$repo_root/docs/RETICULUM_TRANSPORT_API_GAP.md}"
-ledger="${OMEN_RETICULUM_CAPABILITY_LEDGER:-$repo_root/docs/upstream/RETICULUM_0_9_9_OMEN_CAPABILITY_LEDGER.md}"
+ledger="${OMEN_RETICULUM_CAPABILITY_LEDGER:-$repo_root/docs/upstream/RETICULUM_0_10_0_OMEN_CAPABILITY_LEDGER.md}"
 
 fail() {
   echo "Reticulum capability documentation verification failed: $*" >&2
@@ -11,7 +11,7 @@ fail() {
 }
 
 [[ -f "$gap_doc" ]] || fail "missing transport-gap document"
-[[ -f "$ledger" ]] || fail "missing 0.9.9 capability ledger"
+[[ -f "$ledger" ]] || fail "missing 0.10.0 capability ledger"
 
 require_marker() {
   local capability="$1"
@@ -43,4 +43,4 @@ grep -Fqi 'retransmission after fragment loss' "$gap_doc" ||
 grep -Fq 'maximum-UDP' "$gap_doc" ||
   fail "transport-gap document does not retain the independent UDP boundary"
 
-echo "Reticulum 0.9.9 capability documentation: pass"
+echo "Reticulum 0.10.0 capability documentation: pass"

@@ -56,6 +56,7 @@ fn interface_runtime_status_label_reports_sample_visibility() {
 
     profile.enabled = false;
     let running_stats = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec!["GatewayOne [TcpClient supported enabled]".into()],
@@ -83,6 +84,7 @@ fn interface_runtime_status_label_reports_sample_visibility() {
     );
 
     let attached_stats = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec![
@@ -103,6 +105,7 @@ fn interface_runtime_status_label_reports_sample_visibility() {
     );
 
     let structured_attached = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: Vec::new(),
@@ -127,6 +130,7 @@ fn interface_runtime_status_label_reports_sample_visibility() {
     );
 
     let missing_stats = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec!["OtherGateway [TcpClient supported enabled]".into()],
@@ -137,6 +141,7 @@ fn interface_runtime_status_label_reports_sample_visibility() {
     );
 
     let stopped_stats = InterfaceStats {
+        transport_health: None,
         available: false,
         reason: Some("runtime stopped".into()),
         interfaces: Vec::new(),
@@ -231,6 +236,7 @@ fn interface_restart_recommendation_only_flags_stale_runtime_samples() {
     assert!(interface_restart_recommendation_line(&[profile.clone()], None).is_none());
 
     let attached_stats = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: Vec::new(),
@@ -245,6 +251,7 @@ fn interface_restart_recommendation_only_flags_stale_runtime_samples() {
     );
 
     let stale_stats = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec!["GatewayOne [TcpClient supported enabled]".into()],
@@ -263,6 +270,7 @@ fn monitoring_interface_reconnect_line_summarizes_native_samples() {
     assert!(monitoring_interface_reconnect_line(None).contains("waiting"));
 
     let unavailable = InterfaceStats {
+        transport_health: None,
         available: false,
         reason: Some("runtime stopped".into()),
         interfaces: Vec::new(),
@@ -271,6 +279,7 @@ fn monitoring_interface_reconnect_line_summarizes_native_samples() {
     assert!(monitoring_interface_reconnect_line(Some(&unavailable)).contains("unavailable"));
 
     let no_interfaces = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: Vec::new(),
@@ -279,6 +288,7 @@ fn monitoring_interface_reconnect_line_summarizes_native_samples() {
     assert!(monitoring_interface_reconnect_line(Some(&no_interfaces)).contains("no interfaces"));
 
     let connected = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec!["Gateway [1] TCPClientInterface | connected=true".into()],
@@ -287,6 +297,7 @@ fn monitoring_interface_reconnect_line_summarizes_native_samples() {
     assert!(monitoring_interface_reconnect_line(Some(&connected)).contains("connected"));
 
     let retrying = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec!["Gateway [1] TCPClientInterface | connected=false".into()],
@@ -298,6 +309,7 @@ fn monitoring_interface_reconnect_line_summarizes_native_samples() {
 #[test]
 fn monitoring_interface_status_lines_prefer_structured_samples() {
     let stats = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: vec!["legacy raw line".into()],
@@ -341,6 +353,7 @@ fn monitoring_interface_status_lines_prefer_structured_samples() {
 #[test]
 fn monitoring_interface_health_line_summarizes_disconnected_samples() {
     let retrying = InterfaceStats {
+        transport_health: None,
         available: true,
         reason: Some("sampled".into()),
         interfaces: Vec::new(),
@@ -356,6 +369,7 @@ fn monitoring_interface_health_line_summarizes_disconnected_samples() {
     );
 
     let unavailable = InterfaceStats {
+        transport_health: None,
         available: false,
         reason: Some("runtime stopped".into()),
         interfaces: Vec::new(),

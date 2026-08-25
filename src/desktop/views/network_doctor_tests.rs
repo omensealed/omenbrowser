@@ -32,6 +32,7 @@ fn sample(name: &str, state: InterfaceSampleState, attached: bool) -> InterfaceS
 fn network_doctor_health_summary_reports_clean_snapshot() {
     let monitoring = MonitoringPanelState {
         last_interface_stats: Some(InterfaceStats {
+            transport_health: None,
             available: true,
             reason: None,
             interfaces: Vec::new(),
@@ -60,6 +61,7 @@ fn network_doctor_health_summary_flags_blockers() {
     let monitoring = MonitoringPanelState {
         runtime_errors: 2,
         last_interface_stats: Some(InterfaceStats {
+            transport_health: None,
             available: true,
             reason: None,
             interfaces: Vec::new(),

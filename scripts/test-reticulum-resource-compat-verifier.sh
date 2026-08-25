@@ -30,7 +30,7 @@ sed -i 's/reticulum_routed_resource_retransmission_survives_fragment_loss/rename
 expect_failure "routed sentinel renamed"
 
 reset_fixture
-sed -i '/known upstream Reticulum 0.9.9 routed Resource retransmission regression/d' "$tmp/tests.rs"
+sed -i '/known upstream Reticulum 0.10.0 routed Resource retransmission regression/d' "$tmp/tests.rs"
 expect_failure "routed sentinel unignored"
 
 reset_fixture

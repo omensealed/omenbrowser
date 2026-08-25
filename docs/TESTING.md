@@ -4,6 +4,24 @@ This is the current test and qualification guide for OMENbrowser_rs and the
 independently packaged `omenchatd`. Repository scripts are authoritative when
 their commands differ from prose.
 
+## v0.10.0-1 qualification closure
+
+The adjacent immutable baseline is v0.9.9-2 commit
+`0a9a913ddf8bfc4388f065335770330495055da4`, not v0.6.0-1. The historical
+`run-mixed-0-6-0-9-*` filenames are retained for compatibility, but their
+defaults now exercise v0.9.9-2 and expect announcement-room capabilities.
+Direct LXMF, 64 KiB Resource, propagation, live OMENchat, and schema 14 history
+passed in both directions. Propagation unknown-sender recovery performs an
+authenticated announce plus a fresh recipient sync and never repeats the
+logical send.
+
+Current Python drift passed with Python 3.14.7, RNS 1.4.2, LXMF 1.1.1, and
+NomadNet 1.2.8. Pinned RNS/LXMF commits are recorded in
+`migration/V0_10_0_1_RELEASE_EVIDENCE.md`. Native Windows/macOS/ARM64 hardware,
+public radio/network, interactive media, and an external RPC endpoint were
+unavailable. The ARM64 Cross/Podman/QEMU lane is emulated architecture evidence,
+not a hardware claim.
+
 ## Protect normal identities and data
 
 Never run integration tests against a normal browser root or server home. Use a
@@ -159,7 +177,7 @@ bash scripts/run-pinned-python-reticulum.sh \
 ```
 
 The current Python drift lane is informational and may identify upstream
-drift. For v0.9.9-2 it resolves RNS 1.4.2, LXMF 1.1.1, and NomadNet 1.2.8:
+drift. For the v0.10.0-1 candidate it resolves RNS 1.4.2, LXMF 1.1.1, and NomadNet 1.2.8:
 
 ```bash
 bash scripts/run-current-python-drift.sh \
@@ -177,7 +195,7 @@ the adjacent peer should suppress capabilities it legitimately supports.
 
 ## Resource limitations and sentinels
 
-The Reticulum 0.9.9 split-metadata regression is a normal passing test. The
+The Reticulum 0.10.0 split-metadata regression is a normal passing test. The
 independent maximum-UDP wire-buffer limitation remains an explicit ignored
 sentinel:
 

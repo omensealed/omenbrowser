@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly pinned_ref=15320e4d2cfabb143c1db20ca887e275fd521585
+readonly pinned_ref=e32d4df754a7b87b1bf1bb0d08675d12ff505ae6
 readonly upstream_url=https://github.com/markqvist/Reticulum.git
 readonly pinned_lxmf_ref=727830cefda83d9c6e3982b48675425f3f988f9c
 readonly upstream_lxmf_url=https://github.com/markqvist/LXMF.git

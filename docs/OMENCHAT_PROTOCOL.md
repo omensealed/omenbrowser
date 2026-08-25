@@ -3,6 +3,13 @@
 This document is the public compatibility contract between the OMENbrowser_rs
 client plugin and the standalone `omenchatd` server.
 
+The v0.10.0-1 Reticulum/LXMF migration does not change wire protocol 1,
+`omenchat-protocol 0.2.0`, SQLite schema 14, destination derivation, identity
+handling, or upload bounds. Adjacent v0.9.9-2 clients and servers passed live
+messages, mutations, history, direct Resources, durable local upload behavior,
+restart, and reconnect in both applicable directions. Resource transport
+completion remains distinct from authenticated durable application commit.
+
 ## Transport
 
 OMENchat uses Reticulum links for live room traffic. Larger history, userlist,
@@ -26,7 +33,7 @@ accepts a valid frame received as either generic context `0x00` or the legacy
 responses for compatibility. This is transport adaptation; it does not change
 the OMENchat frame protocol.
 
-Official reticulum-rs 0.9.9 passes OMEN's strengthened multi-segment metadata
+Official reticulum-rs 0.10.0 passes OMEN's strengthened multi-segment metadata
 Resource regression, so the temporary exact-0.9.7 efficient-Resource ceiling
 is removed. The default 512 KiB upload limit, the 8 MiB application Resource
 ceiling, negotiated peer/room limits, and all queue/byte bounds remain
@@ -140,7 +147,7 @@ lifecycle event, not a new OMENchat frame. The desktop releases pending
 history/user-list offers owned by that live link and leaves the link connected
 for an explicit retry. Server outbound Resources retain a bounded association
 between the application resource ID and the exact Reticulum hash until a
-terminal, link close, shutdown, or six-hour TTL. The pinned 0.9.9 inbound
+terminal, link close, shutdown, or six-hour TTL. The pinned 0.10.0 inbound
 failure shape carries the exact hash and expected size but not the OMENchat
 metadata/application ID. Server upload cleanup therefore removes one offer only
 when the authenticated identity and expected size identify exactly one pending
@@ -211,7 +218,7 @@ inbound frame carrying the `SessionOpen` operation number.
 ### Authoritative production capability matrix
 
 This table describes the canonical `desktop-product` client and
-`server-headless`/`server-full` server at 0.9.9-2. Capability names come from
+`server-headless`/`server-full` server at 0.10.0-1. Capability names come from
 `omenchat-protocol::KNOWN_SESSION_CAPABILITIES`; deterministic tests check the
 shared vocabulary, the client's request, and the canonical server's acceptance.
 Definition alone never activates a capability: each Link must request it and

@@ -118,7 +118,7 @@ impl BrowserProbeSummary {
                 "run Diagnostics D to request path and inspect dry-run state"
             }
             PageFetchProbeStage::LinkSetup => {
-                "run Diagnostics X or L for a live probe and inspect Reticulum 0.9 link setup"
+                "run Diagnostics X or L for a live probe and inspect Reticulum 0.10.0 link setup"
             }
             PageFetchProbeStage::RequestSend => {
                 "run Diagnostics X or L and inspect request payload/path send traces"

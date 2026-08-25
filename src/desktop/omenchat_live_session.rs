@@ -264,6 +264,29 @@ impl DesktopApp {
                 return Task::none();
             }
         };
+        if !opened
+            .destination_hash
+            .eq_ignore_ascii_case(&descriptor.server_destination)
+        {
+            let runtime = self.app.runtime.clone();
+            let rejected_link_id = opened.link_id;
+            tokio::spawn(async move {
+                let _ = runtime.close_omenchat_link(rejected_link_id).await;
+            });
+            self.clear_omenchat_reconnect_state(session_id);
+            self.clear_omenchat_invitation_room_for_session(session_id);
+            self.set_omenchat_session_status(
+                session_id,
+                "OMENchat reconnect returned a different destination; rejected link without changing the session"
+                    .into(),
+            );
+            self.set_omenchat_connection_state(
+                session_id,
+                crate::chat::ChatConnectionState::Failed { retryable: true },
+            );
+            self.app.status.task = "OMENchat live reconnect destination mismatch".into();
+            return Task::none();
+        }
         let mut transport = DesktopOmenChatTransport::new(opened.link_id, current_epoch_ms());
         let events = crate::chat::live::reconnect_live_server(
             &mut self.omenchat.chat_client,
@@ -363,7 +386,7 @@ mod tests {
         assert!(omenchat_live_open_error_status("has no known identity key")
             .contains("path/key missing"));
         assert!(omenchat_live_open_error_status(
-            "timed out waiting for Reticulum 0.9 link establishment"
+            "timed out waiting for Reticulum 0.10.0 link establishment"
         )
         .contains("Link handshake"));
         assert!(
@@ -454,6 +477,164 @@ mod tests {
             .get(&session_id)
             .is_some_and(|cancel| !cancel.is_cancelled()));
         drop(task);
+    }
+
+    #[tokio::test]
+    async fn omenchat_reconnect_rejects_opened_link_for_wrong_destination() {
+        let mut desktop =
+            desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-wrong-reconnect-destination");
+        let descriptor = test_descriptor();
+        let session_id = desktop.open_omenchat_status_session(descriptor.clone(), "waiting".into());
+        let generation = desktop.next_omenchat_reconnect_generation(session_id);
+        desktop.omenchat.omenchat_live_opening.insert(session_id);
+
+        let _ = desktop.handle_omenchat_live_reconnect_result(
+            session_id,
+            generation,
+            descriptor,
+            Ok(crate::runtime::OmenChatLinkOpened {
+                destination_hash: "ffeeddccbbaa99887766554433221100".into(),
+                link_id: [0x44; 16],
+                rtt_millis: Some(1),
+            }),
+        );
+
+        tokio::task::yield_now().await;
+        assert!(desktop.omenchat.omenchat_live_transports.is_empty());
+        assert!(desktop.omenchat.omenchat_link_sessions.is_empty());
+        assert!(desktop.omenchat.omenchat_live_opening.is_empty());
+        assert!(desktop
+            .omenchat
+            .omenchat_live_reconnect_generation
+            .is_empty());
+        assert_eq!(
+            desktop.omenchat_connection_state(session_id),
+            crate::chat::ChatConnectionState::Failed { retryable: true }
+        );
+        assert!(desktop
+            .omenchat
+            .chat_client
+            .session(session_id)
+            .expect("session")
+            .status
+            .contains("different destination"));
+    }
+
+    #[tokio::test]
+    async fn omenchat_reconnect_128_generation_soak_keeps_one_current_link() {
+        const RECONNECT_CYCLES: u64 = 128;
+
+        let mut desktop =
+            desktop_with_temp_root("omenbrowser-rs-desktop-omenchat-reconnect-128-soak");
+        let descriptor = test_descriptor();
+        let session_id = desktop.open_omenchat_status_session(descriptor.clone(), "waiting".into());
+        let initial_link_id = [0xEE; 16];
+        let _ = desktop.register_omenchat_live_transport(
+            session_id,
+            DesktopOmenChatTransport::new(initial_link_id, current_epoch_ms()),
+        );
+
+        for cycle in 1..=RECONNECT_CYCLES {
+            let old_link_id = desktop
+                .omenchat
+                .omenchat_live_transports
+                .get(&session_id)
+                .expect("one active transport")
+                .link_id;
+            let mut replacement_link_id = [0u8; 16];
+            replacement_link_id[..8].copy_from_slice(&cycle.to_be_bytes());
+            replacement_link_id[8..].copy_from_slice(&(!cycle).to_be_bytes());
+            let generation = desktop.next_omenchat_reconnect_generation(session_id);
+            desktop.omenchat.omenchat_live_opening.insert(session_id);
+
+            let task = desktop.handle_omenchat_live_reconnect_result(
+                session_id,
+                generation,
+                descriptor.clone(),
+                Ok(crate::runtime::OmenChatLinkOpened {
+                    destination_hash: descriptor.server_destination.clone(),
+                    link_id: replacement_link_id,
+                    rtt_millis: Some(1),
+                }),
+            );
+            drop(task);
+
+            assert_eq!(desktop.omenchat.omenchat_live_transports.len(), 1);
+            assert_eq!(desktop.omenchat.omenchat_link_sessions.len(), 1);
+            assert_eq!(
+                desktop
+                    .omenchat
+                    .omenchat_live_transports
+                    .get(&session_id)
+                    .map(|transport| transport.link_id),
+                Some(replacement_link_id)
+            );
+            assert_eq!(
+                desktop
+                    .omenchat
+                    .omenchat_link_sessions
+                    .get(&replacement_link_id),
+                Some(&session_id)
+            );
+            assert!(desktop.omenchat.omenchat_live_opening.is_empty());
+            assert!(desktop
+                .omenchat
+                .omenchat_live_reconnect_generation
+                .is_empty());
+
+            desktop
+                .omenchat
+                .omenchat_link_sessions
+                .insert(old_link_id, session_id);
+            assert!(desktop.app.enqueue_runtime_event(
+                crate::runtime::RuntimeBusEvent::OmenChatLinkClosed(
+                    crate::runtime::OmenChatLinkClosed {
+                        link_id: old_link_id,
+                        reason: Some("late old-generation close".into()),
+                    },
+                ),
+            ));
+            assert_eq!(desktop.app.drain_internal_events(), 1);
+            let drain_task = desktop.drain_omenchat_runtime_events();
+            drop(drain_task);
+
+            assert_eq!(desktop.omenchat.omenchat_live_transports.len(), 1);
+            assert_eq!(desktop.omenchat.omenchat_link_sessions.len(), 1);
+            assert_eq!(
+                desktop
+                    .omenchat
+                    .omenchat_live_transports
+                    .get(&session_id)
+                    .map(|transport| transport.link_id),
+                Some(replacement_link_id)
+            );
+            assert!(desktop.omenchat.omenchat_live_retry_after.is_empty());
+        }
+
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_connect_count
+                .get(&session_id),
+            Some(&(RECONNECT_CYCLES + 1))
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_disconnect_count
+                .get(&session_id)
+                .copied()
+                .unwrap_or_default(),
+            0
+        );
+        assert_eq!(
+            desktop
+                .omenchat
+                .omenchat_live_state
+                .pending_upload_metrics()
+                .items,
+            0
+        );
     }
 
     #[test]

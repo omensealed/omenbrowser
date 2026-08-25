@@ -23,7 +23,7 @@ answer to “what does the current release actually support?”
 - [Packaging](PACKAGING.md) — release archives and native packages.
 - [Release Versioning](RELEASE_VERSIONING.md) — product and dependency version
   rules.
-- [Current Candidate Notes](RELEASE_NOTES_V0_9_9_2.md).
+- [Current Candidate Notes](RELEASE_NOTES_V0_10_0_1.md).
 
 ## Developers
 
@@ -33,7 +33,7 @@ answer to “what does the current release actually support?”
 - [LXMF Delivery and Events](LXMF_DELIVERY_AND_EVENT_MODEL.md).
 - [Operations and Transfers](OPERATIONS_TRANSFERS.md).
 - [Reticulum Transport Gaps](RETICULUM_TRANSPORT_API_GAP.md).
-- [Reticulum 0.9.9 OMEN Capability Ledger](upstream/RETICULUM_0_9_9_OMEN_CAPABILITY_LEDGER.md).
+- [Reticulum 0.10.0 OMEN Capability Ledger](upstream/RETICULUM_0_10_0_OMEN_CAPABILITY_LEDGER.md).
 - [Dependency Security](maintenance/DEPENDENCY_SECURITY.md).
 
 ## Evidence and history

@@ -179,7 +179,7 @@ OMENchat reconnect controls and retry policy remain authoritative.
 ## Typed LXMF SDK delivery adapter
 
 `src/operations/lxmf.rs` projects the existing
-`RuntimeBusEvent::SdkDeliveryUpdated` surface from the locked lxmf-sdk 0.9.9
+`RuntimeBusEvent::SdkDeliveryUpdated` surface from the locked lxmf-sdk 0.10.0
 train. The update already carries a typed delivery state, terminal flag,
 attempt count, timestamp, sequence number, message identifier, and optional
 peer. This unit deliberately does not parse human-readable delivery strings.

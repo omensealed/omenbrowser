@@ -3,11 +3,11 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
-readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-5ba6683055fb6c59111919fbad1ac37f56a4c203}
-readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.6.0-1}
+readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-0a9a913ddf8bfc4388f065335770330495055da4}
+readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.9.9-2}
 readonly old_server_stop_mode=${OMEN_MIXED_OLD_SERVER_STOP_MODE:-sigterm}
-readonly expect_legacy_capabilities=${OMEN_MIXED_EXPECT_LEGACY_CAPABILITIES:-1}
-readonly current_expected_version=0.9.9-2
+readonly expect_legacy_capabilities=${OMEN_MIXED_EXPECT_LEGACY_CAPABILITIES:-0}
+readonly current_expected_version=0.10.0-1
 readonly current_client_features=${OMEN_MIXED_CURRENT_CLIENT_FEATURES:-desktop-product}
 readonly current_server_features=${OMEN_MIXED_CURRENT_SERVER_FEATURES:-server-headless}
 

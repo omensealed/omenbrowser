@@ -1,15 +1,19 @@
 # Current product status
 
-This page describes the release-qualified `v0.9.9-2` candidate. Source code
-and automated tests outrank prose if a development branch has advanced.
+This page tracks released `v0.10.0-1`. Source code and automated tests outrank
+prose if a development branch has advanced. Canonical root/server products, standalone
+packaging, current and pinned Python interop, adjacent v0.9.9-2 interop and
+rollback, reconnect/upload reliability, security, TUI, and emulated ARM64 gates
+passed. See `migration/V0_10_0_1_RELEASE_EVIDENCE.md` for detailed evidence and
+explicit unavailable lanes.
 
 ## Version and compatibility
 
 | Component | Current value |
 |---|---|
-| OMENbrowser_rs | `0.9.9-2` |
-| standalone omenchatd | `0.9.9-2` |
-| Reticulum/LXMF Rust train | exact official crates.io `0.9.9` |
+| OMENbrowser_rs | `0.10.0-1` |
+| standalone omenchatd | `0.10.0-1` |
+| Reticulum/LXMF Rust train | exact official crates.io `0.10.0` |
 | OMENchat wire protocol | version `1` |
 | omenchat-protocol Rust API | `0.2.0` |
 | omenchatd SQLite schema | `14` |
@@ -17,6 +21,10 @@ and automated tests outrank prose if a development branch has advanced.
 The root application and `src/server` remain independent Cargo roots with
 independent lockfiles. No Git dependency, private Reticulum fork, vendored
 transport, or `[patch.crates-io]` override is part of the product.
+
+Typed queue, traffic, violation, active-Link, and medium-timeout health is
+project-owned, bounded, redacted, optional, and diagnostic only. Unknown values
+remain distinct from zero; telemetry is not delivery or durable commit proof.
 
 ## Supported runtime
 
@@ -50,7 +58,7 @@ in [OMENchat Protocol](OMENCHAT_PROTOCOL.md).
 ## Important limitations
 
 - Routed multi-hop Resource retransmission is not fully qualified on upstream
-  Reticulum 0.9.9. Direct/local attachment paths are distinct from routed
+  Reticulum 0.10.0. Direct/local attachment paths are distinct from routed
   qualification, and OMEN never automatically replays an uncertain transfer.
 - The independent maximum-UDP Resource sentinel remains visible: upstream's
   fixed transmit buffer is smaller than the maximum serialized wire packet.
@@ -78,6 +86,6 @@ removal conditions.
 ## Release evidence
 
 The current candidate notes are
-[v0.9.9-2](RELEASE_NOTES_V0_9_9_2.md). Current commands are in
+[v0.10.0-1](RELEASE_NOTES_V0_10_0_1.md). Current commands are in
 [Testing](TESTING.md). Hosted CI and package results are evidence only for the
 commit SHA on which they ran.

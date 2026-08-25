@@ -380,7 +380,7 @@ fn omenchat_retry_exhaustion_reports_routed_limit_without_automatic_retry() {
         .status;
     assert!(status.contains("current route"));
     assert!(status.contains("attachment was not committed"));
-    assert!(status.contains("upstream 0.9.9"));
+    assert!(status.contains("upstream 0.10.0"));
     assert!(status.contains("no automatic retry occurred"));
     assert_eq!(
         desktop

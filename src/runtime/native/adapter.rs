@@ -358,13 +358,13 @@ impl rns_transport::transport::ReceiptHandler for CleanLxmfReceiptHandler {
             .receipt_status_for_packet(receipt_hash.clone(), String::new(), 0.0);
         if !matched_pending {
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 receipt ignored receipt_hash={receipt_hash} reason=no_pending_correlation"
+                "native Reticulum 0.10.0 receipt ignored receipt_hash={receipt_hash} reason=no_pending_correlation"
             )));
             return;
         }
         if !first_observation {
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 duplicate receipt ignored receipt_hash={receipt_hash} reason=already_observed"
+                "native Reticulum 0.10.0 duplicate receipt ignored receipt_hash={receipt_hash} reason=already_observed"
             )));
             return;
         }
@@ -386,7 +386,7 @@ impl rns_transport::transport::ReceiptHandler for CleanLxmfReceiptHandler {
             },
         ));
         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 receipt correlated peer={} message_id={} receipt_hash={} delivery=peer_unconfirmed",
+            "native Reticulum 0.10.0 receipt correlated peer={} message_id={} receipt_hash={} delivery=peer_unconfirmed",
             peer_hash,
             message_id.as_deref().unwrap_or("none"),
             receipt_hash
@@ -873,7 +873,7 @@ impl CleanReticulumLxmfWireSubmitter {
             rns_transport::delivery::LinkSendResult::Resource(_) => "link-resource",
         };
         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 LXMF clean wire submitted method={} destination={} send_destination={} message_id={} route={} route_label={} bytes={} ticket={} reply_ticket={} transient_id={}",
+            "native Reticulum 0.10.0 LXMF clean wire submitted method={} destination={} send_destination={} message_id={} route={} route_label={} bytes={} ticket={} reply_ticket={} transient_id={}",
             method,
             delivery.destination_hash,
             send_hash.to_hex_string(),
@@ -920,7 +920,7 @@ impl CleanReticulumLxmfWireSubmitter {
                 propagated.method = Some("propagated".into());
                 propagated.try_propagation_on_fail = false;
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 LXMF safe automatic fallback destination={} message_id={} direct_error={direct_error}",
+                    "native Reticulum 0.10.0 LXMF safe automatic fallback destination={} message_id={} direct_error={direct_error}",
                     delivery.destination_hash, delivery.message_id
                 )));
                 let propagation_observed = AtomicBool::new(false);
@@ -1190,7 +1190,7 @@ impl NativeNetworkRuntime {
         )));
         if !ifac_summary.is_empty() {
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(
-                "native Reticulum 0.9 IFAC TCP adapter active for configured private gateways"
+                "native Reticulum 0.10.0 IFAC TCP adapter active for configured private gateways"
                     .into(),
             ));
         }
@@ -3293,14 +3293,14 @@ fn spawn_announce_listener(
                             {
                                 Ok(count) => {
                                     let _ = save_event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 saved path table after announce storage={} active_paths={}",
+                                        "native Reticulum 0.10.0 saved path table after announce storage={} active_paths={}",
                                         save_storage_path.display(),
                                         count
                                     )));
                                 }
                                 Err(error) => {
                                     let _ = save_event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 path table save after announce failed storage={} error={}",
+                                        "native Reticulum 0.10.0 path table save after announce failed storage={} error={}",
                                         save_storage_path.display(),
                                         error
                                     )));
@@ -3358,7 +3358,7 @@ fn spawn_reticulum_path_table_restore(
                             ),
                             Err(error) => {
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 ignored invalid restored identity destination={} error={error}",
+                                    "native Reticulum 0.10.0 ignored invalid restored identity destination={} error={error}",
                                     restored.destination.to_hex_string()
                                 )));
                             }
@@ -3366,7 +3366,7 @@ fn spawn_reticulum_path_table_restore(
                     }
                 }
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 restored path table storage={} active_paths={} identities={}",
+                    "native Reticulum 0.10.0 restored path table storage={} active_paths={} identities={}",
                     storage_path.display(),
                     report.restored_active_paths,
                     report.restored_identities.len()
@@ -3374,7 +3374,7 @@ fn spawn_reticulum_path_table_restore(
             }
             Err(error) => {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 path table restore failed storage={} error={}",
+                    "native Reticulum 0.10.0 path table restore failed storage={} error={}",
                     storage_path.display(),
                     error
                 )));
@@ -3415,14 +3415,14 @@ fn spawn_reticulum_path_table_saver(
             match transport.save_reticulum_path_table(&storage_path).await {
                 Ok(count) => {
                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 saved path table storage={} active_paths={}",
+                        "native Reticulum 0.10.0 saved path table storage={} active_paths={}",
                         storage_path.display(),
                         count
                     )));
                 }
                 Err(error) => {
                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 path table save failed storage={} error={}",
+                        "native Reticulum 0.10.0 path table save failed storage={} error={}",
                         storage_path.display(),
                         error
                     )));
@@ -3974,7 +3974,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                         .or(self.config.identity_path.as_deref());
                     let local = self.clean_local_lxmf_status_summary(identity_path);
                     format!(
-                        "native Reticulum 0.9 transport is running; NomadNet uses current-Python-verified direct requests within packet MDU and request-resource above it; {local}; {}",
+                        "native Reticulum 0.10.0 transport is running; NomadNet uses current-Python-verified direct requests within packet MDU and request-resource above it; {local}; {}",
                         self.native_lxmf_sdk_rpc_status_summary()
                     )
                 }
@@ -4109,7 +4109,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .announce(rand_core::OsRng, Some(app_data.as_slice()))
                     .map_err(|error| {
                         AppError::Runtime(format!(
-                            "native Reticulum 0.9 LXMF announce failed: {error:?}"
+                            "native Reticulum 0.10.0 LXMF announce failed: {error:?}"
                         ))
                     })?;
                 (destination_hash, packet)
@@ -4128,7 +4128,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 local.destination_hash = Some(destination_hash.clone());
             }
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 announced local lxmf.delivery destination={} dispatch=matched:{} sent:{} queued:{} failed:{}",
+                "native Reticulum 0.10.0 announced local lxmf.delivery destination={} dispatch=matched:{} sent:{} queued:{} failed:{}",
                 destination_hash,
                 trace.matched_ifaces,
                 trace.sent_ifaces,
@@ -6894,7 +6894,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             .request_path(&destination, None, None)
             .await;
         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 requested path destination={} reason={} dispatch=matched:{} sent:{} queued:{} failed:{}",
+            "native Reticulum 0.10.0 requested path destination={} reason={} dispatch=matched:{} sent:{} queued:{} failed:{}",
             destination_hash,
             reason,
             trace.matched_ifaces,
@@ -6990,7 +6990,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
         } else {
             None
         };
-        let (transport_detail, attached_interfaces) = {
+        let (transport_detail, attached_interfaces, native_transport) = {
             let guard = self.transport.lock().expect("native transport lock");
             guard
                 .as_ref()
@@ -7002,9 +7002,88 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             transport.interface_count
                         ),
                         transport.attached_interfaces.clone(),
+                        Some(transport.transport.clone()),
                     )
                 })
-                .unwrap_or_else(|| (String::new(), Vec::new()))
+                .unwrap_or_else(|| (String::new(), Vec::new(), None))
+        };
+        let transport_health = if let Some(transport) = native_transport {
+            let queue = transport.inbound_queue_snapshot().await;
+            let traffic = transport.interface_traffic_snapshots().await;
+            let tracked_links = transport.link_count().await;
+            let active_links = transport.active_link_count().await;
+            let medium_timeout = transport.medium_path_timeout().await;
+            let class_names = ["data", "announce", "path_request", "ingress_limited"];
+            let classes = class_names
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, class)| crate::runtime::network::InboundQueueClassSnapshot {
+                        class: class.into(),
+                        items: queue.heights[index] as u64,
+                        capacity: queue.limits[index] as u64,
+                        dropped: queue.dropped[index],
+                    },
+                )
+                .collect();
+            let top_level_traffic = traffic.iter().filter(|sample| sample.parent.is_none());
+            let traffic = top_level_traffic.fold(
+                crate::runtime::network::TransportTrafficSnapshot {
+                    rx_bytes: 0,
+                    tx_bytes: 0,
+                    announce_rx_count: 0,
+                    announce_tx_count: 0,
+                    path_request_rx_count: 0,
+                    path_request_tx_count: 0,
+                    protocol_violations: 0,
+                    ifac_violations: 0,
+                    packet_filter_hits: 0,
+                    announce_burst_active: false,
+                    path_request_burst_active: false,
+                },
+                |mut total, sample| {
+                    total.rx_bytes = total.rx_bytes.saturating_add(sample.rx_bytes);
+                    total.tx_bytes = total.tx_bytes.saturating_add(sample.tx_bytes);
+                    total.announce_rx_count = total
+                        .announce_rx_count
+                        .saturating_add(sample.announce_rx_count);
+                    total.announce_tx_count = total
+                        .announce_tx_count
+                        .saturating_add(sample.announce_tx_count);
+                    total.path_request_rx_count = total
+                        .path_request_rx_count
+                        .saturating_add(sample.path_request_rx_count);
+                    total.path_request_tx_count = total
+                        .path_request_tx_count
+                        .saturating_add(sample.path_request_tx_count);
+                    total.protocol_violations = total
+                        .protocol_violations
+                        .saturating_add(sample.protocol_violations);
+                    total.ifac_violations =
+                        total.ifac_violations.saturating_add(sample.ifac_violations);
+                    total.packet_filter_hits = total
+                        .packet_filter_hits
+                        .saturating_add(sample.packet_filter_hits);
+                    total.announce_burst_active |= sample.announce_burst_active;
+                    total.path_request_burst_active |= sample.path_request_burst_active;
+                    total
+                },
+            );
+            Some(Box::new(crate::runtime::network::TransportHealthSnapshot {
+                inbound_queue: Some(crate::runtime::network::InboundQueueHealthSnapshot {
+                    total_items: queue.total as u64,
+                    classes,
+                }),
+                traffic: Some(traffic),
+                tracked_links: Some(tracked_links as u64),
+                active_links: Some(active_links as u64),
+                validated_links: None,
+                medium_timeout_ms: Some(
+                    u64::try_from(medium_timeout.as_millis()).unwrap_or(u64::MAX),
+                ),
+            }))
+        } else {
+            None
         };
         let attached_samples = attached_interfaces.clone();
         #[cfg(all(feature = "native-rns-net", any()))]
@@ -7190,6 +7269,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }),
             interfaces,
             samples,
+            transport_health,
         })
     }
 
@@ -8413,7 +8493,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     .request_path(&destination_hash, None, None)
                     .await;
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat requested fresh path before clean link destination={} matched_ifaces={} sent_ifaces={} failed_ifaces={} scope=all",
+                    "native Reticulum 0.10.0 OMENchat requested fresh path before clean link destination={} matched_ifaces={} sent_ifaces={} failed_ifaces={} scope=all",
                     destination_hex,
                     path_dispatch.matched_ifaces,
                     path_dispatch.sent_ifaces,
@@ -8424,7 +8504,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     matched_ifaces = path_dispatch.matched_ifaces,
                     sent_ifaces = path_dispatch.sent_ifaces,
                     failed_ifaces = path_dispatch.failed_ifaces,
-                    "native Reticulum 0.9 OMENchat requested fresh path before clean link"
+                    "native Reticulum 0.10.0 OMENchat requested fresh path before clean link"
                 );
             }
             let has_path = clean_wait_for_destination_path(
@@ -8444,7 +8524,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             if needs_path_discovery {
                 let status = handle.transport.path_status(&destination_hash).await;
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat discovered routed path destination={} hops={:?} next_hop={} iface={}",
+                    "native Reticulum 0.10.0 OMENchat discovered routed path destination={} hops={:?} next_hop={} iface={}",
                     destination_hex,
                     status.hops,
                     status
@@ -8469,7 +8549,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             .await;
             if retired > 0 {
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat retired {retired} superseded clean link(s) before explicit reconnect destination={}",
+                    "native Reticulum 0.10.0 OMENchat retired {retired} superseded clean link(s) before explicit reconnect destination={}",
                     destination_hash.to_hex_string()
                 )));
             }
@@ -8483,7 +8563,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
             let initial_status = link.lock().await.status();
             let post_request_path_status = handle.transport.path_status(&destination_hash).await;
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 OMENchat clean link requested destination={} link_id={} status={:?} route_iface={} hops={:?}",
+                "native Reticulum 0.10.0 OMENchat clean link requested destination={} link_id={} status={:?} route_iface={} hops={:?}",
                 destination_hash.to_hex_string(),
                 link_id_hash.to_hex_string(),
                 initial_status,
@@ -8499,7 +8579,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 status = ?initial_status,
                 route_iface = ?post_request_path_status.interface,
                 hops = ?post_request_path_status.hops,
-                "native Reticulum 0.9 OMENchat clean link requested"
+                "native Reticulum 0.10.0 OMENchat clean link requested"
             );
 
             if link.lock().await.status() != rns_transport::destination::link::LinkStatus::Active {
@@ -8557,7 +8637,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                             }
                         }
                         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                            "native Reticulum 0.9 OMENchat clean link establishment timed out destination={} link_id={} path_found={} hops={:?} next_hop={} iface={}; pending link reset invokes 0.9 cleanup before retained rediscovery fallback={}",
+                            "native Reticulum 0.10.0 OMENchat clean link establishment timed out destination={} link_id={} path_found={} hops={:?} next_hop={} iface={}; pending link reset invokes 0.9 cleanup before retained rediscovery fallback={}",
                             destination_hash.to_hex_string(),
                             link_id_hash.to_hex_string(),
                             status.path_found,
@@ -8586,7 +8666,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                                 ) =>
                         {
                             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                                "native Reticulum 0.9 OMENchat clean link activated destination={} link_id={}",
+                                "native Reticulum 0.10.0 OMENchat clean link activated destination={} link_id={}",
                                 destination_hash.to_hex_string(),
                                 link_id_hash.to_hex_string()
                             )));
@@ -8600,7 +8680,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                                 ) =>
                         {
                             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                                "native Reticulum 0.9 OMENchat clean link closed during establishment destination={} link_id={}",
+                                "native Reticulum 0.10.0 OMENchat clean link closed during establishment destination={} link_id={}",
                                 destination_hash.to_hex_string(),
                                 link_id_hash.to_hex_string()
                             )));
@@ -8631,7 +8711,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 {
                     Ok(()) => {
                         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                            "native Reticulum 0.9 OMENchat LinkIdentify sent destination={} link_id={} identity={}",
+                            "native Reticulum 0.10.0 OMENchat LinkIdentify sent destination={} link_id={} identity={}",
                             destination_hash.to_hex_string(),
                             link_id_hash.to_hex_string(),
                             identity.address_hash()
@@ -8639,7 +8719,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     }
                     Err(error) => {
                         let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                            "native Reticulum 0.9 OMENchat LinkIdentify failed destination={} link_id={} error={}",
+                            "native Reticulum 0.10.0 OMENchat LinkIdentify failed destination={} link_id={} error={}",
                             destination_hash.to_hex_string(),
                             link_id_hash.to_hex_string(),
                             error
@@ -8648,7 +8728,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                 }
             } else {
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat opened anonymous clean link destination={} link_id={}",
+                    "native Reticulum 0.10.0 OMENchat opened anonymous clean link destination={} link_id={}",
                     destination_hash.to_hex_string(),
                     link_id_hash.to_hex_string()
                 )));
@@ -8677,7 +8757,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     },
                 );
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 OMENchat clean link established destination={} link_id={} rtt_ms={}",
+                "native Reticulum 0.10.0 OMENchat clean link established destination={} link_id={} rtt_ms={}",
                 destination_hash.to_hex_string(),
                 link_id_hash.to_hex_string(),
                 rtt_millis
@@ -8767,7 +8847,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     ))
                 })?;
             let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 OMENchat clean frame sent via delivery link_id={} destination={} bytes={} context=0x00",
+                "native Reticulum 0.10.0 OMENchat clean frame sent via delivery link_id={} destination={} bytes={} context=0x00",
                 hex_encode(&link_id),
                 entry.destination_hash.to_hex_string(),
                 frame_bytes.len()
@@ -8871,7 +8951,7 @@ impl NetworkRuntime for NativeNetworkRuntime {
                     },
                 ));
                 let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat clean resource advertised link_id={} resource_id={} resource_hash={}",
+                    "native Reticulum 0.10.0 OMENchat clean resource advertised link_id={} resource_id={} resource_hash={}",
                     hex_encode(&link_id),
                     resource_id,
                     resource_hash
@@ -8963,7 +9043,7 @@ async fn clean_send_request_value_and_wait(
             .await
             .map_err(|error| {
                 AppError::from(NativeRuntimeError::Native(format!(
-                    "native Reticulum 0.9 LXMF propagation request-resource send failed: {error:?}"
+                    "native Reticulum 0.10.0 LXMF propagation request-resource send failed: {error:?}"
                 )))
             })?;
         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
@@ -8981,13 +9061,13 @@ async fn clean_send_request_value_and_wait(
             let link = link.lock().await;
             let ingress_iface = link.ingress_iface().ok_or_else(|| {
                 AppError::from(NativeRuntimeError::Native(
-                    "native Reticulum 0.9 LXMF propagation link has no bound ingress interface"
+                    "native Reticulum 0.10.0 LXMF propagation link has no bound ingress interface"
                         .into(),
                 ))
             })?;
             let mut packet = link.data_packet(&frame.packed).map_err(|error| {
                 AppError::from(NativeRuntimeError::Native(format!(
-                    "native Reticulum 0.9 LXMF propagation request packet build failed: {error:?}"
+                    "native Reticulum 0.10.0 LXMF propagation request packet build failed: {error:?}"
                 )))
             })?;
             packet.context = rns_transport::PacketContext::Request;
@@ -9161,7 +9241,7 @@ async fn clean_send_request_value_and_wait(
                                     },
                                 ));
                                 return Err(AppError::from(NativeRuntimeError::Native(
-                                    "native Reticulum 0.9 LXMF propagation request-resource transfer failed"
+                                    "native Reticulum 0.10.0 LXMF propagation request-resource transfer failed"
                                         .into(),
                                 )));
                             }
@@ -9476,7 +9556,7 @@ async fn clean_wait_for_destination_identity(
     if let Some(identity) = transport.destination_identity(&destination_hash).await {
         if let Some(event_tx) = event_tx {
             let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 OMENchat clean destination identity already known destination={}",
+                "native Reticulum 0.10.0 OMENchat clean destination identity already known destination={}",
                 destination_hash.to_hex_string()
             )));
         }
@@ -9491,7 +9571,7 @@ async fn clean_wait_for_destination_identity(
     }) {
         if let Some(event_tx) = event_tx {
             let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                "native Reticulum 0.9 clean destination identity restored from announce cache destination={}",
+                "native Reticulum 0.10.0 clean destination identity restored from announce cache destination={}",
                 destination_hash.to_hex_string()
             )));
         }
@@ -9520,7 +9600,7 @@ async fn clean_wait_for_destination_identity(
                             Err(error) => {
                                 if let Some(event_tx) = event_tx {
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 ignored invalid restored identity destination={} error={error}",
+                                        "native Reticulum 0.10.0 ignored invalid restored identity destination={} error={error}",
                                         restored.destination.to_hex_string()
                                     )));
                                 }
@@ -9532,7 +9612,7 @@ async fn clean_wait_for_destination_identity(
             if let Some(identity) = transport.destination_identity(&destination_hash).await {
                 if let Some(event_tx) = event_tx {
                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 OMENchat clean destination identity restored destination={} active_paths={} identities={}",
+                        "native Reticulum 0.10.0 OMENchat clean destination identity restored destination={} active_paths={} identities={}",
                         destination_hash.to_hex_string(),
                         report.restored_active_paths,
                         report.restored_identities.len()
@@ -9549,7 +9629,7 @@ async fn clean_wait_for_destination_identity(
             }) {
                 if let Some(event_tx) = event_tx {
                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                        "native Reticulum 0.9 clean destination identity found in announce cache after path restore destination={} active_paths={} identities={}",
+                        "native Reticulum 0.10.0 clean destination identity found in announce cache after path restore destination={} active_paths={} identities={}",
                         destination_hash.to_hex_string(),
                         report.restored_active_paths,
                         report.restored_identities.len()
@@ -9559,7 +9639,7 @@ async fn clean_wait_for_destination_identity(
             }
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat clean path restore had no identity destination={} active_paths={} identities={}",
+                    "native Reticulum 0.10.0 OMENchat clean path restore had no identity destination={} active_paths={} identities={}",
                     destination_hash.to_hex_string(),
                     report.restored_active_paths,
                     report.restored_identities.len()
@@ -9569,7 +9649,7 @@ async fn clean_wait_for_destination_identity(
         Err(error) => {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat clean path restore failed destination={} storage={} error={}",
+                    "native Reticulum 0.10.0 OMENchat clean path restore failed destination={} storage={} error={}",
                     destination_hash.to_hex_string(),
                     storage_path.display(),
                     error
@@ -9580,7 +9660,7 @@ async fn clean_wait_for_destination_identity(
     transport.request_path(&destination_hash, None, None).await;
     if let Some(event_tx) = event_tx {
         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 OMENchat clean path requested destination={}",
+            "native Reticulum 0.10.0 OMENchat clean path requested destination={}",
             destination_hash.to_hex_string()
         )));
     }
@@ -9605,7 +9685,7 @@ async fn clean_wait_for_destination_identity(
         if now >= deadline {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat clean destination identity timed out destination={}",
+                    "native Reticulum 0.10.0 OMENchat clean destination identity timed out destination={}",
                     destination_hash.to_hex_string()
                 )));
             }
@@ -9636,7 +9716,7 @@ async fn clean_wait_for_destination_app_data(
         {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 clean app-data cache hit destination={} bytes={}",
+                    "native Reticulum 0.10.0 clean app-data cache hit destination={} bytes={}",
                     destination,
                     app_data.len()
                 )));
@@ -9647,7 +9727,7 @@ async fn clean_wait_for_destination_app_data(
         if now >= deadline {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 clean app-data cache timed out destination={}",
+                    "native Reticulum 0.10.0 clean app-data cache timed out destination={}",
                     destination
                 )));
             }
@@ -9676,7 +9756,7 @@ async fn clean_wait_for_destination_path(
     let initial_status = transport.path_status(&destination_hash).await;
     if let Some(event_tx) = event_tx {
         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 OMENchat clean path status destination={} found={} hops={:?} next_hop={} iface={}",
+            "native Reticulum 0.10.0 OMENchat clean path status destination={} found={} hops={:?} next_hop={} iface={}",
             destination_hash.to_hex_string(),
             initial_status.path_found,
             initial_status.hops,
@@ -9704,7 +9784,7 @@ async fn clean_wait_for_destination_path(
             let final_status = transport.path_status(&destination_hash).await;
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat clean path wait timed out destination={} found={} hops={:?} next_hop={} iface={}",
+                    "native Reticulum 0.10.0 OMENchat clean path wait timed out destination={} found={} hops={:?} next_hop={} iface={}",
                     destination_hash.to_hex_string(),
                     final_status.path_found,
                     final_status.hops,
@@ -9725,7 +9805,7 @@ async fn clean_wait_for_destination_path(
         if clean_omenchat_path_is_usable(&status) {
             if let Some(event_tx) = event_tx {
                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                    "native Reticulum 0.9 OMENchat clean path acquired destination={} hops={:?} next_hop={} iface={}",
+                    "native Reticulum 0.10.0 OMENchat clean path acquired destination={} hops={:?} next_hop={} iface={}",
                     destination_hash.to_hex_string(),
                     status.hops,
                     status
@@ -9775,13 +9855,13 @@ async fn clean_request_omenchat_paths_on_attached_interfaces(
     }
     if details.is_empty() {
         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 OMENchat attached-interface path request skipped destination={} reason={} interfaces=0",
+            "native Reticulum 0.10.0 OMENchat attached-interface path request skipped destination={} reason={} interfaces=0",
             destination_hash.to_hex_string(),
             reason
         )));
     } else {
         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-            "native Reticulum 0.9 OMENchat requested path on attached interfaces destination={} reason={} total_sent_or_queued={} {}",
+            "native Reticulum 0.10.0 OMENchat requested path on attached interfaces destination={} reason={} total_sent_or_queued={} {}",
             destination_hash.to_hex_string(),
             reason,
             sent_or_queued,
@@ -9847,7 +9927,7 @@ fn spawn_clean_omenchat_event_bridge(
                             continue;
                         }
                         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                            "native Reticulum 0.9 raw link packet observed destination={} packet_type={:?} header_type={:?} context=0x{:02x} hops={} bytes={} active_omenchat={} tracked_clean={} tracked_active_links={}",
+                            "native Reticulum 0.10.0 raw link packet observed destination={} packet_type={:?} header_type={:?} context=0x{:02x} hops={} bytes={} active_omenchat={} tracked_clean={} tracked_active_links={}",
                             event.packet.destination.to_hex_string(),
                             event.packet.header.packet_type,
                             event.packet.header.header_type,
@@ -9910,7 +9990,7 @@ fn spawn_clean_omenchat_event_bridge(
                                 };
                                 let is_omenchat = is_active || is_clean;
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 clean link-event data observed link_id={} destination={} context=0x{:02x} bytes={} active={} tracked_clean={}",
+                                    "native Reticulum 0.10.0 clean link-event data observed link_id={} destination={} context=0x{:02x} bytes={} active={} tracked_clean={}",
                                     hex_encode(&link_id),
                                     event.address_hash.to_hex_string(),
                                     payload.context() as u8,
@@ -9936,7 +10016,7 @@ fn spawn_clean_omenchat_event_bridge(
                                                 );
                                                 let _ = event_tx.send(RuntimeBusEvent::Debug(
                                                     format!(
-                                                        "native Reticulum 0.9 clean LXMF link-event decoded peer={} message_id={} duplicate={}",
+                                                        "native Reticulum 0.10.0 clean LXMF link-event decoded peer={} message_id={} duplicate={}",
                                                         message.peer_hash,
                                                         message
                                                             .message_id
@@ -9969,7 +10049,7 @@ fn spawn_clean_omenchat_event_bridge(
                                 }
                                 if !clean_omenchat_frame_context(payload.context()) {
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 OMENchat clean link-event ignored non-data context link_id={} context=0x{:02x}",
+                                        "native Reticulum 0.10.0 OMENchat clean link-event ignored non-data context link_id={} context=0x{:02x}",
                                         hex_encode(&link_id),
                                         payload.context() as u8
                                     )));
@@ -9977,7 +10057,7 @@ fn spawn_clean_omenchat_event_bridge(
                                 }
                                 let frame_bytes = payload.as_slice().to_vec();
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 OMENchat clean link-event frame received link_id={} bytes={}",
+                                    "native Reticulum 0.10.0 OMENchat clean link-event frame received link_id={} bytes={}",
                                     hex_encode(&link_id),
                                     frame_bytes.len()
                                 )));
@@ -10030,7 +10110,7 @@ fn spawn_clean_omenchat_event_bridge(
                             };
                             let is_omenchat = is_active || is_clean;
                             let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                "native Reticulum 0.9 clean inbound link-event data observed link_id={} destination={} context=0x{:02x} bytes={} active={} tracked_clean={}",
+                                "native Reticulum 0.10.0 clean inbound link-event data observed link_id={} destination={} context=0x{:02x} bytes={} active={} tracked_clean={}",
                                 hex_encode(&link_id),
                                 event.address_hash.to_hex_string(),
                                 payload.context() as u8,
@@ -10056,7 +10136,7 @@ fn spawn_clean_omenchat_event_bridge(
                                             );
                                             let _ = event_tx.send(RuntimeBusEvent::Debug(
                                                 format!(
-                                                    "native Reticulum 0.9 clean LXMF inbound link-event decoded peer={} message_id={} duplicate={}",
+                                                    "native Reticulum 0.10.0 clean LXMF inbound link-event decoded peer={} message_id={} duplicate={}",
                                                     message.peer_hash,
                                                     message.message_id.as_deref().unwrap_or("none"),
                                                     !should_emit
@@ -10084,7 +10164,7 @@ fn spawn_clean_omenchat_event_bridge(
                             }
                             if !clean_omenchat_frame_context(payload.context()) {
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 OMENchat clean inbound link-event ignored non-data context link_id={} context=0x{:02x}",
+                                    "native Reticulum 0.10.0 OMENchat clean inbound link-event ignored non-data context link_id={} context=0x{:02x}",
                                     hex_encode(&link_id),
                                     payload.context() as u8
                                 )));
@@ -10092,7 +10172,7 @@ fn spawn_clean_omenchat_event_bridge(
                             }
                             let frame_bytes = payload.as_slice().to_vec();
                             let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                "native Reticulum 0.9 OMENchat clean inbound link-event frame received link_id={} bytes={}",
+                                "native Reticulum 0.10.0 OMENchat clean inbound link-event frame received link_id={} bytes={}",
                                 hex_encode(&link_id),
                                 frame_bytes.len()
                             )));
@@ -10143,7 +10223,7 @@ fn spawn_clean_omenchat_event_bridge(
                                         &message,
                                     );
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 clean LXMF full-wire decoded destination={} peer={} message_id={} duplicate={}",
+                                        "native Reticulum 0.10.0 clean LXMF full-wire decoded destination={} peer={} message_id={} duplicate={}",
                                         event.destination.to_hex_string(),
                                         message.peer_hash,
                                         message.message_id.as_deref().unwrap_or("none"),
@@ -10166,7 +10246,7 @@ fn spawn_clean_omenchat_event_bridge(
                                 Err(_) => {}
                             }
                             let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                "native Reticulum 0.9 clean received-data full-wire observed destination={} context={} bytes={}; waiting for link-event decode",
+                                "native Reticulum 0.10.0 clean received-data full-wire observed destination={} context={} bytes={}; waiting for link-event decode",
                                 event.destination.to_hex_string(),
                                 event.context
                                     .map(|context| format!("0x{:02x}", context as u8))
@@ -10202,7 +10282,7 @@ fn spawn_clean_omenchat_event_bridge(
                             continue;
                         };
                         let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                            "native Reticulum 0.9 OMENchat clean frame received link_id={} source_hash={} bytes={}",
+                            "native Reticulum 0.10.0 OMENchat clean frame received link_id={} source_hash={} bytes={}",
                             hex_encode(&link_id),
                             event.destination.to_hex_string(),
                             event.data.as_slice().len()
@@ -10275,7 +10355,7 @@ fn spawn_clean_omenchat_event_bridge(
                                         },
                                     ));
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 OMENchat resource progress link_id={} resource={} bytes={}/{} parts={}/{}",
+                                        "native Reticulum 0.10.0 OMENchat resource progress link_id={} resource={} bytes={}/{} parts={}/{}",
                                         hex_encode(&link_id),
                                         transfer_id,
                                         progress.received_bytes,
@@ -10426,7 +10506,7 @@ fn spawn_clean_omenchat_event_bridge(
                                     ));
                                 }
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 OMENchat resource rejected before application event forwarding resource={transfer_id} bytes={} limit={limit}",
+                                    "native Reticulum 0.10.0 OMENchat resource rejected before application event forwarding resource={transfer_id} bytes={} limit={limit}",
                                     complete.data.len()
                                 )));
                                 continue;
@@ -10439,7 +10519,7 @@ fn spawn_clean_omenchat_event_bridge(
                         if is_metadata_frame {
                             if let Some(link_id) = link_id {
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 OMENchat frame resource received link_id={} source_hash={} bytes={}",
+                                    "native Reticulum 0.10.0 OMENchat frame resource received link_id={} source_hash={} bytes={}",
                                     hex_encode(&link_id),
                                     event.link_id.to_hex_string(),
                                     complete.data.len()
@@ -10469,7 +10549,7 @@ fn spawn_clean_omenchat_event_bridge(
                                 Ok(decoded) => decoded,
                                 Err(error) => {
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 clean LXMF blocking decode failed: {error}"
+                                        "native Reticulum 0.10.0 clean LXMF blocking decode failed: {error}"
                                     )));
                                     continue;
                                 }
@@ -10482,7 +10562,7 @@ fn spawn_clean_omenchat_event_bridge(
                                         &message,
                                     );
                                     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                        "native Reticulum 0.9 clean LXMF resource decoded source_hash={} peer={} message_id={} duplicate={}",
+                                        "native Reticulum 0.10.0 clean LXMF resource decoded source_hash={} peer={} message_id={} duplicate={}",
                                         event.link_id.to_hex_string(),
                                         message.peer_hash,
                                         message.message_id.as_deref().unwrap_or("none"),
@@ -10503,7 +10583,7 @@ fn spawn_clean_omenchat_event_bridge(
                         let Some(link_id) = link_id else {
                             if is_metadata_omenchat {
                                 let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-                                    "native Reticulum 0.9 OMENchat resource ignored with no active link source_hash={} bytes={}",
+                                    "native Reticulum 0.10.0 OMENchat resource ignored with no active link source_hash={} bytes={}",
                                     event.link_id.to_hex_string(),
                                     complete.data.len()
                                 )));
@@ -11258,7 +11338,7 @@ fn emit_native_lxmf_rejection(
     error: &AppError,
 ) {
     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-        "native Reticulum 0.9 clean LXMF rejected ingress={ingress}: {error}"
+        "native Reticulum 0.10.0 clean LXMF rejected ingress={ingress}: {error}"
     )));
 }
 
@@ -11397,7 +11477,7 @@ fn emit_clean_lxmf_resource_terminal(
         },
     ));
     let _ = event_tx.send(RuntimeBusEvent::Debug(format!(
-        "native Reticulum 0.9 clean LXMF resource terminal correlated peer={} message_id={} resource_hash={} state={transfer_state}",
+        "native Reticulum 0.10.0 clean LXMF resource terminal correlated peer={} message_id={} resource_hash={} state={transfer_state}",
         pending.peer_hash, pending.message_id, resource_hash
     )));
     true
@@ -14263,7 +14343,7 @@ mod tests {
             assert!(state.transport_started);
             assert!(status
                 .message
-                .contains("Reticulum 0.9 transport is running"));
+                .contains("Reticulum 0.10.0 transport is running"));
         }
         #[cfg(all(feature = "native-rns-net", any()))]
         {
@@ -14395,6 +14475,20 @@ mod tests {
             .await
             .expect("attach identity");
         let stats = runtime.interface_stats().await.expect("interface stats");
+
+        #[cfg(not(all(feature = "native-rns-net", any())))]
+        {
+            let health = stats
+                .transport_health
+                .as_ref()
+                .expect("native transport health");
+            let queue = health.inbound_queue.as_ref().expect("inbound queue health");
+            assert_eq!(health.active_links, Some(0));
+            assert_eq!(health.validated_links, None);
+            assert_eq!(queue.classes.len(), 4);
+            assert!(queue.classes.iter().all(|class| class.capacity > 0));
+            assert!(health.medium_timeout_ms.is_some());
+        }
 
         #[cfg(not(all(feature = "native-rns-net", any())))]
         assert!(runtime.state_snapshot().transport_started);
@@ -16936,7 +17030,7 @@ enable_transport = No
             "pinned-python-lxmf-propagation",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }
@@ -16949,7 +17043,7 @@ enable_transport = No
             "pinned-python-lxmf-propagation-stamp",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }
@@ -16975,7 +17069,7 @@ enable_transport = No
             "pinned-python-network-propagation-stamp",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }
@@ -17001,7 +17095,7 @@ enable_transport = No
             "pinned-python-lxmf-ticket",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }
@@ -17802,7 +17896,7 @@ enable_transport = No
             "pinned-python-first-direct-policy",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }
@@ -17989,7 +18083,7 @@ enable_transport = No
             "pinned-python-direct-resource",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }

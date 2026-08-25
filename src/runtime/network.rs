@@ -275,6 +275,53 @@ pub struct InterfaceStats {
     pub interfaces: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub samples: Vec<InterfaceSample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_health: Option<Box<TransportHealthSnapshot>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportHealthSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_queue: Option<InboundQueueHealthSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<TransportTrafficSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_links: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_links: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_links: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboundQueueHealthSnapshot {
+    pub total_items: u64,
+    pub classes: Vec<InboundQueueClassSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InboundQueueClassSnapshot {
+    pub class: String,
+    pub items: u64,
+    pub capacity: u64,
+    pub dropped: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportTrafficSnapshot {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub announce_rx_count: u64,
+    pub announce_tx_count: u64,
+    pub path_request_rx_count: u64,
+    pub path_request_tx_count: u64,
+    pub protocol_violations: u64,
+    pub ifac_violations: u64,
+    pub packet_filter_hits: u64,
+    pub announce_burst_active: bool,
+    pub path_request_burst_active: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1342,6 +1389,7 @@ impl NetworkRuntime for MockNetworkRuntime {
             reason: Some("rnstatus is only available with the Reticulum backend".into()),
             interfaces: Vec::new(),
             samples: Vec::new(),
+            transport_health: None,
         })
     }
 
@@ -1838,6 +1886,7 @@ mod tests {
             .expect("inspect destination");
 
         assert!(!stats.available);
+        assert!(stats.transport_health.is_none());
         assert_eq!(snapshot.announce_counts.get("node"), Some(&1));
         assert!(inspection.has_path);
         assert_eq!(inspection.hops, Some(1));

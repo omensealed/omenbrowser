@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-PINNED_REF = "15320e4d2cfabb143c1db20ca887e275fd521585"
+PINNED_REF = "e32d4df754a7b87b1bf1bb0d08675d12ff505ae6"
 NETWORK_NAME = "omen-ifac-vector"
 PASSPHRASE = "public-test-fixture"
 IFAC_SIZE = 16

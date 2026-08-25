@@ -4132,7 +4132,7 @@ mod tests {
             "pinned-python-lxmf-live-ticket",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }
@@ -4381,7 +4381,7 @@ mod tests {
             "pinned-python-lxmf-live-direct-stamp",
             "OMEN_PINNED_RNS_SOURCE",
             Some("OMEN_PINNED_LXMF_SOURCE"),
-            "1.2.2",
+            "1.5.0",
             "0.9.6",
         );
     }

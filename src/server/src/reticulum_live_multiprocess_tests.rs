@@ -617,7 +617,7 @@ async fn split_sentinel_receiver_child(
     .expect("split Resource completion timeout");
 
     // This is the retained regression proof for issue #553 and PR #556. It
-    // exercises the unmodified official 0.9.9 transport crate.
+    // exercises the unmodified official 0.10.0 transport crate.
     assert!(saw_split, "fixture must exercise multi-segment assembly");
     assert_eq!(complete.metadata, Some(b"split-sentinel".to_vec()));
     assert_eq!(complete.data, expected);
@@ -843,7 +843,7 @@ async fn run_python_nomadnet_rust_responder_matrix(source_env: &str, expected_rn
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit pinned-Python RNS requester to Rust omenchatd NomadNet matrix"]
 async fn pinned_python_nomadnet_rust_responder_four_quadrants() {
-    run_python_nomadnet_rust_responder_matrix("OMEN_PINNED_RNS_SOURCE", "1.2.2").await;
+    run_python_nomadnet_rust_responder_matrix("OMEN_PINNED_RNS_SOURCE", "1.5.0").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -911,7 +911,7 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
             && !receiver_timed_out
             && sender_output.status.success()
             && receiver_output.status.success(),
-        "upstream split-metadata regression sentinel failed on official 0.9.9\n\
+        "upstream split-metadata regression sentinel failed on official 0.10.0\n\
          sender status={} timed_out={} stdout={} stderr={}\n\
          receiver status={} timed_out={} stdout={} stderr={}",
         sender_output.status,
@@ -927,9 +927,9 @@ async fn reticulum_split_metadata_assembly_preserves_segment_two_payload() {
 }
 
 #[test]
-#[ignore = "known upstream Reticulum 0.9.9 UDP maximum-Resource serialization regression"]
+#[ignore = "known upstream Reticulum 0.10.0 UDP maximum-Resource serialization regression"]
 fn reticulum_udp_tx_buffer_covers_max_resource_wire_packet() {
-    // reticulum-rs-transport 0.9.9 still sizes both buffers as
+    // reticulum-rs-transport 0.10.0 still sizes both buffers as
     // `size_of::<Packet>() * 3`. Packet payload storage is heap-backed, so
     // that Rust layout size is unrelated to the largest serialized packet.
     let upstream_udp_buffer = std::mem::size_of::<rns_transport::packet::Packet>() * 3;
@@ -943,15 +943,15 @@ fn reticulum_udp_tx_buffer_covers_max_resource_wire_packet() {
 }
 
 #[test]
-#[ignore = "known upstream Reticulum 0.9.9 routed Resource retransmission regression; requires the documented three-node fragment-loss topology"]
+#[ignore = "known upstream Reticulum 0.10.0 routed Resource retransmission regression; requires the documented three-node fragment-loss topology"]
 fn reticulum_routed_resource_retransmission_survives_fragment_loss() {
     // This deliberately failing expected-upstream sentinel keeps the realistic
     // three-node boundary separately named in normal test inventories. The
     // deterministic topology and acceptance assertions are maintained in
-    // docs/upstream/reticulum-rs-0.9.9-routed-resource-retransmission.md. It
+    // docs/upstream/reticulum-rs-0.10.0-routed-resource-retransmission.md. It
     // must be replaced by, and pass as, the real topology gate before OMEN can
     // claim routed attachment qualification on a future official crate train.
     panic!(
-        "reticulum-rs-transport 0.9.9 suppresses requested duplicate Resource data/proof packets at a forwarding node"
+        "reticulum-rs-transport 0.10.0 suppresses requested duplicate Resource data/proof packets at a forwarding node"
     );
 }

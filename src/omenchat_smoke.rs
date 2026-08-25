@@ -526,39 +526,50 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
         let local_upload_error = send_upload_events
             .iter()
             .any(|event| matches!(event, ChatClientEvent::Error { .. }));
+        let local_room_policy_rejected = room_media_policy_upload_rejection_smoke
+            && room_upload_max_file_bytes
+                .flatten()
+                .is_some_and(|limit| limit == 0 || upload_len > limit)
+            && local_upload_error;
         stages.push(serde_json::json!({
             "stage": "announcement_upload_offer_frame",
-            "ok": !local_upload_error,
+            "ok": !local_upload_error || local_room_policy_rejected,
+            "pre_dispatch_rejected": local_room_policy_rejected,
             "filename": upload_filename.clone(),
             "bytes": upload_len,
             "events": send_upload_events.iter().map(format_chat_event).collect::<Vec<_>>(),
         }));
         send_omenchat_smoke_outgoing(&*app.runtime, opened.link_id, &mut transport).await?;
 
-        let rejection_events = wait_for_omenchat_condition(
-            &*app.runtime,
-            &mut runtime_events,
-            &mut client,
-            &mut live_state,
-            &mut transport,
-            OmenChatWaitOptions {
-                link_id: opened.link_id,
-                session_id,
-                wait: Duration::from_secs(response_wait_secs),
-            },
-            |_| false,
-        )
-        .await;
+        let rejection_events = if local_room_policy_rejected {
+            Vec::new()
+        } else {
+            wait_for_omenchat_condition(
+                &*app.runtime,
+                &mut runtime_events,
+                &mut client,
+                &mut live_state,
+                &mut transport,
+                OmenChatWaitOptions {
+                    link_id: opened.link_id,
+                    session_id,
+                    wait: Duration::from_secs(response_wait_secs),
+                },
+                |_| false,
+            )
+            .await
+        };
         let policy_upload_rejected = if room_media_policy_upload_rejection_smoke {
             let expected_reason = if room_upload_max_file_bytes == Some(Some(0)) {
                 omenbrowser_rs::chat::protocol::RoomUploadRejectReason::Disabled
             } else {
                 omenbrowser_rs::chat::protocol::RoomUploadRejectReason::FileSizeCeilingExceeded
             };
-            omenchat_smoke_events_contain_room_policy_upload_rejection(
-                &rejection_events,
-                expected_reason,
-            )
+            local_room_policy_rejected
+                || omenchat_smoke_events_contain_room_policy_upload_rejection(
+                    &rejection_events,
+                    expected_reason,
+                )
         } else {
             omenchat_smoke_events_contain_announcement_policy_rejection(&rejection_events)
         };
@@ -583,6 +594,7 @@ pub(super) async fn run(input: OmenChatSmokeCommandInput) -> anyhow::Result<()> 
             },
             "ok": upload_rejection_ok,
             "policy_upload_rejected": policy_upload_rejected,
+            "pre_dispatch_rejected": local_room_policy_rejected,
             "upload_accepted": upload_accepted,
             "upload_completed": upload_completed,
             "committed_upload_seen": upload_committed,

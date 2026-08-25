@@ -353,7 +353,7 @@ impl RequestEventLagEvidence {
 
 fn resource_assembly_timeout_suffix(resource_activity_observed: bool) -> &'static str {
     if resource_activity_observed {
-        "; Resource assembly did not complete on the current Reticulum 0.9.9 train; no retry was attempted"
+        "; Resource assembly did not complete on the current Reticulum 0.10.0 train; no retry was attempted"
     } else {
         ""
     }
@@ -424,7 +424,7 @@ impl Reticulum09LinkRequestAdapter {
         emit_clean_page_debug(
             prepared.event_tx.as_ref(),
             format!(
-                "native Reticulum 0.9 direct page request sent destination={} link_id={} path={} request_id={} bytes={} link_iface={}",
+                "native Reticulum 0.10.0 direct page request sent destination={} link_id={} path={} request_id={} bytes={} link_iface={}",
                 prepared.destination_hash,
                 prepared.link_id,
                 prepared.path,
@@ -484,7 +484,7 @@ impl Reticulum09LinkRequestAdapter {
                         emit_clean_page_debug(
                             prepared.event_tx.as_ref(),
                             format!(
-                                "native Reticulum 0.9 direct page response received destination={} link_id={} path={} request_id={} bytes={}",
+                                "native Reticulum 0.10.0 direct page response received destination={} link_id={} path={} request_id={} bytes={}",
                                 prepared.destination_hash,
                                 prepared.link_id,
                                 prepared.path,
@@ -528,7 +528,7 @@ impl Reticulum09LinkRequestAdapter {
                                 emit_clean_page_debug(
                                     prepared.event_tx.as_ref(),
                                     format!(
-                                        "native Reticulum 0.9 direct page request received response-resource destination={} link_id={} path={} request_id={} response_resource={} bytes={}",
+                                        "native Reticulum 0.10.0 direct page request received response-resource destination={} link_id={} path={} request_id={} response_resource={} bytes={}",
                                         prepared.destination_hash,
                                         prepared.link_id,
                                         prepared.path,
@@ -623,7 +623,7 @@ impl Reticulum09LinkRequestAdapter {
             .await
             .map_err(|error| {
                 AppError::from(NativeRuntimeError::Native(format!(
-                    "native Reticulum 0.9 request-resource send failed: {error:?}"
+                    "native Reticulum 0.10.0 request-resource send failed: {error:?}"
                 )))
             })?;
         tracing::debug!(
@@ -637,12 +637,12 @@ impl Reticulum09LinkRequestAdapter {
             link_ingress_iface = ?link_ingress_iface,
             destination_path = %transport_path_status_summary(&destination_path),
             link_path = %transport_path_status_summary(&link_path),
-            "native Reticulum 0.9 Link.request sent as request resource"
+            "native Reticulum 0.10.0 Link.request sent as request resource"
         );
         emit_clean_page_debug(
             prepared.event_tx.as_ref(),
             format!(
-                "native Reticulum 0.9 clean page request-resource sent destination={} link_id={} path={} request_id={} request_resource={} bytes={} link_iface={:?}",
+                "native Reticulum 0.10.0 clean page request-resource sent destination={} link_id={} path={} request_id={} request_resource={} bytes={} link_iface={:?}",
                 prepared.destination_hash,
                 prepared.link_id,
                 prepared.path,
@@ -759,12 +759,12 @@ impl Reticulum09LinkRequestAdapter {
                                         response_resource_hash = %event.hash,
                                         bytes = complete.data.len(),
                                         metadata = complete.metadata.as_ref().map(|value| value.len()),
-                                        "native Reticulum 0.9 Link.request response resource received"
+                                        "native Reticulum 0.10.0 Link.request response resource received"
                                     );
                                     emit_clean_page_debug(
                                         prepared.event_tx.as_ref(),
                                         format!(
-                                            "native Reticulum 0.9 clean page response-resource received destination={} link_id={} path={} request_id={} response_resource={} bytes={}",
+                                            "native Reticulum 0.10.0 clean page response-resource received destination={} link_id={} path={} request_id={} response_resource={} bytes={}",
                                             prepared.destination_hash,
                                             prepared.link_id,
                                             prepared.path,
@@ -823,7 +823,7 @@ impl Reticulum09LinkRequestAdapter {
                                 prepared.operation_id.as_deref(),
                             );
                             return Err(AppError::from(NativeRuntimeError::Native(
-                                "native Reticulum 0.9 request-resource transfer failed".into(),
+                                "native Reticulum 0.10.0 request-resource transfer failed".into(),
                             )));
                         }
                         ResourceEventKind::SegmentComplete(_) => {
@@ -910,7 +910,7 @@ impl Reticulum09LinkRequestAdapter {
                                 emit_clean_page_debug(
                                     prepared.event_tx.as_ref(),
                                     format!(
-                                        "native Reticulum 0.9 request-resource received direct page response destination={} link_id={} path={} request_id={} bytes={}",
+                                        "native Reticulum 0.10.0 request-resource received direct page response destination={} link_id={} path={} request_id={} bytes={}",
                                         prepared.destination_hash,
                                         prepared.link_id,
                                         prepared.path,
@@ -1185,7 +1185,7 @@ async fn cancel_clean_page_request_resource(
             emit_clean_page_debug(
                 prepared.event_tx.as_ref(),
                 format!(
-                    "native Reticulum 0.9 cancelled NomadNet request-resource request_resource={} reason={reason}",
+                    "native Reticulum 0.10.0 cancelled NomadNet request-resource request_resource={} reason={reason}",
                     request_resource_hash
                 ),
             );
@@ -1195,7 +1195,7 @@ async fn cancel_clean_page_request_resource(
             emit_clean_page_debug(
                 prepared.event_tx.as_ref(),
                 format!(
-                    "native Reticulum 0.9 NomadNet request-resource cleanup found no active transfer request_resource={} reason={reason}",
+                    "native Reticulum 0.10.0 NomadNet request-resource cleanup found no active transfer request_resource={} reason={reason}",
                     request_resource_hash
                 ),
             );
@@ -1205,7 +1205,7 @@ async fn cancel_clean_page_request_resource(
             emit_clean_page_debug(
                 prepared.event_tx.as_ref(),
                 format!(
-                    "native Reticulum 0.9 NomadNet request-resource cleanup failed request_resource={} reason={reason} error={error:?}",
+                    "native Reticulum 0.10.0 NomadNet request-resource cleanup failed request_resource={} reason={reason} error={error:?}",
                     request_resource_hash
                 ),
             );
@@ -1237,7 +1237,7 @@ async fn cancel_clean_page_response_resource(
             emit_clean_page_debug(
                 prepared.event_tx.as_ref(),
                 format!(
-                    "native Reticulum 0.9 cancelled NomadNet response-resource response_resource={} reason={reason}",
+                    "native Reticulum 0.10.0 cancelled NomadNet response-resource response_resource={} reason={reason}",
                     response_resource_hash
                 ),
             );
@@ -1247,7 +1247,7 @@ async fn cancel_clean_page_response_resource(
             emit_clean_page_debug(
                 prepared.event_tx.as_ref(),
                 format!(
-                    "native Reticulum 0.9 NomadNet response-resource cleanup found no active transfer response_resource={} reason={reason}",
+                    "native Reticulum 0.10.0 NomadNet response-resource cleanup found no active transfer response_resource={} reason={reason}",
                     response_resource_hash
                 ),
             );
@@ -1257,7 +1257,7 @@ async fn cancel_clean_page_response_resource(
             emit_clean_page_debug(
                 prepared.event_tx.as_ref(),
                 format!(
-                    "native Reticulum 0.9 NomadNet response-resource cleanup failed response_resource={} reason={reason} error={error:?}",
+                    "native Reticulum 0.10.0 NomadNet response-resource cleanup failed response_resource={} reason={reason} error={error:?}",
                     response_resource_hash
                 ),
             );
@@ -1318,7 +1318,7 @@ pub(crate) struct NativeDirectRequestPacket {
     pub packet: Packet,
 }
 
-/// Builds the Reticulum 0.9 direct-request packet before dispatch.
+/// Builds the Reticulum 0.10.0 direct-request packet before dispatch.
 ///
 /// The request identifier for a direct link request is derived from the final
 /// encrypted packet hash, not from the packed NomadNet request frame. Keeping
@@ -1584,7 +1584,7 @@ impl NativePageTransportClient for ReticulumPageTransportClient {
             )));
         }
         if let Some(context) = context {
-            // Reticulum 0.9 reuses an existing non-closed outbound link for a
+            // Reticulum 0.10.0 reuses an existing non-closed outbound link for a
             // destination. Keep the complete request/response owner inside one
             // fixed-size destination stripe so successful operations can reuse
             // the link and a failed operation cannot tear it down underneath a
@@ -1607,7 +1607,7 @@ impl NativePageTransportClient for ReticulumPageTransportClient {
                     emit_clean_page_debug(
                         context.event_tx.as_ref(),
                         format!(
-                            "native Reticulum 0.9 retained successful NomadNet page link destination={} link_id={} path={}",
+                            "native Reticulum 0.10.0 retained successful NomadNet page link destination={} link_id={} path={}",
                             prepared.destination_hash, prepared.link_id, prepared.path
                         ),
                     );
@@ -1907,7 +1907,7 @@ pub(crate) async fn send_reticulum_link_identify(
         link_id = %link_id,
         ingress_iface = %ingress_iface,
         identity = %identity.address_hash(),
-        "native Reticulum 0.9 sent LinkIdentify on active link"
+        "native Reticulum 0.10.0 sent LinkIdentify on active link"
     );
     Ok(())
 }
@@ -1998,7 +1998,7 @@ pub async fn prepare_nomadnet_page_link(
     emit_clean_page_debug(
         context.event_tx.as_ref(),
         format!(
-            "native Reticulum 0.9 clean page link active destination={} link_id={} path={} identify_on_connect={}",
+            "native Reticulum 0.10.0 clean page link active destination={} link_id={} path={} identify_on_connect={}",
             plan.request.destination_hash,
             link_id,
             plan.request.path,
@@ -2021,12 +2021,12 @@ pub async fn prepare_nomadnet_page_link(
                         destination = %plan.request.destination_hash,
                         link_id = %link_id,
                         error = %error,
-                        "native Reticulum 0.9 page link is active but NomadNet identify-on-connect could not be sent"
+                        "native Reticulum 0.10.0 page link is active but NomadNet identify-on-connect could not be sent"
                     );
                     emit_clean_page_debug(
                         context.event_tx.as_ref(),
                         format!(
-                            "native Reticulum 0.9 clean page LinkIdentify failed destination={} link_id={} error={}",
+                            "native Reticulum 0.10.0 clean page LinkIdentify failed destination={} link_id={} error={}",
                             plan.request.destination_hash, link_id, error
                         ),
                     );
@@ -2034,7 +2034,7 @@ pub async fn prepare_nomadnet_page_link(
                     emit_clean_page_debug(
                         context.event_tx.as_ref(),
                         format!(
-                            "native Reticulum 0.9 clean page LinkIdentify sent destination={} link_id={} identity={}",
+                            "native Reticulum 0.10.0 clean page LinkIdentify sent destination={} link_id={} identity={}",
                             plan.request.destination_hash,
                             link_id,
                             identity.address_hash()
@@ -2046,12 +2046,12 @@ pub async fn prepare_nomadnet_page_link(
                 tracing::warn!(
                     destination = %plan.request.destination_hash,
                     link_id = %link_id,
-                    "native Reticulum 0.9 page link is active but NomadNet identify-on-connect was skipped because the active local identity could not be loaded"
+                    "native Reticulum 0.10.0 page link is active but NomadNet identify-on-connect was skipped because the active local identity could not be loaded"
                 );
                 emit_clean_page_debug(
                     context.event_tx.as_ref(),
                     format!(
-                        "native Reticulum 0.9 clean page LinkIdentify skipped destination={} link_id={} reason=identity_unavailable",
+                        "native Reticulum 0.10.0 clean page LinkIdentify skipped destination={} link_id={} reason=identity_unavailable",
                         plan.request.destination_hash, link_id
                     ),
                 );
@@ -2367,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn reticulum099_public_link_mtu_reports_legacy_clamped_and_signalled_values() {
+    fn reticulum10_public_link_mtu_reports_signalled_legacy_and_constrained_values() {
         let remote_identity = rns_transport::identity::PrivateIdentity::new_from_name(
             "omenbrowser-phase-5-link-mtu-peer",
         );
@@ -2377,7 +2377,10 @@ mod tests {
         );
         let (link_events, _receiver) = broadcast::channel(4);
         let mut initiator = Link::new(remote_destination.desc, link_events.clone());
-        let signalled_request = initiator.request();
+        let mut signalled_request = initiator.request();
+        let signalled_len = signalled_request.data.len();
+        signalled_request.data.as_mut_slice()[signalled_len - 3..]
+            .copy_from_slice(&[0x20, 0x20, 0x00]);
         let signalled = Link::new_from_request(
             &signalled_request,
             remote_destination.sign_key().clone(),
@@ -2385,7 +2388,7 @@ mod tests {
             link_events.clone(),
         )
         .expect("signalled request accepted");
-        assert!(signalled.link_mtu() > 500);
+        assert_eq!(signalled.link_mtu(), 8192);
 
         let mut legacy_request = signalled_request.clone();
         legacy_request.data.resize(64);
@@ -2408,7 +2411,7 @@ mod tests {
             link_events,
         )
         .expect("small signalled request accepted");
-        assert_eq!(clamped.link_mtu(), 500);
+        assert_eq!(clamped.link_mtu(), 1);
     }
 
     fn receive_link_payload(
@@ -2535,7 +2538,7 @@ mod tests {
 
         assert!(ordinary.is_empty());
         assert!(incomplete.contains("Resource assembly did not complete"));
-        assert!(incomplete.contains("Reticulum 0.9.9"));
+        assert!(incomplete.contains("Reticulum 0.10.0"));
         assert!(incomplete.contains("no retry was attempted"));
         assert!(incomplete.len() < 128);
         assert!(!incomplete.contains("destination"));
@@ -2809,6 +2812,61 @@ mod tests {
         let frame = build_native_link_request_frame(&prepared, 2.0).expect("request frame");
         assert!(frame.requires_request_resource());
         (prepared, frame, channel, event_rx)
+    }
+
+    #[tokio::test]
+    async fn reticulum10_send_channel_message_rejects_payload_greater_than_u16_max() {
+        let local_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-channel-boundary-local",
+        );
+        let config = reticulum_rs::runtime::TransportConfig::new(
+            "omenbrowser-channel-boundary",
+            &local_identity,
+            false,
+        );
+        let transport = Arc::new(reticulum_rs::runtime::Transport::new(config));
+        let channel = transport
+            .iface_manager()
+            .lock()
+            .await
+            .new_channel_with_role(8, rns_transport::iface::IfaceRole::Unicast);
+        let ingress_iface = *channel.address();
+
+        let remote_identity = rns_transport::identity::PrivateIdentity::new_from_name(
+            "omenbrowser-channel-boundary-remote",
+        );
+        let destination = SingleOutputDestination::new(
+            *remote_identity.as_identity(),
+            DestinationName::new(NOMADNET_APP_NAME, NOMADNET_NODE_ASPECT),
+        );
+        let link = transport.link(destination.desc).await;
+        let request = link.lock().await.request();
+        let (inbound_events, _receiver) = broadcast::channel(4);
+        let mut inbound = Link::new_from_request(
+            &request,
+            remote_identity.sign_key().clone(),
+            destination.desc,
+            inbound_events,
+        )
+        .expect("inbound link");
+        assert!(matches!(
+            link.lock()
+                .await
+                .handle_packet(&inbound.prove(), ingress_iface),
+            rns_transport::destination::link::LinkHandleResult::Activated
+        ));
+        let link_id = *link.lock().await.id();
+
+        let oversized_payload = vec![0x55u8; u16::MAX as usize + 1];
+        let error = transport
+            .send_channel_message(&link_id, 0x1, oversized_payload)
+            .await
+            .expect_err("payload above u16::MAX must fail");
+
+        assert!(matches!(
+            error,
+            rns_transport::channel::ChannelError::PayloadTooLarge
+        ));
     }
 
     #[tokio::test]
