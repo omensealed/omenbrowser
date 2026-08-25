@@ -1,6 +1,6 @@
 # v0.10.0-2 release evidence
 
-Status: release-qualified packaging correction; not yet tagged or published.
+Status: tagged but unpublished; superseded after hosted macOS package failure.
 
 ## Defect
 

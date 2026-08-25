@@ -74,9 +74,11 @@ server_version="$(read_package_version src/server/Cargo.toml)"
 [[ "$server_version" == "$version" ]] \
   || fail "package version mismatch: browser=$version server=$server_version"
 
-mapfile -t bundle_versions < <(macos_bundle_versions "$version")
-bundle_short_version="${bundle_versions[0]}"
-bundle_build_version="${bundle_versions[1]}"
+bundle_version_output="$(macos_bundle_versions "$version")"
+bundle_short_version="$(printf '%s\n' "$bundle_version_output" | sed -n '1p')"
+bundle_build_version="$(printf '%s\n' "$bundle_version_output" | sed -n '2p')"
+[[ -n "$bundle_short_version" && -n "$bundle_build_version" ]] \
+  || fail "macOS bundle version mapping returned incomplete output for: $version"
 
 host_target="$(rustc -vV | sed -n 's/^host: //p')"
 case "$host_target" in

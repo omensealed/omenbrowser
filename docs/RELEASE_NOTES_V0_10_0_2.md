@@ -1,6 +1,6 @@
 # OMENbrowser_rs and omenchatd v0.10.0-2 release notes
 
-Status: final
+Status: unpublished; superseded by v0.10.0-3 after hosted macOS packaging exposed a Bash 3.2 incompatibility.
 
 Reticulum/LXMF crate train: exact official crates.io `0.10.0`.
 
@@ -34,3 +34,8 @@ macOS package jobs failed only at the old numeric mapping guard before product
 compilation. v0.10.0-2 retains the v0.10.0-1 product qualification and adds the
 corrected mapping regression and rerun package evidence described in
 `migration/V0_10_0_2_RELEASE_EVIDENCE.md`.
+
+The corrective hosted run then failed before compilation because both the
+packager and its Linux regression used Bash 4's `mapfile`, which is unavailable
+in the macOS system Bash 3.2. The immutable tag is retained as failed evidence;
+no GitHub release was published for it.
