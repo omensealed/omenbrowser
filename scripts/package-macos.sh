@@ -1,13 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-out_dir="${1:-dist}"
-lifecycle_smoke="${2:-}"
-
 fail() {
   echo "macOS packaging failed: $*" >&2
   exit 1
 }
+
+macos_bundle_versions() {
+  local release_version="$1"
+  if [[ "$release_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
+    local major="${BASH_REMATCH[1]}"
+    local minor="${BASH_REMATCH[2]}"
+    local patch="${BASH_REMATCH[3]}"
+    local revision="${BASH_REMATCH[4]}"
+    local build_core
+    local build_version
+    if (( major == 0 && minor <= 99 && patch <= 99 && revision <= 99 )); then
+      build_core="$((minor * 100 + patch))"
+      if (( minor <= 9 && patch <= 9 )); then
+        build_version="$build_core.$revision"
+      else
+        build_version="$build_core.0.$revision"
+      fi
+    elif (( major <= 9 && minor <= 9 && patch <= 9 && revision <= 99 )); then
+      build_core="$((major * 1000 + minor * 100 + patch))"
+      build_version="$build_core.$revision"
+    else
+      fail "release version exceeds the documented macOS numeric mapping: $release_version"
+    fi
+    printf '%s\n%s\n' "$major.$minor.$patch" "$build_version"
+  else
+    fail "release version is not numeric revision SemVer: $release_version"
+  fi
+}
+
+if [[ "${1:-}" == "--print-version-mapping" ]]; then
+  [[ $# -eq 2 ]] || fail "usage: $0 --print-version-mapping VERSION"
+  macos_bundle_versions "$2"
+  exit 0
+fi
+
+out_dir="${1:-dist}"
+lifecycle_smoke="${2:-}"
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "this script must run on macOS"
 for tool in cargo codesign hdiutil lipo plutil shasum tar; do
@@ -40,19 +74,9 @@ server_version="$(read_package_version src/server/Cargo.toml)"
 [[ "$server_version" == "$version" ]] \
   || fail "package version mismatch: browser=$version server=$server_version"
 
-if [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)$ ]]; then
-  version_major="${BASH_REMATCH[1]}"
-  version_minor="${BASH_REMATCH[2]}"
-  version_patch="${BASH_REMATCH[3]}"
-  version_revision="${BASH_REMATCH[4]}"
-  (( version_major <= 9 && version_minor <= 9 && version_patch <= 9 \
-      && version_revision <= 99 )) \
-    || fail "release version exceeds the documented macOS numeric mapping: $version"
-  bundle_short_version="$version_major.$version_minor.$version_patch"
-  bundle_build_version="$((version_major * 1000 + version_minor * 100 + version_patch)).$version_revision"
-else
-  fail "release version is not numeric revision SemVer: $version"
-fi
+mapfile -t bundle_versions < <(macos_bundle_versions "$version")
+bundle_short_version="${bundle_versions[0]}"
+bundle_build_version="${bundle_versions[1]}"
 
 host_target="$(rustc -vV | sed -n 's/^host: //p')"
 case "$host_target" in

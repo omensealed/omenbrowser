@@ -247,6 +247,11 @@ bash -n scripts/test-tui-lifecycle.sh
 bash -n scripts/test-tui-real-pty.sh
 bash -n scripts/test-native-cli-identity.sh
 bash -n scripts/package-macos.sh
+mapfile -t macos_version_mapping < <(
+  bash scripts/package-macos.sh --print-version-mapping 0.10.0-2
+)
+[[ "${macos_version_mapping[0]}" == "0.10.0" ]]
+[[ "${macos_version_mapping[1]}" == "1000.0.2" ]]
 bash -n scripts/package-linux-arm64-omenchatd.sh
 bash -n scripts/test-linux-arm64-headless.sh
 bash -n scripts/test-omenchatd-private-service.sh
