@@ -117,6 +117,24 @@ room, mutation data, capability set, and expiry still agree. Exact duplicate
 durable mutations return their original acknowledgement without a second
 server write or broadcast.
 
+If a server explicitly reports that a durable client instance's bounded replay
+state has expired, the rejected operation becomes terminal and is not retried.
+The client rotates its persistent instance only after proving there are no
+prepared or uncertain operations, then reconnects to negotiate the replacement
+before later user sends. The server never reactivates a retired replay identity.
+
+omenchatd keeps managed SQLite WAL and shared-memory sidecars linked through
+the lifetime of each owning store connection. This prevents a short-lived status
+or diagnostic reader from unlinking the active WAL pathname and separating
+later live writes from readers that reopen the authoritative database. Clean
+owner shutdown disables persistence before close so offline maintenance retains
+normal sidecar cleanup semantics.
+
+For negotiated live reactions, a server acknowledgement that promotes a local
+message echo also marks that confirmed event as an authoritative reaction
+target. This gives message senders the same live reaction projection as peers
+that received the message through a room-event broadcast.
+
 An expired LXMF receipt-observation window means peer delivery is unconfirmed;
 it is not authoritative failure evidence.
 

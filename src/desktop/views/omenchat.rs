@@ -1290,22 +1290,20 @@ pub(in crate::desktop) fn omenchat_view_for_session(
                 .style(subtle_button_style),
             "Copy invitation for this room"
         ),
-        #[cfg(feature = "desktop-qr")]
-        tooltip_button(
-            button(centered_toolbar_icon(ICON_QR))
-                .on_press(Message::OmenChat(OmenChatMessage::ToggleInvitationQr(
-                    session.session_id,
-                )))
-                .padding(0)
-                .width(Length::Fixed(toolbar_icon_button_side()))
-                .height(Length::Fixed(toolbar_icon_button_side()))
-                .style(subtle_button_style),
-            "Show invitation QR"
-        ),
-        message_input,
-        send_button,
-    ]
-    .spacing(8);
+    ];
+    #[cfg(feature = "desktop-qr")]
+    let composer = composer.push(tooltip_button(
+        button(centered_toolbar_icon(ICON_QR))
+            .on_press(Message::OmenChat(OmenChatMessage::ToggleInvitationQr(
+                session.session_id,
+            )))
+            .padding(0)
+            .width(Length::Fixed(toolbar_icon_button_side()))
+            .height(Length::Fixed(toolbar_icon_button_side()))
+            .style(subtle_button_style),
+        "Show invitation QR",
+    ));
+    let composer = composer.push(message_input).push(send_button).spacing(8);
     let mut composer_panel = column![].spacing(6).width(Length::Fill);
     if let Some(indicator) = omenchat_slow_mode_indicator(
         &desktop.omenchat.chat_client,

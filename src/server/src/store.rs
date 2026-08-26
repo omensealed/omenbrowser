@@ -208,6 +208,15 @@ pub struct OmenchatStore {
     history_retention: RoomHistoryRetentionPolicy,
 }
 
+impl Drop for OmenchatStore {
+    fn drop(&mut self) {
+        // Live stores retain WAL/SHM pathnames against short-lived readers, but
+        // clean shutdown must restore the existing offline maintenance
+        // contract that no sidecars remain after the owning store closes.
+        let _ = crate::sqlite::disable_persistent_wal(&self.connection);
+    }
+}
+
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const SCHEMA_VERSION: i64 = 14;
 const ROOM_PUBLISHER_ROLE_MASK: u64 = (1 << 1) | (1 << 2);
@@ -223,6 +232,7 @@ impl OmenchatStore {
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
         protect_existing_database(path.as_ref())?;
         let connection = crate::sqlite::open_read_only(path.as_ref())?;
+        crate::sqlite::enable_persistent_wal(&connection)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(crate::error::ServerError::Message(format!(
@@ -235,6 +245,7 @@ impl OmenchatStore {
     pub fn open_existing_for_maintenance(path: impl AsRef<std::path::Path>) -> ServerResult<Self> {
         protect_existing_database(path.as_ref())?;
         let connection = crate::sqlite::open_read_write(path.as_ref())?;
+        crate::sqlite::enable_persistent_wal(&connection)?;
         connection.busy_timeout(Duration::ZERO)?;
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version != SCHEMA_VERSION {
@@ -266,6 +277,7 @@ impl OmenchatStore {
         prepare_database_path(path.as_ref())?;
         let connection = crate::sqlite::open(path.as_ref())?;
         configure_connection(&connection, true, busy_timeout)?;
+        crate::sqlite::enable_persistent_wal(&connection)?;
         let store = Self::from_connection(connection);
         store.migrate(backup_required.then_some(path.as_ref()))?;
         repair_database_sidecars(path.as_ref())?;

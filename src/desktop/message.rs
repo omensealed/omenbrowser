@@ -649,6 +649,11 @@ pub(in crate::desktop) enum OmenChatMutationCompletionMessage {
         next: crate::chat::mutation_intents::OutboundMutationState,
         result: Result<crate::chat::mutation_intents::IntentTransition, String>,
     },
+    ClientInstanceRotated {
+        session_id: ChatSessionId,
+        expected: crate::chat::protocol::ClientInstanceId,
+        result: Result<crate::chat::protocol::ClientInstanceId, String>,
+    },
     Rejected {
         session_id: ChatSessionId,
         mutation_id: crate::chat::protocol::MutationId,

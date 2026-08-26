@@ -4397,6 +4397,13 @@ fn apply_message_ack(
     } else {
         "message accepted by server".into()
     };
+    if state.reactions_negotiated(session_id) {
+        client.mark_live_reaction_target_authoritative(
+            pending.session_id,
+            pending.room_id,
+            confirmed.event_id,
+        );
+    }
     events.push(ChatClientEvent::EventAppended {
         session_id: pending.session_id,
         event: confirmed,
@@ -11360,7 +11367,7 @@ mod tests {
     }
 
     #[test]
-    fn live_send_message_local_echo_is_confirmed_by_message_ack() {
+    fn live_send_message_local_echo_is_confirmed_and_reaction_authoritative_by_message_ack() {
         let mut client = ChatClient::new();
         let session_id = client.reserve_session_id();
         client.push_session(ChatSessionView {
@@ -11391,6 +11398,7 @@ mod tests {
             status: "ready".into(),
         });
         let mut state = LiveChatClientState::default();
+        state.reaction_sessions.insert(session_id);
         let mut transport = CapturedChatTransport::default();
         transport
             .push_incoming_frame(&Frame::new(
@@ -11433,6 +11441,7 @@ mod tests {
             Some("Alice")
         );
         assert_eq!(session.status, "message accepted by server");
+        assert!(client.reaction_snapshot_complete(session_id, 1, 11));
     }
 
     #[test]

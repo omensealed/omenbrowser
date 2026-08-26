@@ -248,10 +248,10 @@ bash -n scripts/test-tui-real-pty.sh
 bash -n scripts/test-native-cli-identity.sh
 bash -n scripts/package-macos.sh
 macos_version_mapping="$(
-  bash scripts/package-macos.sh --print-version-mapping 0.10.0-3
+  bash scripts/package-macos.sh --print-version-mapping 0.10.0-4
 )"
 [[ "$(printf '%s\n' "$macos_version_mapping" | sed -n '1p')" == "0.10.0" ]]
-[[ "$(printf '%s\n' "$macos_version_mapping" | sed -n '2p')" == "1000.0.3" ]]
+[[ "$(printf '%s\n' "$macos_version_mapping" | sed -n '2p')" == "1000.0.4" ]]
 bash -n scripts/package-linux-arm64-omenchatd.sh
 bash -n scripts/test-linux-arm64-headless.sh
 bash -n scripts/test-omenchatd-private-service.sh

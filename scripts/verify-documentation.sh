@@ -41,8 +41,9 @@ for path in "${required_docs[@]}"; do
 done
 
 if ! grep -Fq "released \`v${version}\`" docs/CURRENT_STATUS.md \
-  && ! grep -Fq "release-qualified \`v${version}\` candidate" docs/CURRENT_STATUS.md; then
-  fail "CURRENT_STATUS.md does not identify released or release-qualified v${version}"
+  && ! grep -Fq "release-qualified \`v${version}\` candidate" docs/CURRENT_STATUS.md \
+  && ! grep -Fq "release candidate \`v${version}\`" docs/CURRENT_STATUS.md; then
+  fail "CURRENT_STATUS.md does not identify released, release-qualified, or candidate v${version}"
 fi
 grep -Fq "RELEASE_NOTES_V${version_token}.md" docs/README.md ||
   fail "documentation index does not link current release notes"

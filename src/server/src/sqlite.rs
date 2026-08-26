@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, Result};
+use rusqlite::{ffi, Connection, Error, OpenFlags, Result};
 
 const DEFAULT_FILE_FLAGS: OpenFlags = OpenFlags::SQLITE_OPEN_READ_WRITE
     .union(OpenFlags::SQLITE_OPEN_CREATE)
@@ -22,6 +22,40 @@ pub(crate) fn open_read_write(path: &Path) -> Result<Connection> {
 pub(crate) fn open_with_flags(path: &Path, flags: OpenFlags) -> Result<Connection> {
     let path = stable_file_path(path)?;
     Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NOFOLLOW)
+}
+
+/// Keep WAL and shared-memory sidecars linked while managed connections are
+/// alive. Without this file control, a short-lived unmanaged reader can unlink
+/// the sidecars while omenchatd retains open descriptors, splitting later
+/// writes from readers that reopen the database by pathname.
+pub(crate) fn enable_persistent_wal(connection: &Connection) -> Result<()> {
+    set_persistent_wal(connection, true)
+}
+
+pub(crate) fn disable_persistent_wal(connection: &Connection) -> Result<()> {
+    set_persistent_wal(connection, false)
+}
+
+fn set_persistent_wal(connection: &Connection, enabled: bool) -> Result<()> {
+    let mut enabled = i32::from(enabled);
+    // SAFETY: `connection.handle()` is valid for the duration of this call,
+    // `b"main\0"` is a nul-terminated database name, and SQLite requires the
+    // final argument for SQLITE_FCNTL_PERSIST_WAL to point to a live integer.
+    let result = unsafe {
+        ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_PERSIST_WAL,
+            std::ptr::from_mut(&mut enabled).cast(),
+        )
+    };
+    if result != ffi::SQLITE_OK {
+        return Err(Error::SqliteFailure(
+            ffi::Error::new(result),
+            Some("failed to enable persistent SQLite WAL sidecars".into()),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve only the established parent directory, never the final database
@@ -105,6 +139,91 @@ mod tests {
             .expect("create evidence");
         drop(connection);
         assert!(real_parent.join("omen.sqlite").is_file());
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn unmanaged_reader_cannot_unlink_managed_wal_or_hide_later_writes() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-sqlite-persistent-wal-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let database = root.join("omen.sqlite");
+        let wal = root.join("omen.sqlite-wal");
+
+        let managed = open(&database).expect("managed connection");
+        enable_persistent_wal(&managed).expect("enable persistent WAL");
+        managed
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE evidence(value INTEGER NOT NULL);
+                 INSERT INTO evidence(value) VALUES (1);",
+            )
+            .expect("initialize WAL database");
+        assert!(wal.is_file(), "managed WAL must be linked");
+
+        let unmanaged = Connection::open(&database).expect("unmanaged reader");
+        let count: i64 = unmanaged
+            .query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0))
+            .expect("read through unmanaged connection");
+        assert_eq!(count, 1);
+        drop(unmanaged);
+        assert!(wal.is_file(), "unmanaged close must not unlink managed WAL");
+
+        managed
+            .execute("INSERT INTO evidence(value) VALUES (2)", [])
+            .expect("write after unmanaged reader closes");
+        let observer = Connection::open(&database).expect("independent observer");
+        let count: i64 = observer
+            .query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0))
+            .expect("observe later managed write");
+        assert_eq!(count, 2);
+        drop(observer);
+        drop(managed);
+        assert!(
+            wal.is_file(),
+            "persistent WAL must remain linked at shutdown"
+        );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn disabling_persistent_wal_before_close_restores_clean_shutdown_sidecars() {
+        let root = std::env::temp_dir().join(format!(
+            "omenchatd-sqlite-clean-wal-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let database = root.join("omen.sqlite");
+        let wal = root.join("omen.sqlite-wal");
+        let shm = root.join("omen.sqlite-shm");
+
+        let managed = open(&database).expect("managed connection");
+        enable_persistent_wal(&managed).expect("enable persistent WAL");
+        managed
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE evidence(value INTEGER NOT NULL);
+                 INSERT INTO evidence(value) VALUES (1);",
+            )
+            .expect("initialize WAL database");
+        assert!(wal.is_file(), "managed WAL must be linked");
+
+        disable_persistent_wal(&managed).expect("disable persistent WAL");
+        drop(managed);
+        assert!(!wal.exists(), "clean close must remove WAL");
+        assert!(!shm.exists(), "clean close must remove shared memory");
 
         std::fs::remove_dir_all(root).expect("cleanup");
     }

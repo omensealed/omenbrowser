@@ -1,6 +1,6 @@
 # OMENbrowser_rs and omenchatd v0.10.0-3 release notes
 
-Status: final
+Status: unpublished; superseded by v0.10.0-4 after live duplicate-identification evidence exposed lost link-scoped capability state.
 
 Reticulum/LXMF crate train: exact official crates.io `0.10.0`.
 

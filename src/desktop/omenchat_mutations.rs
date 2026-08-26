@@ -919,13 +919,18 @@ impl DesktopApp {
                 mutation_id,
                 next,
                 result,
+            } => self.finish_omenchat_mutation_terminal_response(
+                session_id,
+                mutation_id,
+                next,
+                result,
+            ),
+            OmenChatMutationCompletionMessage::ClientInstanceRotated {
+                session_id,
+                expected,
+                result,
             } => {
-                self.finish_omenchat_mutation_terminal_response(
-                    session_id,
-                    mutation_id,
-                    next,
-                    result,
-                );
+                self.finish_omenchat_client_instance_rotation(session_id, expected, result);
                 Task::none()
             }
             OmenChatMutationCompletionMessage::Rejected {
@@ -1992,7 +1997,7 @@ impl DesktopApp {
         mutation_id: MutationId,
         next: OutboundMutationState,
         result: Result<IntentTransition, String>,
-    ) {
+    ) -> Task<Message> {
         if !matches!(
             next,
             OutboundMutationState::Conflict | OutboundMutationState::Expired
@@ -2003,7 +2008,7 @@ impl DesktopApp {
                 ?next,
                 "ignored invalid durable OMENchat terminal response state"
             );
-            return;
+            return Task::none();
         }
         let terminalized = match result {
             Ok(IntentTransition::Updated(intent)) if intent.state == next => true,
@@ -2045,7 +2050,7 @@ impl DesktopApp {
                 "server returned a terminal durable mutation result, but local persistence failed"
                     .into(),
             );
-            return;
+            return Task::none();
         }
         self.omenchat
             .omenchat_recovered_mutation_intents
@@ -2057,6 +2062,95 @@ impl DesktopApp {
             "server reports the durable replay identity expired; the mutation was not executed and will not be retried"
         };
         self.set_omenchat_session_status(session_id, status.into());
+        if next != OutboundMutationState::Expired {
+            return Task::none();
+        }
+        let Some(expected) = self.omenchat.omenchat_live_state.client_instance_id() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "durable replay identity expired; the rejected mutation will not be retried and a new client instance could not be initialized"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let Some(worker) = self.omenchat.omenchat_mutation_intent_worker.as_ref() else {
+            self.set_omenchat_session_status(
+                session_id,
+                "durable replay identity expired; the rejected mutation will not be retried and persistence is unavailable for safe rotation"
+                    .into(),
+            );
+            return Task::none();
+        };
+        let reply = match worker.try_rotate_client_instance(expected) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!(
+                        "durable replay identity expired; the rejected mutation will not be retried and safe rotation was not admitted: {error}"
+                    ),
+                );
+                return Task::none();
+            }
+        };
+        self.set_omenchat_session_status(
+            session_id,
+            "durable replay identity expired; the rejected mutation will not be retried; rotating the client instance"
+                .into(),
+        );
+        Task::perform(await_intent_worker_reply(reply), move |result| {
+            Message::OmenChatMutationCompletion(Box::new(
+                OmenChatMutationCompletionMessage::ClientInstanceRotated {
+                    session_id,
+                    expected,
+                    result: result.map_err(|error| error.to_string()),
+                },
+            ))
+        })
+    }
+
+    fn finish_omenchat_client_instance_rotation(
+        &mut self,
+        session_id: ChatSessionId,
+        expected: crate::chat::protocol::ClientInstanceId,
+        result: Result<crate::chat::protocol::ClientInstanceId, String>,
+    ) {
+        let replacement = match result {
+            Ok(replacement)
+                if self.omenchat.omenchat_live_state.client_instance_id() == Some(expected) =>
+            {
+                replacement
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    session_id,
+                    "ignored stale durable OMENchat client-instance rotation completion"
+                );
+                return;
+            }
+            Err(error) => {
+                self.set_omenchat_session_status(
+                    session_id,
+                    format!(
+                        "durable replay identity expired; the rejected mutation will not be retried and safe rotation is blocked: {error}"
+                    ),
+                );
+                return;
+            }
+        };
+        self.omenchat
+            .omenchat_live_state
+            .set_client_instance_id(Some(replacement));
+        self.clear_omenchat_reconnect_state(session_id);
+        self.disconnect_omenchat_session(
+            session_id,
+            "durable client instance rotated; reconnecting without replaying the rejected mutation",
+        );
+        let _ = self.schedule_omenchat_reconnect(session_id, crate::app::current_epoch_ms());
+        self.set_omenchat_connection_state(
+            session_id,
+            crate::chat::ChatConnectionState::Reconnecting,
+        );
     }
 
     fn finish_omenchat_mutation_rejection(
@@ -3353,7 +3447,7 @@ mod tests {
             },
         ]);
         assert!(recover_intents(&desktop).is_empty());
-        desktop.finish_omenchat_mutation_terminal_response(
+        let _ = desktop.finish_omenchat_mutation_terminal_response(
             session_id,
             recovered_prepared.mutation_id,
             OutboundMutationState::Conflict,

@@ -531,14 +531,18 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         self.stats.unknown_link_packets.saturating_add(1);
                     return Ok(());
                 };
+                let identity_changed =
+                    existing.identity_hash.as_slice() != identity_hash.as_slice();
                 let mut identified = existing;
                 identified.identity_hash = identity_hash.to_vec();
-                self.durable_sessions.remove(&link_id);
-                self.moderation_audit_links.remove(&link_id);
-                self.announcement_room_links.remove(&link_id);
-                self.slow_mode_links.remove(&link_id);
-                self.room_media_policy_links.remove(&link_id);
-                self.nickname_colour_links.remove(&link_id);
+                if identity_changed {
+                    self.durable_sessions.remove(&link_id);
+                    self.moderation_audit_links.remove(&link_id);
+                    self.announcement_room_links.remove(&link_id);
+                    self.slow_mode_links.remove(&link_id);
+                    self.room_media_policy_links.remove(&link_id);
+                    self.nickname_colour_links.remove(&link_id);
+                }
                 self.identified_links.insert(link_id);
                 self.replace_duplicate_peer_links(link_id, &identified);
                 self.peers.insert(link_id, identified);
@@ -4603,27 +4607,36 @@ mod tests {
     }
 
     #[test]
-    fn durable_binding_is_cleared_on_identity_change_and_link_close() {
+    fn durable_binding_survives_duplicate_identification_and_clears_on_change_and_close() {
         let store = OmenchatStore::in_memory().expect("store");
         let engine = SessionEngine::new(store);
         let link_id = [19u8; 16];
         let mut live = OmenchatLiveServer::new(engine, CapturedTransport::default());
+        let mut identified_peer = peer();
+        identified_peer.identity_hash = vec![5; 16];
         live.handle_event(OmenchatLinkEvent::LinkOpened {
             link_id,
-            peer: peer(),
+            peer: identified_peer,
         })
         .expect("open identified link");
         live.durable_sessions.insert(
             link_id,
-            DurableSessionBinding::without_notice_ack(
-                b"peer-live".to_vec(),
-                ClientInstanceId::new([5; 16]),
-            ),
+            DurableSessionBinding::without_notice_ack(vec![5; 16], ClientInstanceId::new([5; 16])),
         );
         live.durable_sessions
             .get_mut(&link_id)
             .expect("test binding")
             .message_revisions = true;
+
+        live.handle_event(OmenchatLinkEvent::PeerIdentified {
+            link_id,
+            identity_hash: [5; 16],
+        })
+        .expect("repeat authenticated identity");
+        assert!(live
+            .durable_sessions
+            .get(&link_id)
+            .is_some_and(|binding| binding.message_revisions));
 
         live.handle_event(OmenchatLinkEvent::PeerIdentified {
             link_id,

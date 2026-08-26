@@ -1,6 +1,6 @@
 # v0.10.0-3 release evidence
 
-Status: locally release-qualified corrective candidate; hosted package evidence pending.
+Status: tagged but unpublished; superseded by the v0.10.0-4 live reliability correction.
 
 ## Defect and correction
 

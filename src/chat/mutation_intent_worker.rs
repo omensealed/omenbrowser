@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 
-use omenchat_protocol::MutationId;
+use omenchat_protocol::{ClientInstanceId, MutationId};
 
+use super::client_instance::ClientInstanceIdStore;
 use super::mutation_intents::{
     queued_prepare_bytes, IntentRemoval, IntentTransition, MutationIntentStore,
     OutboundMutationIntent, OutboundMutationState, OwnedPrepareOutboundMutation,
@@ -81,6 +82,10 @@ enum WorkerCommand {
         now: i64,
         reply: mpsc::SyncSender<anyhow::Result<usize>>,
     },
+    RotateClientInstance {
+        expected: ClientInstanceId,
+        reply: mpsc::SyncSender<anyhow::Result<ClientInstanceId>>,
+    },
     #[cfg(test)]
     Pause {
         entered: mpsc::SyncSender<()>,
@@ -117,8 +122,10 @@ impl MutationIntentWorker {
         let thread = std::thread::Builder::new()
             .name("omenchat-intent-store".into())
             .spawn(move || {
+                let instance_store =
+                    ClientInstanceIdStore::for_identity_storage_root(&identity_storage_root);
                 let store = match MutationIntentStore::open_for_identity_storage_root(
-                    identity_storage_root,
+                    &identity_storage_root,
                 ) {
                     Ok(store) => {
                         let _ = ready_sender.send(Ok(()));
@@ -165,6 +172,12 @@ impl MutationIntentWorker {
                         }
                         WorkerCommand::PruneTerminal { now, reply } => {
                             let result = store.prune_terminal(now);
+                            thread_counters.completed.fetch_add(1, Ordering::Relaxed);
+                            let _ = reply.send(result);
+                        }
+                        WorkerCommand::RotateClientInstance { expected, reply } => {
+                            let result = store
+                                .rotate_client_instance_if_quiescent(&instance_store, expected);
                             thread_counters.completed.fetch_add(1, Ordering::Relaxed);
                             let _ = reply.send(result);
                         }
@@ -249,6 +262,15 @@ impl MutationIntentWorker {
     ) -> Result<IntentWorkerReply<usize>, IntentWorkerSubmitError> {
         let (reply, receive) = mpsc::sync_channel(1);
         self.try_submit(WorkerCommand::PruneTerminal { now, reply }, 64)?;
+        Ok(receive)
+    }
+
+    pub fn try_rotate_client_instance(
+        &self,
+        expected: ClientInstanceId,
+    ) -> Result<IntentWorkerReply<ClientInstanceId>, IntentWorkerSubmitError> {
+        let (reply, receive) = mpsc::sync_channel(1);
+        self.try_submit(WorkerCommand::RotateClientInstance { expected, reply }, 128)?;
         Ok(receive)
     }
 
@@ -494,6 +516,53 @@ mod tests {
             .expect("recover result")
             .is_empty());
         assert_eq!(worker.metrics().completed, 4);
+        worker.shutdown().expect("shutdown");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn worker_rotates_client_instance_only_after_terminalization() {
+        let root = isolated_root("expired-client-rotation");
+        let instance_store = ClientInstanceIdStore::for_identity_storage_root(&root);
+        let original = instance_store.load_or_create().expect("original instance");
+        let worker = MutationIntentWorker::start(&root).expect("worker");
+        let mut prepared = request();
+        prepared.client_instance_id = original;
+        let intent = worker
+            .try_prepare(prepared)
+            .expect("prepare admission")
+            .recv()
+            .expect("prepare reply")
+            .expect("prepare result");
+        assert!(worker
+            .try_rotate_client_instance(original)
+            .expect("blocked rotation admission")
+            .recv()
+            .expect("blocked rotation reply")
+            .is_err());
+        worker
+            .try_transition(
+                intent.mutation_id,
+                OutboundMutationState::Prepared,
+                OutboundMutationState::Expired,
+            )
+            .expect("terminal transition admission")
+            .recv()
+            .expect("terminal transition reply")
+            .expect("terminal transition result");
+        let replacement = worker
+            .try_rotate_client_instance(original)
+            .expect("rotation admission")
+            .recv()
+            .expect("rotation reply")
+            .expect("rotation result");
+        assert_ne!(replacement, original);
+        assert_eq!(
+            instance_store
+                .load_or_create()
+                .expect("persisted replacement"),
+            replacement
+        );
         worker.shutdown().expect("shutdown");
         std::fs::remove_dir_all(root).expect("cleanup");
     }

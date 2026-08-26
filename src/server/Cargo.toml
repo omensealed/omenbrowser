@@ -3,7 +3,7 @@ members = ["crates/omen-ifac-tcp", "crates/omenchat-protocol"]
 
 [package]
 name = "omenchatd"
-version = "0.10.0-3"
+version = "0.10.0-4"
 edition = "2021"
 rust-version = "1.85"
 description = "Standalone OMENchat server"
