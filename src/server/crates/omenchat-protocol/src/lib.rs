@@ -377,6 +377,8 @@ pub mod fixtures {
     }
 }
 
+pub use channel_attachment::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,4 +454,3 @@ mod tests {
             .all(|capability| unique.contains(capability)));
     }
 }
-pub use channel_attachment::*;
