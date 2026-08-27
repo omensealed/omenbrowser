@@ -4,7 +4,7 @@ Status: local release qualification complete; hosted qualification pending
 
 Baseline: `v0.10.0-4`, commit
 `33971dbdf20c9d962d4a03fe7d7547e092326d75`, clean `main` checkout.
-Candidate SHA: pending final commit.
+Source candidate commit: `daabc5293315d715e00227c3bf7f04e756836425`.
 
 Upstream review date: 2026-08-27. Latest official LXMF-rs release remains
 `v0.10.0`, commit `5436ee715f94f81e18abb0808cfca52fcd7cc9bc`.
@@ -40,6 +40,15 @@ not dependencies. No newer official base was adopted.
   recovery, post-restart echo, and reaction/revision/pin recovery.
 - Adjacent direct OMENchat: pass in both directions against immutable
   `v0.10.0-4` commit `33971dbdf20c9d962d4a03fe7d7547e092326d75`.
+- Adjacent orderly server restart: pass in both directions with stable server
+  destination, reused client state root, replacement Link/session, room rejoin,
+  and post-restart echo.
+- Adjacent history Resource: old client to current server passed. Current client
+  to old server initially failed to decode the Resource event, then passed on an
+  isolated rerun with exact history content. This timing-sensitive harness
+  result remains a hosted-repeat item, not a hidden pass.
+- Adjacent SQLite history reopening: pass in both read/write directions with
+  room/server metadata, event order, and content preserved.
 - Passive announce observation: unavailable. Official 0.10.0 has no public
   accessor for the private table, and no controlled announce-heavy public
   topology was supplied; this is not counted as pass.
@@ -52,7 +61,8 @@ checksum/manifest files and the maintainer handoff report, avoiding a
 self-referential checksum inside the archive itself.
 
 Hosted native Windows/macOS/ARM64, signing, notarization, physical RNode,
-public-network announce traffic, and broader adjacent restart/history/upload
-lanes remain `unavailable` until an exact-candidate run is linked. The local PTY
+public-network announce traffic, and adjacent upload/download/mutation and
+installer-upgrade breadth remain `unavailable` until an exact-candidate hosted
+run is linked. The local PTY
 lane passed; a graphical display lane was not claimed. No tag, push,
 publication, or GitHub release was performed.
