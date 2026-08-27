@@ -1,18 +1,18 @@
 # Current product status
 
-This page tracks the release candidate `v0.10.0-4` connection-reliability correction. Source code and automated tests outrank
+This page tracks the release candidate `v0.10.0-5` upstream-gap and qualification maintenance release. Source code and automated tests outrank
 prose if a development branch has advanced. Canonical root/server products, standalone
 packaging, current and pinned Python interop, adjacent v0.9.9-2 interop and
 rollback, reconnect/upload reliability, security, TUI, and emulated ARM64 gates
-passed. See `migration/V0_10_0_4_RELEASE_EVIDENCE.md` for detailed evidence and
+are being rerun. See `migration/V0_10_0_5_RELEASE_EVIDENCE.md` for detailed evidence and
 explicit unavailable lanes.
 
 ## Version and compatibility
 
 | Component | Current value |
 |---|---|
-| OMENbrowser_rs | `0.10.0-4` |
-| standalone omenchatd | `0.10.0-4` |
+| OMENbrowser_rs | `0.10.0-5` |
+| standalone omenchatd | `0.10.0-5` |
 | Reticulum/LXMF Rust train | exact official crates.io `0.10.0` |
 | OMENchat wire protocol | version `1` |
 | omenchat-protocol Rust API | `0.2.0` |
@@ -86,6 +86,6 @@ removal conditions.
 ## Release evidence
 
 The current candidate notes are
-[v0.10.0-4](RELEASE_NOTES_V0_10_0_4.md). Current commands are in
+[v0.10.0-5](RELEASE_NOTES_V0_10_0_5.md). Current commands are in
 [Testing](TESTING.md). Hosted CI and package results are evidence only for the
 commit SHA on which they ran.

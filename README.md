@@ -443,6 +443,15 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
 
 ## Known Release Gaps
 
+- Official Reticulum 0.10.0 issue #581 can retain passive announces on
+  non-transport nodes. Monitor RSS on long-running announce-heavy nodes; do not
+  enable transport or automatically restart merely to avoid the symptom. OMEN
+  carries no local transport patch.
+- Official Reticulum 0.10.0 issue #578 leaves three announce-broadcast policy
+  rungs incomplete. OMEN does not copy the open upstream PRs or add a second
+  dispatch. These announce limitations remain independent of the routed
+  Resource fragment-loss and maximum-UDP limitations below.
+
 - The authoritative current OMENchat capability matrix is in
   `docs/OMENCHAT_PROTOCOL.md`. Durable mutations, replies/mentions, reactions,
   message revisions, room pins, announcement rooms, slow mode, room media

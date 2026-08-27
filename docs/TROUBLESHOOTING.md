@@ -1,5 +1,14 @@
 # Troubleshooting
 
+## RSS growth on announce-heavy passive nodes
+
+Official Reticulum 0.10.0 issue #581 tracks passive announce retention. Use the
+browser's detailed native startup/network diagnostics or `omenchatd doctor` for
+the bounded operator notice, and compare repeated same-host RSS samples. Do not
+enable transport or add automatic restarts merely to mask the symptom. OMEN
+carries no local transport patch and cannot report the private upstream table
+count.
+
 ## Browser Does Not Connect
 
 - Check the selected identity.

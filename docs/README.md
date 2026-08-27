@@ -23,7 +23,9 @@ answer to “what does the current release actually support?”
 - [Packaging](PACKAGING.md) — release archives and native packages.
 - [Release Versioning](RELEASE_VERSIONING.md) — product and dependency version
   rules.
-- [Current Release Notes](RELEASE_NOTES_V0_10_0_4.md).
+- [Current Release Notes](RELEASE_NOTES_V0_10_0_5.md).
+- [v0.10.0-5 release checklist](migration/V0_10_0_5_RELEASE_CHECKLIST.md).
+- [v0.10.0-5 release evidence](migration/V0_10_0_5_RELEASE_EVIDENCE.md).
 
 ## Developers
 

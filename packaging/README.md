@@ -159,6 +159,9 @@ maps the Cargo numeric revision deterministically: `0.9.6-1` becomes MSI
 `0.9.6.1`. Both reject downgrades. Neither package contains, installs, or starts
 omenchatd; the standalone server remains the separate ZIP above.
 
+For v0.10.0-5, MSI `ProductVersion` is `0.10.0.5`; lifecycle qualification
+uses `0.10.0-4` as the prior revision and preserves isolated user data.
+
 Before artifact upload, the job creates a prior-revision installer fixture from
 the same reviewed binary, installs it, upgrades to the current package, launches
 the installed GUI against an explicit temporary `--app-root`, uninstalls, and
@@ -185,6 +188,7 @@ it, and generates a separate SHA-256 file. It also produces a separate native
 omenchatd `.tar.gz`; the browser DMG does not install or auto-start it.
 The bundle's numeric build mapping is deterministic: `0.9.6-2` becomes
 `CFBundleShortVersionString=0.9.6` and `CFBundleVersion=906.2`.
+For v0.10.0-5 the mapping is short version `0.10.0`, build `1000.0.5`.
 
 Do not claim a universal binary, signing, notarization, or normal Gatekeeper
 acceptance until those paths are deliberately implemented and tested. Release

@@ -5,7 +5,7 @@ repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly repo_root
 readonly old_commit=${OMEN_MIXED_OLD_COMMIT:-0a9a913ddf8bfc4388f065335770330495055da4}
 readonly old_expected_version=${OMEN_MIXED_OLD_VERSION:-0.9.9-2}
-readonly current_expected_version=0.10.0-4
+readonly current_expected_version=0.10.0-5
 
 report_path=""
 while (($#)); do

@@ -2065,6 +2065,7 @@ fn render_doctor_json(config: &config::ServerConfig) -> ServerResult<String> {
         "fail_count": fail_count,
         "warn_count": warn_count,
         "checks": checks,
+        "operator_notices": [RETICULUM_PASSIVE_ANNOUNCE_NOTICE],
         "redaction": "check details and private paths omitted",
     }))
 }
@@ -2098,8 +2099,13 @@ fn render_doctor_report(config: &config::ServerConfig) -> String {
             check.detail
         ));
     }
+    report.push_str(&format!(
+        "[NOTICE] reticulum: {RETICULUM_PASSIVE_ANNOUNCE_NOTICE}\n"
+    ));
     report
 }
+
+const RETICULUM_PASSIVE_ANNOUNCE_NOTICE: &str = "Official Reticulum 0.10.0 issue #581 can retain passive announces; monitor RSS on long-running announce-heavy nodes. Do not enable transport merely to avoid the symptom. OMEN carries no local transport patch.";
 
 fn doctor_checks(config: &config::ServerConfig) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
@@ -4503,6 +4509,8 @@ mod tests {
         assert!(report.contains("[PASS] database:"));
         assert!(report.contains("[WARN] nomadnet portal:"));
         assert!(report.contains("[WARN] interfaces:"));
+        assert!(report.contains("issue #581"));
+        assert!(report.contains("OMEN carries no local transport patch"));
         let _ = std::fs::remove_dir_all(root);
     }
 

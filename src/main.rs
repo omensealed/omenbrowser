@@ -2852,8 +2852,9 @@ async fn native_startup_report(
 fn upstream_software_parity_diagnostics() -> serde_json::Value {
     serde_json::json!({
         "available": true,
-        "source": "official registry lxmf-sdk 0.9.9",
+        "source": "official registry lxmf-sdk 0.10.0",
         "interpretation": "advisory implementation capability inventory; not live interoperability proof",
+        "operator_notices": ["Official Reticulum 0.10.0 issue #581 can retain passive announces; monitor RSS on long-running announce-heavy nodes. Do not enable transport merely to avoid the symptom. OMEN carries no local transport patch."],
         "orientation": lxmf_sdk::current_software_parity_orientation(),
     })
 }
@@ -2863,6 +2864,7 @@ fn upstream_software_parity_diagnostics() -> serde_json::Value {
     serde_json::json!({
         "available": false,
         "interpretation": "lxmf-sdk parity inventory is not compiled in this product profile; it would be advisory capability metadata, not live interoperability proof",
+        "operator_notices": ["Official Reticulum 0.10.0 issue #581 can retain passive announces; monitor RSS on long-running announce-heavy nodes. Do not enable transport merely to avoid the symptom. OMEN carries no local transport patch."],
     })
 }
 
@@ -4586,8 +4588,13 @@ mod tests {
             assert!(diagnostics["orientation"]["overall"]["inventory"]["total"]
                 .as_u64()
                 .is_some_and(|total| total > 0));
-            assert_eq!(diagnostics["source"], "official registry lxmf-sdk 0.9.9");
+            assert_eq!(diagnostics["source"], "official registry lxmf-sdk 0.10.0");
         }
+
+        assert!(diagnostics["operator_notices"][0]
+            .as_str()
+            .is_some_and(|notice| notice.contains("issue #581")
+                && notice.contains("no local transport patch")));
 
         #[cfg(not(feature = "native-lxmf-sdk"))]
         assert_eq!(diagnostics["available"], false);

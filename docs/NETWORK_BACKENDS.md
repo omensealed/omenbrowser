@@ -1,5 +1,15 @@
 # Network Backends
 
+## Support terminology for v0.10.0-5
+
+`Managed and supported` means the production planner instantiates and qualifies
+the interface. `Rendered/external-only` means OMEN preserves or renders a
+profile but does not start its worker. `Experimental/hardware-qualified`
+requires named physical hardware evidence. RNode, I2P, TCP Server, BLE, and
+other rendered carriers are not started merely because upstream exposes an
+implementation. Managed serial RNode is deferred because no named hardware
+startup/reconnect/detach/malformed-input/shutdown evidence is available.
+
 OMENbrowser keeps Reticulum and LXMF behind the project-owned `NetworkRuntime`
 boundary. Application and UI code must not infer backend capabilities from the
 crate version or a saved mode name.

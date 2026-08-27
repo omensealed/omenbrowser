@@ -1,5 +1,19 @@
 # Reticulum Transport API Gap
 
+## Additional official 0.10.0 transport limitations
+
+Two independent announce limitations remain unsupported: passive announce
+retention ([issue #581](https://github.com/FreeTAKTeam/LXMF-rs/issues/581)) and
+the incomplete announce broadcast ladder
+([issue #578](https://github.com/FreeTAKTeam/LXMF-rs/issues/578)). Their exact
+source records are
+[`reticulum-rs-0.10.0-passive-announce-retention.md`](upstream/reticulum-rs-0.10.0-passive-announce-retention.md)
+and
+[`reticulum-rs-0.10.0-announce-broadcast-ladder.md`](upstream/reticulum-rs-0.10.0-announce-broadcast-ladder.md).
+Neither is merged with the routed Resource or maximum-UDP capability state.
+OMEN keeps ordinary managed roles at `enable_transport = No`, carries no local
+patch, and does not use restart, replay, or transport enablement as a workaround.
+
 OMENbrowser_rs now builds against the exact `reticulum-rs` / `lxmf` 0.10.0
 train. Small NomadNet requests now use direct `PacketContext::Request` packets;
 oversized packed requests retain the bounded request-resource path. Exact empty

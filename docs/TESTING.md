@@ -1,5 +1,15 @@
 # Testing
 
+## v0.10.0-5 limitation evidence
+
+The capability-doc verifier structurally preserves the passive-announce and
+announce-broadcast limitations. A meaningful automated passive-table soak is
+unavailable because official 0.10.0 exposes no public table accessor; missing
+traffic or a process-only sample is not a pass. The routed fragment-loss and
+maximum-UDP ignored sentinels remain separate known-red runs. Adjacent
+`v0.10.0-4` OMENchat lanes run in both client/server directions without changing
+wire protocol 1 or schema 14.
+
 This is the current test and qualification guide for OMENbrowser_rs and the
 independently packaged `omenchatd`. Repository scripts are authoritative when
 their commands differ from prose.

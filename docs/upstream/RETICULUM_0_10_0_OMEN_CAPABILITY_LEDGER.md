@@ -60,6 +60,25 @@ plus maximum-boundary serialization and UDP loopback qualification.
 
 ## Backend contracts
 
+<!-- omen-capability:transport-passive-announce-retention=unsupported -->
+
+**Unsupported.** Official Reticulum 0.10.0 passive nodes can retain announce
+entries without bound under upstream issue
+[#581](https://github.com/FreeTAKTeam/LXMF-rs/issues/581). OMEN carries no
+local patch and ordinary managed nodes remain non-transport nodes. See
+[the source record](reticulum-rs-0.10.0-passive-announce-retention.md).
+Removal requires an official published fixed release and repeated bounded
+announce-heavy process evidence on that selected train.
+
+<!-- omen-capability:transport-announce-broadcast-ladder=unsupported -->
+
+**Unsupported.** Official Reticulum 0.10.0 omits three reference-policy rungs
+when deciding whether an announce may be broadcast, as tracked by upstream
+issue [#578](https://github.com/FreeTAKTeam/LXMF-rs/issues/578). OMEN carries
+no local patch. See [the source record](reticulum-rs-0.10.0-announce-broadcast-ladder.md).
+Removal requires an official published fixed release and exact topology
+qualification on that selected train.
+
 <!-- omen-capability:managed-integrated-runtime=supported -->
 
 **Supported.** The managed integrated runtime owns its interfaces, workers,
