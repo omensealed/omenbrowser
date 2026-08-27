@@ -11,7 +11,9 @@ use anyhow::Context;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use omenbrowser_rs::app::App;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-use omenbrowser_rs::chat::rns::ChatLinkTransport;
+use omenbrowser_rs::chat::rns::{
+    ChatLinkTransport, OutgoingAttachment, OutgoingAttachmentPrimitive, OutgoingAttachmentSource,
+};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use omenbrowser_rs::runtime::{CancellationToken, RuntimeBusEvent};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -28,7 +30,7 @@ struct OmenChatSmokeTransport {
     resources: BTreeMap<String, Vec<u8>>,
     pending_resource_offers: BTreeMap<String, VecDeque<Vec<u8>>>,
     outgoing_frames: Vec<Vec<u8>>,
-    outgoing_resources: Vec<(String, Vec<u8>)>,
+    outgoing_resources: Vec<OutgoingAttachment>,
 }
 
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -55,7 +57,7 @@ impl OmenChatSmokeTransport {
         std::mem::take(&mut self.outgoing_frames)
     }
 
-    fn take_outgoing_resources(&mut self) -> Vec<(String, Vec<u8>)> {
+    fn take_outgoing_resources(&mut self) -> Vec<OutgoingAttachment> {
         std::mem::take(&mut self.outgoing_resources)
     }
 
@@ -75,8 +77,24 @@ impl ChatLinkTransport for OmenChatSmokeTransport {
     }
 
     fn send_resource(&mut self, resource_id: &str, payload: Vec<u8>) -> anyhow::Result<()> {
-        self.outgoing_resources
-            .push((resource_id.to_owned(), payload));
+        self.outgoing_resources.push(OutgoingAttachment {
+            resource_id: resource_id.to_owned(),
+            source: OutgoingAttachmentSource::Bytes(payload),
+            primitive: OutgoingAttachmentPrimitive::Resource,
+        });
+        Ok(())
+    }
+
+    fn send_channel_attachment(
+        &mut self,
+        resource_id: &str,
+        source: OutgoingAttachmentSource,
+    ) -> anyhow::Result<()> {
+        self.outgoing_resources.push(OutgoingAttachment {
+            resource_id: resource_id.to_owned(),
+            source,
+            primitive: OutgoingAttachmentPrimitive::Channel,
+        });
         Ok(())
     }
 
@@ -1138,11 +1156,53 @@ async fn send_omenchat_smoke_outgoing(
             .await
             .context("failed to send OMENchat smoke frame")?;
     }
-    for (resource_id, payload) in transport.take_outgoing_resources() {
-        runtime
-            .send_omenchat_resource(link_id, resource_id, payload)
-            .await
-            .context("failed to send OMENchat smoke resource")?;
+    for attachment in transport.take_outgoing_resources() {
+        match (attachment.primitive, attachment.source) {
+            (OutgoingAttachmentPrimitive::Resource, OutgoingAttachmentSource::Bytes(payload)) => {
+                runtime
+                    .send_omenchat_resource(link_id, attachment.resource_id, payload)
+                    .await
+            }
+            (OutgoingAttachmentPrimitive::Channel, OutgoingAttachmentSource::Bytes(payload)) => {
+                runtime
+                    .send_omenchat_channel_attachment(link_id, attachment.resource_id, payload)
+                    .await
+            }
+            (
+                OutgoingAttachmentPrimitive::Channel,
+                OutgoingAttachmentSource::File {
+                    path,
+                    expected_bytes,
+                },
+            ) => {
+                runtime
+                    .send_omenchat_channel_file(
+                        link_id,
+                        attachment.resource_id,
+                        path,
+                        expected_bytes,
+                    )
+                    .await
+            }
+            (
+                OutgoingAttachmentPrimitive::Resource,
+                OutgoingAttachmentSource::File {
+                    path,
+                    expected_bytes,
+                },
+            ) => {
+                let payload = tokio::fs::read(path)
+                    .await
+                    .context("failed to read legacy smoke upload")?;
+                if payload.len() as u64 != expected_bytes {
+                    anyhow::bail!("legacy smoke upload changed");
+                }
+                runtime
+                    .send_omenchat_resource(link_id, attachment.resource_id, payload)
+                    .await
+            }
+        }
+        .context("failed to send OMENchat smoke attachment")?;
     }
     Ok(())
 }
@@ -3566,6 +3626,7 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
             resource_id,
             filename,
             bytes,
+            primitive,
         } => {
             serde_json::json!({
                 "event": "upload_accepted",
@@ -3573,6 +3634,10 @@ fn format_chat_event(event: &omenbrowser_rs::chat::ChatClientEvent) -> serde_jso
                 "resource_id": resource_id,
                 "filename": filename,
                 "bytes": bytes,
+                "primitive": match primitive {
+                    omenbrowser_rs::chat::client::UploadTransportPrimitive::Resource => "resource",
+                    omenbrowser_rs::chat::client::UploadTransportPrimitive::Channel => "channel",
+                },
             })
         }
         omenbrowser_rs::chat::ChatClientEvent::UploadRejected {

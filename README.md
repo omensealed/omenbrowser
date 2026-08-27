@@ -459,6 +459,11 @@ per-file cap, and the external browser prompt for HTTP/HTTPS links.
   colours are active only after explicit
   per-Link negotiation. Deterministic downgrade coverage does not replace the
   separately reported prior-binary live lane.
+- Current peers negotiate an OMENchat-specific Channel attachment path with
+  MDU-derived bounded chunks, backpressure, final digest, atomic server commit,
+  and exact-Link cleanup. Legacy peers retain the Resource path. No Channel
+  failure triggers fallback, a second dispatch, or automatic replay, and this
+  capability does not change generic Resource parity claims.
 - The crates and deterministic suites are aligned at Reticulum/LXMF 0.10.0.
   Isolated current-product OMENchat reconnect/upload and NomadNet portal fetches
   pass. The quiet portal independently selects its response from the complete

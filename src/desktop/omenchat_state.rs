@@ -880,6 +880,7 @@ impl DesktopApp {
                     resource_id,
                     filename,
                     bytes,
+                    ..
                 } => {
                     let pending_key = (*session_id, filename.clone(), *bytes);
                     if let Some(source_path) = self

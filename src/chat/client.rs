@@ -167,6 +167,14 @@ pub enum ChatClientRequest {
         content_type: Option<String>,
         bytes: Vec<u8>,
     },
+    SendUploadPath {
+        session_id: ChatSessionId,
+        room: String,
+        filename: String,
+        content_type: Option<String>,
+        path: std::path::PathBuf,
+        bytes: u64,
+    },
     RequestUpload {
         session_id: ChatSessionId,
         room: String,
@@ -195,6 +203,12 @@ pub enum ChatClientRequest {
     LoadOlder {
         session_id: ChatSessionId,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadTransportPrimitive {
+    Resource,
+    Channel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -320,6 +334,7 @@ pub enum ChatClientEvent {
         resource_id: String,
         filename: String,
         bytes: u64,
+        primitive: UploadTransportPrimitive,
     },
     UploadRejected {
         session_id: ChatSessionId,

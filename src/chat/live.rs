@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use super::client::{
     enforce_client_event_presentation_bounds, enforce_room_catalog_bounds,
@@ -25,12 +26,14 @@ use super::protocol::{
     NicknameColourEvent, PinAck, PinAction, PinEvent, PinRequest, PinSnapshot, ReactionAck,
     ReactionEvent, ReactionRequest, ReactionSnapshot, RichMessageBody, RoomCatalogEntry,
     RoomCatalogShape, RoomId, RoomPolicyProjection, SessionOpenNegotiation,
-    ANNOUNCEMENT_ROOMS_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS, DURABLE_MUTATION_CAPABILITY,
-    DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY, NICKNAME_COLOURS_CAPABILITY,
-    PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY, ROOM_MEDIA_POLICY_CAPABILITY,
-    ROOM_SLOW_MODE_CAPABILITY,
+    ANNOUNCEMENT_ROOMS_CAPABILITY, CHANNEL_ATTACHMENT_CAPABILITY, DEFAULT_JOIN_BACKLOG_EVENTS,
+    DURABLE_MUTATION_CAPABILITY, DURABLE_NOTICE_ACK_CAPABILITY, MODERATION_AUDIT_CAPABILITY,
+    NICKNAME_COLOURS_CAPABILITY, PROTOCOL_NAME, REACTIONS_CAPABILITY, REPLY_MENTIONS_CAPABILITY,
+    ROOM_MEDIA_POLICY_CAPABILITY, ROOM_SLOW_MODE_CAPABILITY,
 };
-use super::rns::{recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport};
+use super::rns::{
+    recv_chat_event, send_chat_frame, ChatLinkEvent, ChatLinkTransport, OutgoingAttachmentSource,
+};
 
 pub const LIVE_INLINE_DOWNLOAD_MAX_ITEMS: usize = 16;
 pub const LIVE_INLINE_DOWNLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -101,6 +104,7 @@ pub struct LiveChatClientState {
     slow_mode_sessions: BTreeSet<ChatSessionId>,
     room_media_policy_requests: BTreeSet<ChatSessionId>,
     room_media_policy_sessions: BTreeSet<ChatSessionId>,
+    channel_attachment_sessions: BTreeSet<ChatSessionId>,
     server_upload_max_file_bytes: BTreeMap<ChatSessionId, u64>,
     local_user_ids: BTreeMap<ChatSessionId, u32>,
     next_seq_by_session: BTreeMap<ChatSessionId, u64>,
@@ -108,6 +112,7 @@ pub struct LiveChatClientState {
     pending_pin_confirmations: BTreeMap<(ChatSessionId, RoomId, u64), PinAction>,
     pending_nickname_colours: BTreeMap<ChatSessionId, (MutationId, Option<super::protocol::Rgb24>)>,
     pending_uploads: BTreeMap<(ChatSessionId, u32), PendingLiveUpload>,
+    pending_upload_paths: BTreeMap<(ChatSessionId, u32), (PathBuf, u64)>,
     pending_upload_downloads: BTreeMap<String, PendingLiveUploadDownload>,
     rejected_pending_local_echoes: u64,
     rejected_upload_downloads: u64,
@@ -536,6 +541,8 @@ impl LiveChatClientState {
             .retain(|_, echo| echo.session_id != session_id);
         self.pending_uploads
             .retain(|_, upload| upload.session_id != session_id);
+        self.pending_upload_paths
+            .retain(|(stored_session, _), _| *stored_session != session_id);
         self.pending_upload_downloads
             .retain(|_, download| download.session_id != session_id);
         self.pending_pin_confirmations
@@ -719,6 +726,22 @@ pub fn handle_live_request<T: ChatLinkTransport>(
             content_type,
             bytes,
         ),
+        ChatClientRequest::SendUploadPath {
+            session_id,
+            room: _,
+            filename,
+            content_type,
+            path,
+            bytes,
+        } => send_live_upload_path_offer(
+            client,
+            state,
+            transport,
+            session_id,
+            filename,
+            content_type,
+            (path, bytes),
+        ),
         ChatClientRequest::RequestUpload {
             session_id,
             room: _,
@@ -764,6 +787,9 @@ fn publish_target(request: &ChatClientRequest) -> Option<(ChatSessionId, &str)> 
             session_id, room, ..
         }
         | ChatClientRequest::SendUpload {
+            session_id, room, ..
+        }
+        | ChatClientRequest::SendUploadPath {
             session_id, room, ..
         } => Some((*session_id, room)),
         _ => None,
@@ -1049,6 +1075,7 @@ fn send_session_open_and_join<T: ChatLinkTransport>(
     state.slow_mode_sessions.remove(&session_id);
     state.room_media_policy_requests.remove(&session_id);
     state.room_media_policy_sessions.remove(&session_id);
+    state.channel_attachment_sessions.remove(&session_id);
     client.clear_room_policies(session_id);
     client.clear_moderation_audit(session_id);
     state
@@ -2387,7 +2414,77 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
     session_id: ChatSessionId,
     filename: String,
     content_type: Option<String>,
+    bytes: Vec<u8>,
+) -> Vec<ChatClientEvent> {
+    let byte_len = bytes.len() as u64;
+    send_live_upload_offer_source(
+        client,
+        state,
+        transport,
+        session_id,
+        filename,
+        content_type,
+        bytes,
+        None,
+        byte_len,
+    )
+}
+
+fn send_live_upload_path_offer<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    filename: String,
+    content_type: Option<String>,
+    file: (PathBuf, u64),
+) -> Vec<ChatClientEvent> {
+    let (path, byte_len) = file;
+    if !state.channel_attachment_sessions.contains(&session_id) {
+        return match std::fs::read(&path) {
+            Ok(bytes) if bytes.len() as u64 == byte_len => send_live_upload_offer(
+                client,
+                state,
+                transport,
+                session_id,
+                filename,
+                content_type,
+                bytes,
+            ),
+            Ok(_) => vec![ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: "upload changed after it was selected; nothing was dispatched".into(),
+            }],
+            Err(error) => vec![ChatClientEvent::Error {
+                session_id: Some(session_id),
+                message: format!("upload read failed before legacy Resource dispatch: {error}"),
+            }],
+        };
+    }
+    send_live_upload_offer_source(
+        client,
+        state,
+        transport,
+        session_id,
+        filename,
+        content_type,
+        Vec::new(),
+        Some(path),
+        byte_len,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_live_upload_offer_source<T: ChatLinkTransport>(
+    client: &mut ChatClient,
+    state: &mut LiveChatClientState,
+    transport: &mut T,
+    session_id: ChatSessionId,
+    filename: String,
+    content_type: Option<String>,
     mut bytes: Vec<u8>,
+    source_path: Option<PathBuf>,
+    byte_len: u64,
 ) -> Vec<ChatClientEvent> {
     let Some(room_id) = client
         .session(session_id)
@@ -2405,14 +2502,14 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
         }];
     }
     let filename = filename.trim().to_owned();
-    if filename.is_empty() || bytes.is_empty() {
+    if filename.is_empty() || byte_len == 0 {
         return vec![ChatClientEvent::Error {
             session_id: Some(session_id),
             message: "usage: /upload <path> with a non-empty file".into(),
         }];
     }
     let local_resource_max = LIVE_PENDING_UPLOAD_MAX_RESOURCE_BYTES;
-    if bytes.len() > local_resource_max {
+    if byte_len > local_resource_max as u64 {
         state.rejected_pending_uploads = state.rejected_pending_uploads.saturating_add(1);
         let message = format!(
             "upload exceeds the {local_resource_max}-byte OMENchat Resource limit; rejected before an upload offer"
@@ -2436,7 +2533,7 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
         None if advertised_max != 0 => Some(advertised_max),
         None => None,
     };
-    if effective_max.is_none_or(|limit| byte_len_exceeds(bytes.len(), limit)) {
+    if effective_max.is_none_or(|limit| byte_len > limit) {
         state.rejected_pending_uploads = state.rejected_pending_uploads.saturating_add(1);
         let message = match effective_max {
             Some(limit) => format!(
@@ -2474,7 +2571,6 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
             message: message.into(),
         }];
     }
-    let byte_len = bytes.len() as u64;
     let seq = match state.reserve_seq(session_id) {
         Ok(seq) => seq,
         Err(_) => return vec![sequence_space_exhausted_event(session_id)],
@@ -2488,6 +2584,11 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
             bytes,
         },
     );
+    if let Some(path) = source_path {
+        state
+            .pending_upload_paths
+            .insert((session_id, seq), (path, byte_len));
+    }
     let mut fields = vec![
         FrameValue::String(filename.clone()),
         FrameValue::U64(byte_len),
@@ -2508,6 +2609,7 @@ fn send_live_upload_offer<T: ChatLinkTransport>(
         Some(session_id),
     ) {
         state.pending_uploads.remove(&(session_id, seq));
+        state.pending_upload_paths.remove(&(session_id, seq));
         return vec![event];
     }
     if let Some(session) = client.session_mut(session_id) {
@@ -3131,6 +3233,9 @@ fn apply_frame_with_state(
             let room_media_policy_accepted = accepted_capabilities
                 .iter()
                 .any(|capability| capability == ROOM_MEDIA_POLICY_CAPABILITY);
+            let channel_attachment_accepted = accepted_capabilities
+                .iter()
+                .any(|capability| capability == CHANNEL_ATTACHMENT_CAPABILITY);
             if let (Some(session_id), Some(state)) = (preferred_session_id, state.as_deref_mut()) {
                 state.pin_sessions.remove(&session_id);
                 state
@@ -3227,6 +3332,11 @@ fn apply_frame_with_state(
                     state.room_media_policy_sessions.insert(session_id);
                 } else {
                     state.room_media_policy_sessions.remove(&session_id);
+                }
+                if channel_attachment_accepted {
+                    state.channel_attachment_sessions.insert(session_id);
+                } else {
+                    state.channel_attachment_sessions.remove(&session_id);
                 }
             }
             let room_catalog_shape = preferred_session_id
@@ -4630,6 +4740,7 @@ fn apply_upload_accept(
         });
         return;
     };
+    let upload_path = state.pending_upload_paths.remove(&(session_id, frame.seq));
     if upload.session_id != session_id {
         state
             .pending_uploads
@@ -4640,11 +4751,40 @@ fn apply_upload_accept(
         });
         return;
     }
-    let byte_len = upload.bytes.len() as u64;
-    if let Err(error) = transport.send_resource(&resource_id, upload.bytes) {
+    let channel_negotiated = state.channel_attachment_sessions.contains(&session_id);
+    let source = match upload_path {
+        Some((path, expected_bytes)) => OutgoingAttachmentSource::File {
+            path,
+            expected_bytes,
+        },
+        None => OutgoingAttachmentSource::Bytes(upload.bytes),
+    };
+    let byte_len = match &source {
+        OutgoingAttachmentSource::Bytes(bytes) => bytes.len() as u64,
+        OutgoingAttachmentSource::File { expected_bytes, .. } => *expected_bytes,
+    };
+    let send_result = if channel_negotiated {
+        transport.send_channel_attachment(&resource_id, source)
+    } else {
+        match source {
+            OutgoingAttachmentSource::Bytes(bytes) => transport.send_resource(&resource_id, bytes),
+            OutgoingAttachmentSource::File {
+                path,
+                expected_bytes,
+            } => std::fs::read(path)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| {
+                    if bytes.len() as u64 != expected_bytes {
+                        anyhow::bail!("upload changed after acceptance")
+                    }
+                    transport.send_resource(&resource_id, bytes)
+                }),
+        }
+    };
+    if let Err(error) = send_result {
         events.push(ChatClientEvent::Error {
             session_id: Some(session_id),
-            message: format!("OMENchat upload resource send failed: {error}"),
+            message: format!("OMENchat upload dispatch failed before transport ownership: {error}"),
         });
         return;
     }
@@ -4667,6 +4807,11 @@ fn apply_upload_accept(
         resource_id,
         filename: upload.filename,
         bytes: byte_len,
+        primitive: if channel_negotiated {
+            super::client::UploadTransportPrimitive::Channel
+        } else {
+            super::client::UploadTransportPrimitive::Resource
+        },
     });
 }
 
@@ -4690,6 +4835,7 @@ fn apply_upload_reject(
             .is_some_and(|upload| upload.session_id == session_id)
         {
             state.pending_uploads.remove(&(session_id, frame.seq));
+            state.pending_upload_paths.remove(&(session_id, frame.seq));
         }
     }
     let values = body_values(&frame.body);
@@ -6734,6 +6880,10 @@ mod tests {
             .requested_capabilities
             .iter()
             .any(|capability| capability == crate::chat::protocol::ROOM_PINS_CAPABILITY));
+        assert!(negotiation
+            .requested_capabilities
+            .iter()
+            .any(|capability| capability == crate::chat::protocol::CHANNEL_ATTACHMENT_CAPABILITY));
         assert_eq!(
             negotiation.requested_capabilities.iter().any(
                 |capability| capability == crate::chat::protocol::ANNOUNCEMENT_ROOMS_CAPABILITY
@@ -9896,6 +10046,61 @@ mod tests {
         assert_eq!(
             state.pending_upload_metrics(),
             LivePendingUploadMetrics::default()
+        );
+    }
+
+    #[test]
+    fn negotiated_upload_uses_channel_without_resource_fallback() {
+        let mut client = ChatClient::new();
+        let mut state = LiveChatClientState::default();
+        let mut transport = CapturedChatTransport::default();
+        let session_id = client.reserve_session_id();
+        client.push_session(ChatSessionView {
+            session_id,
+            server: ChatServerSummary {
+                server_id: "abcd".into(),
+                destination: "abcd".into(),
+                display_name: "Test Chat".into(),
+            },
+            active_room: room_summary("abcd", 1, "lobby"),
+            rooms: vec![room_summary("abcd", 1, "lobby")],
+            users: Vec::new(),
+            events: Vec::new(),
+            status: "joined".into(),
+        });
+        state.channel_attachment_sessions.insert(session_id);
+        assert!(handle_live_request(
+            &mut client,
+            &mut state,
+            &mut transport,
+            ChatClientRequest::SendUpload {
+                session_id,
+                room: "lobby".into(),
+                filename: "channel.bin".into(),
+                content_type: None,
+                bytes: b"channel".to_vec(),
+            },
+        )
+        .is_empty());
+        let offer = decode_frame(&transport.sent_frames[0]).expect("offer");
+        transport
+            .push_incoming_frame(&Frame::new(
+                ChatOp::UploadAccept,
+                offer.seq,
+                Some(1),
+                FrameBody::Fields(vec![FrameValue::String("upload:1:7:2".into())]),
+            ))
+            .expect("accept");
+        let events =
+            drain_live_events_with_state(&mut client, &mut state, &mut transport, Some(session_id));
+        assert!(matches!(
+            events.as_slice(),
+            [ChatClientEvent::UploadAccepted { .. }]
+        ));
+        assert!(transport.sent_resources.is_empty());
+        assert_eq!(
+            transport.sent_channel_attachments.get("upload:1:7:2"),
+            Some(&OutgoingAttachmentSource::Bytes(b"channel".to_vec()))
         );
     }
 

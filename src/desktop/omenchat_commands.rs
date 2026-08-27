@@ -202,45 +202,12 @@ impl DesktopApp {
             self.set_omenchat_session_status(session_id, reason);
             return OmenChatDraftCommandResult::HandledKeep;
         }
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) if !bytes.is_empty() => bytes,
-            Ok(_) => {
-                self.set_omenchat_session_status(session_id, "upload file is empty".into());
-                return OmenChatDraftCommandResult::HandledKeep;
-            }
-            Err(error) => {
-                self.set_omenchat_session_status(
-                    session_id,
-                    format!("upload read failed: {error}"),
-                );
-                return OmenChatDraftCommandResult::HandledKeep;
-            }
-        };
-        let upload_byte_len = bytes.len() as u64;
-        if upload_byte_len > local_resource_max {
-            self.set_omenchat_session_status(
-                session_id,
-                format!(
-                    "upload blocked: file exceeds the {local_resource_max} byte OMENchat Resource limit"
-                ),
-            );
-            return OmenChatDraftCommandResult::HandledKeep;
-        }
-        if let Some(reason) = omenchat_upload_policy_rejection(
-            upload_byte_len,
-            self.omenchat_session_upload_quota(session_id),
-            upload_max_file_bytes,
-            room_policy_limit,
-        ) {
-            self.set_omenchat_session_status(session_id, reason);
-            return OmenChatDraftCommandResult::HandledKeep;
-        }
         let content_type = omenchat_upload_content_type(&filename);
         let pending_key = (session_id, filename.clone(), upload_byte_len);
         self.omenchat
             .omenchat_pending_upload_sources
             .insert(pending_key.clone(), path.to_path_buf());
-        let events = self.handle_omenchat_request(ChatClientRequest::SendUpload {
+        let events = self.handle_omenchat_request(ChatClientRequest::SendUploadPath {
             session_id,
             room: self
                 .omenchat
@@ -250,7 +217,8 @@ impl DesktopApp {
                 .unwrap_or_else(|| "lobby".into()),
             filename: filename.clone(),
             content_type,
-            bytes,
+            path: path.to_path_buf(),
+            bytes: upload_byte_len,
         });
         for event in &events {
             if let ChatClientEvent::UploadAccepted {
@@ -258,6 +226,7 @@ impl DesktopApp {
                 resource_id,
                 filename: accepted_filename,
                 bytes: accepted_bytes,
+                ..
             } = event
             {
                 if *accepted_session_id == session_id

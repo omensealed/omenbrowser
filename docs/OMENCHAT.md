@@ -145,11 +145,17 @@ per-user quota is 50 MiB. Server and room policy may impose a smaller limit.
 Client, server, transport, parser, queue, and storage bounds all remain
 authoritative.
 
-Direct/local Reticulum Resource attachments are supported by the maintained
-smoke matrix. Routed multi-hop retransmission is not fully qualified on the
-official Reticulum 0.10.0 train. A terminal route failure does not trigger an
-automatic retry, alternate primitive, or application-level fragmentation.
-Retry manually after a route or condition change.
+Current peers explicitly negotiate an OMENchat-specific Channel attachment
+path. It streams MDU-derived bounded chunks from disk, applies Channel
+backpressure, validates a final digest, and publishes through private staged
+files and the existing atomic database commit. A non-negotiating peer retains
+the byte-exact Resource path. There is no primitive fallback, second dispatch,
+or automatic retry after Channel dispatch.
+
+Generic routed multi-hop Resource retransmission remains unqualified on the
+official Reticulum 0.10.0 train. The OMEN-specific Channel path does not repair
+or promote that capability. Retry manually only after reviewing an uncertain
+outcome and route conditions.
 
 The server commits an upload only after the Resource and durable storage steps
 complete. Existing oversized stored content is not silently deleted or
@@ -246,6 +252,7 @@ bash scripts/smoke/03_omenchat_two_client.sh
 bash scripts/smoke/04_omenchat_resource_transfer.sh
 bash scripts/run-omenchat-continuous-reconnect.sh
 bash scripts/run-omenchat-current-upload.sh
+bash scripts/run-omenchat-current-upload.sh --routed
 ```
 
 See [Testing](TESTING.md) for the full Cargo, interoperability, package, and

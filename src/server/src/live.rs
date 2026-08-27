@@ -44,6 +44,10 @@ pub enum OmenchatLinkEvent {
         context: u8,
         data: Vec<u8>,
     },
+    ChannelAttachmentData {
+        link_id: LinkId,
+        data: Vec<u8>,
+    },
     ResourceReceived {
         link_id: LinkId,
         resource_hash: [u8; 32],
@@ -85,6 +89,10 @@ mod link_soak_tests;
 #[cfg(test)]
 #[path = "live_retry_safety_tests.rs"]
 mod retry_safety_tests;
+
+#[cfg(test)]
+#[path = "live_channel_attachment_tests.rs"]
+mod channel_attachment_tests;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LiveServerStats {
@@ -175,6 +183,7 @@ struct FrameDispatchOutcome {
     announcement_rooms_accepted: bool,
     slow_mode_accepted: bool,
     room_media_policy_accepted: bool,
+    channel_attachment_accepted: bool,
     part_succeeded: bool,
     moderation_disconnect_succeeded: bool,
 }
@@ -469,6 +478,7 @@ pub struct OmenchatLiveServer<T> {
     announcement_room_links: BTreeMap<LinkId, Vec<u8>>,
     slow_mode_links: BTreeMap<LinkId, Vec<u8>>,
     room_media_policy_links: BTreeMap<LinkId, Vec<u8>>,
+    channel_attachment_links: BTreeMap<LinkId, Vec<u8>>,
     nickname_colour_links: BTreeMap<LinkId, Vec<u8>>,
     recent_closed_links: VecDeque<ClosedLinkSummary>,
     replay_cache: LinkReplayCache,
@@ -492,6 +502,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             announcement_room_links: BTreeMap::new(),
             slow_mode_links: BTreeMap::new(),
             room_media_policy_links: BTreeMap::new(),
+            channel_attachment_links: BTreeMap::new(),
             nickname_colour_links: BTreeMap::new(),
             recent_closed_links: VecDeque::new(),
             replay_cache: LinkReplayCache::default(),
@@ -541,6 +552,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     self.announcement_room_links.remove(&link_id);
                     self.slow_mode_links.remove(&link_id);
                     self.room_media_policy_links.remove(&link_id);
+                    self.channel_attachment_links.remove(&link_id);
                     self.nickname_colour_links.remove(&link_id);
                 }
                 self.identified_links.insert(link_id);
@@ -675,6 +687,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                             self.room_media_policy_links
                                 .insert(link_id, candidate_peer.identity_hash.clone());
                         }
+                        if dispatch.channel_attachment_accepted {
+                            self.channel_attachment_links
+                                .insert(link_id, candidate_peer.identity_hash.clone());
+                        }
                         if dispatch.nickname_colours_accepted {
                             self.nickname_colour_links
                                 .insert(link_id, candidate_peer.identity_hash.clone());
@@ -720,6 +736,55 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                         .resource_byte_count()
                         .saturating_sub(resource_bytes_before),
                 );
+                Ok(())
+            }
+            OmenchatLinkEvent::ChannelAttachmentData { link_id, data } => {
+                let Some(peer) = self.peers.get(&link_id).cloned() else {
+                    self.stats.unknown_link_packets =
+                        self.stats.unknown_link_packets.saturating_add(1);
+                    return Ok(());
+                };
+                if !self
+                    .channel_attachment_links
+                    .get(&link_id)
+                    .is_some_and(|identity| identity == &peer.identity_hash)
+                {
+                    self.stats.ignored_packets = self.stats.ignored_packets.saturating_add(1);
+                    return Ok(());
+                }
+                let frame =
+                    crate::protocol::ChannelAttachmentFrame::decode(&data).map_err(|error| {
+                        crate::error::ServerError::Message(format!(
+                            "invalid Channel attachment frame: {error}"
+                        ))
+                    })?;
+                let room_media_policy_negotiated = self
+                    .room_media_policy_links
+                    .get(&link_id)
+                    .is_some_and(|identity| identity == &peer.identity_hash);
+                let responses = self.engine.handle_channel_upload_frame(
+                    link_id,
+                    &peer,
+                    frame,
+                    room_media_policy_negotiated,
+                )?;
+                let frames_before = self.transport.frame_count();
+                let bytes_before = self.transport.byte_count();
+                for response in &responses {
+                    self.stats.count_outbound_op(response);
+                    self.send_response_frame(link_id, response)?;
+                    self.broadcast_room_event(link_id, response)?;
+                    release_response_resource(&self.engine, response)?;
+                }
+                self.stats.frames_out = self
+                    .stats
+                    .frames_out
+                    .saturating_add(self.transport.frame_count().saturating_sub(frames_before));
+                self.stats.bytes_in = self.stats.bytes_in.saturating_add(data.len() as u64);
+                self.stats.bytes_out = self
+                    .stats
+                    .bytes_out
+                    .saturating_add(self.transport.byte_count().saturating_sub(bytes_before));
                 Ok(())
             }
             OmenchatLinkEvent::ResourceReceived {
@@ -856,11 +921,11 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                     .get(&link_id)
                     .map(|peer| peer.identity_hash.clone());
                 self.record_closed_link(link_id, reason);
-                if let Some(identity_hash) = identity_hash {
-                    self.discard_pending_uploads_for_identity(&identity_hash);
-                }
                 if self.peers.remove(&link_id).is_some() {
                     self.stats.links_closed = self.stats.links_closed.saturating_add(1);
+                }
+                if let Some(identity_hash) = identity_hash {
+                    self.discard_pending_uploads_without_active_peer(&identity_hash);
                 }
                 self.replay_cache.remove_link(link_id);
                 self.sync_replay_cache_stats();
@@ -875,7 +940,9 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 self.announcement_room_links.remove(&link_id);
                 self.slow_mode_links.remove(&link_id);
                 self.room_media_policy_links.remove(&link_id);
+                self.channel_attachment_links.remove(&link_id);
                 self.nickname_colour_links.remove(&link_id);
+                let _ = self.engine.discard_channel_uploads_for_link(link_id);
                 if let Some(room_id) = room_id {
                     self.broadcast_userlist_for_room(room_id)?;
                 }
@@ -948,6 +1015,10 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             session_open_requests_capability(&frame, ROOM_SLOW_MODE_CAPABILITY);
         let room_media_policy_requested =
             session_open_requests_capability(&frame, ROOM_MEDIA_POLICY_CAPABILITY);
+        let channel_attachment_requested = session_open_requests_capability(
+            &frame,
+            crate::protocol::CHANNEL_ATTACHMENT_CAPABILITY,
+        );
         let replay_candidate = is_replay_guarded_request(&frame);
         let request_fingerprint = if replay_candidate {
             Some(encode_frame(&frame).map_err(|error| {
@@ -1116,6 +1187,11 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 && responses_accept_capability(&responses, ROOM_SLOW_MODE_CAPABILITY),
             room_media_policy_accepted: room_media_policy_requested
                 && responses_accept_capability(&responses, ROOM_MEDIA_POLICY_CAPABILITY),
+            channel_attachment_accepted: channel_attachment_requested
+                && responses_accept_capability(
+                    &responses,
+                    crate::protocol::CHANNEL_ATTACHMENT_CAPABILITY,
+                ),
             part_succeeded: request_op == ChatOp::PartRoom
                 && responses.iter().any(is_successful_part_response),
             moderation_disconnect_succeeded: request_op == ChatOp::Command
@@ -1831,14 +1907,7 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
     }
 
     fn retire_duplicate_peer_link(&mut self, link_id: LinkId) {
-        let identity_hash = self
-            .peers
-            .get(&link_id)
-            .map(|peer| peer.identity_hash.clone());
         self.record_closed_link(link_id, Some("duplicate identity link replaced".into()));
-        if let Some(identity_hash) = identity_hash {
-            self.discard_pending_uploads_for_identity(&identity_hash);
-        }
         if let Err(error) = self.transport.close_link(link_id) {
             self.stats.protocol_errors = self.stats.protocol_errors.saturating_add(1);
             self.stats.last_error = Some(error.to_string());
@@ -1867,15 +1936,15 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
             .get(&link_id)
             .map(|peer| peer.identity_hash.clone());
         self.record_closed_link(link_id, Some(reason.into()));
-        if let Some(identity_hash) = identity_hash {
-            self.discard_pending_uploads_for_identity(&identity_hash);
-        }
         if let Err(error) = self.transport.close_link(link_id) {
             self.stats.protocol_errors = self.stats.protocol_errors.saturating_add(1);
             self.stats.last_error = Some(error.to_string());
         }
         if self.peers.remove(&link_id).is_some() {
             self.stats.links_closed = self.stats.links_closed.saturating_add(1);
+        }
+        if let Some(identity_hash) = identity_hash {
+            self.discard_pending_uploads_without_active_peer(&identity_hash);
         }
         self.replay_cache.remove_link(link_id);
         self.link_rooms.remove(&link_id);
@@ -1904,6 +1973,17 @@ impl<T: OmenchatTransport> OmenchatLiveServer<T> {
                 0
             }
         }
+    }
+
+    fn discard_pending_uploads_without_active_peer(&mut self, identity_hash: &[u8]) -> usize {
+        if self
+            .peers
+            .values()
+            .any(|peer| peer.identity_hash.as_slice() == identity_hash)
+        {
+            return 0;
+        }
+        self.discard_pending_uploads_for_identity(identity_hash)
     }
 
     fn active_peers_for_room(

@@ -170,6 +170,7 @@ bash scripts/test-tui-real-pty.sh
 bash scripts/test-omenchatd-crash-recovery.sh
 bash scripts/run-omenchat-continuous-reconnect.sh
 bash scripts/run-omenchat-current-upload.sh
+bash scripts/run-omenchat-current-upload.sh --routed
 bash scripts/run-nomadnet-current-page.sh
 ```
 

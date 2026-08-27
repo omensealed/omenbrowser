@@ -127,6 +127,7 @@ async fn production_queues_bound_slow_resource_consumers_and_keep_control_respon
                         control_acks.fetch_add(1, Ordering::Relaxed);
                     }
                     OmenchatLinkEvent::LinkData { .. }
+                    | OmenchatLinkEvent::ChannelAttachmentData { .. }
                     | OmenchatLinkEvent::ResourceReceived { .. } => {
                         consumed.fetch_add(1, Ordering::Relaxed);
                         tokio::time::sleep(CONSUMER_INTERVAL).await;

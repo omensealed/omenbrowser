@@ -15,7 +15,10 @@ use crate::chat::{ChatClientRequest, ChatSessionId, ChatSessionView};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
 use crate::app::current_epoch_ms;
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
-use crate::chat::rns::{resource_id_from_metadata, ChatLinkTransport};
+use crate::chat::rns::{
+    resource_id_from_metadata, ChatLinkTransport, OutgoingAttachment, OutgoingAttachmentPrimitive,
+    OutgoingAttachmentSource,
+};
 #[cfg(feature = "chat-client")]
 use crate::chat::store::{ChatStore, SqliteChatStore};
 #[cfg(any(feature = "chat-client-rns", feature = "chat-client-rns-clean"))]
@@ -35,6 +38,7 @@ pub(in crate::desktop) fn request_session_id(request: &ChatClientRequest) -> Opt
         | ChatClientRequest::SendAction { session_id, .. }
         | ChatClientRequest::SendNotice { session_id, .. }
         | ChatClientRequest::SendUpload { session_id, .. }
+        | ChatClientRequest::SendUploadPath { session_id, .. }
         | ChatClientRequest::RequestUpload { session_id, .. }
         | ChatClientRequest::RefreshRooms { session_id }
         | ChatClientRequest::SetTopic { session_id, .. }
@@ -127,7 +131,7 @@ pub(in crate::desktop) struct DesktopOmenChatTransport {
     pub(in crate::desktop) rejected_outgoing_resources: u64,
     pub(in crate::desktop) outgoing_frames: Vec<Vec<u8>>,
     pub(in crate::desktop) outgoing_frame_bytes: usize,
-    pub(in crate::desktop) outgoing_resources: Vec<(String, Vec<u8>)>,
+    pub(in crate::desktop) outgoing_resources: Vec<OutgoingAttachment>,
     pub(in crate::desktop) outgoing_resource_bytes: usize,
     pub(in crate::desktop) last_rx_epoch_ms: u64,
     pub(in crate::desktop) last_tx_epoch_ms: u64,
@@ -292,7 +296,7 @@ impl DesktopOmenChatTransport {
         frames
     }
 
-    pub(in crate::desktop) fn take_outgoing_resources(&mut self) -> Vec<(String, Vec<u8>)> {
+    pub(in crate::desktop) fn take_outgoing_resources(&mut self) -> Vec<OutgoingAttachment> {
         let resources = std::mem::take(&mut self.outgoing_resources);
         self.outgoing_resource_bytes = 0;
         if !resources.is_empty() {
@@ -452,8 +456,45 @@ impl ChatLinkTransport for DesktopOmenChatTransport {
         }
         self.bytes_out = self.bytes_out.saturating_add(payload.len() as u64);
         self.outgoing_resource_bytes = next_bytes;
-        self.outgoing_resources
-            .push((resource_id.to_owned(), payload));
+        self.outgoing_resources.push(OutgoingAttachment {
+            resource_id: resource_id.to_owned(),
+            source: OutgoingAttachmentSource::Bytes(payload),
+            primitive: OutgoingAttachmentPrimitive::Resource,
+        });
+        Ok(())
+    }
+
+    fn send_channel_attachment(
+        &mut self,
+        resource_id: &str,
+        source: OutgoingAttachmentSource,
+    ) -> anyhow::Result<()> {
+        let payload_len = match &source {
+            OutgoingAttachmentSource::Bytes(bytes) => bytes.len(),
+            OutgoingAttachmentSource::File { expected_bytes, .. } => {
+                usize::try_from(*expected_bytes)
+                    .map_err(|_| anyhow::anyhow!("OMENchat Channel attachment length overflow"))?
+            }
+        };
+        let next_bytes = self
+            .outgoing_resource_bytes
+            .checked_add(payload_len)
+            .ok_or_else(|| anyhow::anyhow!("OMENchat outgoing Channel byte overflow"))?;
+        if resource_id.len() > super::OMENCHAT_TRANSPORT_RESOURCE_ID_MAX_BYTES
+            || payload_len > super::OMENCHAT_RESOURCE_MAX_BYTES
+            || self.outgoing_resources.len() >= super::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_ITEMS
+            || next_bytes > super::OMENCHAT_TRANSPORT_RESOURCE_QUEUE_MAX_BYTES
+        {
+            self.rejected_outgoing_resources = self.rejected_outgoing_resources.saturating_add(1);
+            anyhow::bail!("OMENchat outgoing Channel queue budget exceeded");
+        }
+        self.bytes_out = self.bytes_out.saturating_add(payload_len as u64);
+        self.outgoing_resource_bytes = next_bytes;
+        self.outgoing_resources.push(OutgoingAttachment {
+            resource_id: resource_id.to_owned(),
+            source,
+            primitive: OutgoingAttachmentPrimitive::Channel,
+        });
         Ok(())
     }
 

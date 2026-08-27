@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 
 use super::codec::{decode_frame, encode_frame};
 use super::model::CHAT_RESOURCE_ID_MAX_BYTES;
@@ -23,6 +24,15 @@ pub trait ChatLinkTransport {
             "OMENchat transport does not support outgoing resources"
         ))
     }
+    fn send_channel_attachment(
+        &mut self,
+        _resource_id: &str,
+        _source: OutgoingAttachmentSource,
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "OMENchat transport does not support Channel attachments"
+        ))
+    }
     fn defer_resource_offer(
         &mut self,
         _resource_id: &str,
@@ -32,12 +42,32 @@ pub trait ChatLinkTransport {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutgoingAttachmentSource {
+    Bytes(Vec<u8>),
+    File { path: PathBuf, expected_bytes: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutgoingAttachmentPrimitive {
+    Resource,
+    Channel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutgoingAttachment {
+    pub resource_id: String,
+    pub source: OutgoingAttachmentSource,
+    pub primitive: OutgoingAttachmentPrimitive,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapturedChatTransport {
     pub sent_frames: Vec<Vec<u8>>,
     pub incoming_frames: VecDeque<Vec<u8>>,
     pub resources: BTreeMap<String, Vec<u8>>,
     pub sent_resources: BTreeMap<String, Vec<u8>>,
+    pub sent_channel_attachments: BTreeMap<String, OutgoingAttachmentSource>,
     pub pending_resource_offers: BTreeMap<String, VecDeque<Vec<u8>>>,
 }
 
@@ -73,6 +103,16 @@ impl ChatLinkTransport for CapturedChatTransport {
 
     fn send_resource(&mut self, resource_id: &str, payload: Vec<u8>) -> anyhow::Result<()> {
         self.sent_resources.insert(resource_id.to_owned(), payload);
+        Ok(())
+    }
+
+    fn send_channel_attachment(
+        &mut self,
+        resource_id: &str,
+        source: OutgoingAttachmentSource,
+    ) -> anyhow::Result<()> {
+        self.sent_channel_attachments
+            .insert(resource_id.to_owned(), source);
         Ok(())
     }
 

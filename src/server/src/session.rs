@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -42,6 +44,7 @@ use crate::store::{
     ServerRoom, ServerRoomEvent, ServerRoomEventKind, ServerUser,
 };
 use crate::upload::{
+    commit_staged_upload_with_policy_indexed_and_commit, create_channel_upload_stage,
     plan_upload_with_index, store_upload_with_policy_indexed_and_commit, UploadPolicy,
     UploadQuotaDecision,
 };
@@ -64,6 +67,8 @@ const PENDING_RESOURCE_MAX_ENTRY_BYTES: usize = 4 * 1024 * 1024;
 const PENDING_UPLOAD_MAX_ITEMS: usize = 256;
 const PENDING_UPLOAD_MAX_ITEMS_PER_IDENTITY: usize = 8;
 const PENDING_UPLOAD_TTL_SECONDS: u64 = 6 * 60 * 60;
+const CHANNEL_UPLOAD_MAX_ITEMS: usize = 16;
+const CHANNEL_UPLOAD_MAX_ITEMS_PER_LINK: usize = 4;
 const UPLOAD_FILENAME_MAX_BYTES: usize = 255;
 const UPLOAD_CONTENT_TYPE_MAX_BYTES: usize = 255;
 const REPLY_MENTIONS_SERVER_ENABLED: bool = true;
@@ -215,6 +220,7 @@ pub struct SessionEngine {
     server_motd: Option<String>,
     pending_resources: Arc<Mutex<PendingResourceStore>>,
     pending_uploads: Arc<Mutex<PendingUploadStore>>,
+    channel_uploads: Arc<Mutex<ChannelUploadStore>>,
     rate_buckets: RateBuckets,
     slow_mode: SlowModeOwner,
     slow_mode_enforcement_enabled: bool,
@@ -223,6 +229,37 @@ pub struct SessionEngine {
     announcement_rooms_enabled: bool,
     room_media_policy_capability_enabled: bool,
     room_media_policy_enforcement_enabled: bool,
+}
+
+struct ChannelUploadStage {
+    identity_hash: Vec<u8>,
+    path: PathBuf,
+    file: File,
+    expected_bytes: u64,
+    written_bytes: u64,
+    digest: sha2::Sha256,
+}
+
+#[derive(Default)]
+struct ChannelUploadStore {
+    entries: BTreeMap<([u8; 16], String), ChannelUploadStage>,
+}
+
+impl ChannelUploadStore {
+    fn remove_link(&mut self, link_id: [u8; 16]) -> usize {
+        let keys = self
+            .entries
+            .keys()
+            .filter(|(candidate, _)| *candidate == link_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in &keys {
+            if let Some(stage) = self.entries.remove(key) {
+                let _ = std::fs::remove_file(stage.path);
+            }
+        }
+        keys.len()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -324,6 +361,19 @@ pub(crate) enum PendingUploadFailureMatch {
 }
 
 impl PendingUploadStore {
+    fn get_for_identity(
+        &mut self,
+        resource_id: &str,
+        identity_hash: &[u8],
+        now: u64,
+    ) -> Option<PendingUpload> {
+        self.purge_expired(now);
+        self.entries
+            .get(resource_id)
+            .filter(|upload| upload.identity_hash == identity_hash)
+            .cloned()
+    }
+
     fn insert(&mut self, resource_id: String, upload: PendingUpload, now: u64) -> bool {
         self.purge_expired(now);
         if let Some(existing) = self.entries.get(&resource_id) {
@@ -448,6 +498,7 @@ impl SessionEngine {
             server_motd: Some("Welcome to OMENchat".into()),
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
+            channel_uploads: Arc::new(Mutex::new(ChannelUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
             slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode"),
@@ -466,6 +517,7 @@ impl SessionEngine {
             server_motd: Some("Welcome to OMENchat".into()),
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
+            channel_uploads: Arc::new(Mutex::new(ChannelUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
             slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode"),
@@ -491,6 +543,7 @@ impl SessionEngine {
             }),
             pending_resources: Arc::new(Mutex::new(PendingResourceStore::default())),
             pending_uploads: Arc::new(Mutex::new(PendingUploadStore::default())),
+            channel_uploads: Arc::new(Mutex::new(ChannelUploadStore::default())),
             rate_buckets: Arc::new(Mutex::new(BTreeMap::new())),
             slow_mode: SlowModeOwner::default(),
             slow_mode_enforcement_enabled: cfg!(feature = "omenchat-slow-mode"),
@@ -1191,6 +1244,12 @@ impl SessionEngine {
                     .iter()
                     .any(|capability| capability == ROOM_MEDIA_POLICY_CAPABILITY)
             });
+        let channel_attachment_requested = negotiation.as_ref().is_some_and(|negotiation| {
+            negotiation
+                .requested_capabilities
+                .iter()
+                .any(|capability| capability == crate::protocol::CHANNEL_ATTACHMENT_CAPABILITY)
+        });
         let room_catalog_shape = if room_media_policy_requested {
             RoomCatalogShape::MediaPolicy
         } else if slow_mode_requested {
@@ -1229,6 +1288,7 @@ impl SessionEngine {
             || announcement_rooms_requested
             || slow_mode_requested
             || room_media_policy_requested
+            || channel_attachment_requested
         {
             let mut accepted_capabilities = Vec::new();
             if moderation_audit_requested {
@@ -1242,6 +1302,9 @@ impl SessionEngine {
             }
             if room_media_policy_requested {
                 accepted_capabilities.push(ROOM_MEDIA_POLICY_CAPABILITY.into());
+            }
+            if channel_attachment_requested {
+                accepted_capabilities.push(crate::protocol::CHANNEL_ATTACHMENT_CAPABILITY.into());
             }
             if durable_requested {
                 accepted_capabilities.push(DURABLE_MUTATION_CAPABILITY.into());
@@ -4817,6 +4880,358 @@ impl SessionEngine {
                 )])
             }
         }
+    }
+
+    pub fn handle_channel_upload_frame(
+        &self,
+        link_id: [u8; 16],
+        peer: &ServerPeer,
+        frame: crate::protocol::ChannelAttachmentFrame,
+        room_media_policy_negotiated: bool,
+    ) -> ServerResult<Vec<Frame>> {
+        use crate::protocol::ChannelAttachmentFrame;
+        match frame {
+            ChannelAttachmentFrame::Start {
+                resource_id,
+                total_bytes,
+            } => {
+                let pending = self
+                    .pending_uploads
+                    .lock()
+                    .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
+                    .get_for_identity(&resource_id, &peer.identity_hash, unix_seconds());
+                let Some(pending) = pending else {
+                    return Ok(vec![self.upload_reject_frame(
+                        0,
+                        None,
+                        "unknown or expired Channel upload",
+                        self.limits.upload_quota_bytes,
+                        total_bytes,
+                    )]);
+                };
+                if pending.incoming_bytes != total_bytes
+                    || total_bytes == 0
+                    || total_bytes > self.limits.upload_max_file_bytes
+                {
+                    return Ok(vec![self.upload_reject_frame(
+                        0,
+                        Some(pending.room_id),
+                        "Channel upload size mismatch",
+                        self.limits.upload_quota_bytes,
+                        total_bytes,
+                    )]);
+                }
+                let Some(cache_root) = self.limits.upload_cache_root.clone() else {
+                    return Ok(vec![self.upload_reject_frame(
+                        0,
+                        Some(pending.room_id),
+                        "upload cache is unavailable",
+                        self.limits.upload_quota_bytes,
+                        total_bytes,
+                    )]);
+                };
+                let mut stages = self
+                    .channel_uploads
+                    .lock()
+                    .map_err(|_| ServerError::Message("Channel upload lock poisoned".into()))?;
+                let key = (link_id, resource_id.clone());
+                if stages.entries.contains_key(&key) {
+                    return Ok(Vec::new());
+                }
+                let per_link = stages
+                    .entries
+                    .keys()
+                    .filter(|(candidate, _)| *candidate == link_id)
+                    .count();
+                if stages.entries.len() >= CHANNEL_UPLOAD_MAX_ITEMS
+                    || per_link >= CHANNEL_UPLOAD_MAX_ITEMS_PER_LINK
+                {
+                    return Ok(vec![self.upload_reject_frame(
+                        0,
+                        Some(pending.room_id),
+                        "too many active Channel uploads",
+                        self.limits.upload_quota_bytes,
+                        total_bytes,
+                    )]);
+                }
+                let policy = UploadPolicy {
+                    cache_root,
+                    quota_bytes: self.limits.upload_quota_bytes,
+                };
+                let (path, file) = create_channel_upload_stage(&policy, &peer.identity_hash)?;
+                stages.entries.insert(
+                    key,
+                    ChannelUploadStage {
+                        identity_hash: peer.identity_hash.clone(),
+                        path,
+                        file,
+                        expected_bytes: total_bytes,
+                        written_bytes: 0,
+                        digest: <sha2::Sha256 as sha2::Digest>::new(),
+                    },
+                );
+                Ok(Vec::new())
+            }
+            ChannelAttachmentFrame::Data {
+                resource_id,
+                offset,
+                bytes,
+            } => {
+                if bytes.is_empty() {
+                    return Err(ServerError::Message(
+                        "empty Channel upload data frame".into(),
+                    ));
+                }
+                let mut stages = self
+                    .channel_uploads
+                    .lock()
+                    .map_err(|_| ServerError::Message("Channel upload lock poisoned".into()))?;
+                let key = (link_id, resource_id);
+                let stage = stages.entries.get_mut(&key).ok_or_else(|| {
+                    ServerError::Message(
+                        "Channel upload data arrived without an accepted start".into(),
+                    )
+                })?;
+                if stage.identity_hash != peer.identity_hash
+                    || offset != stage.written_bytes
+                    || offset.saturating_add(bytes.len() as u64) > stage.expected_bytes
+                {
+                    if let Some(stage) = stages.entries.remove(&key) {
+                        let _ = std::fs::remove_file(stage.path);
+                    }
+                    return Err(ServerError::Message(
+                        "Channel upload ownership, offset, or length mismatch".into(),
+                    ));
+                }
+                stage.file.write_all(&bytes)?;
+                sha2::Digest::update(&mut stage.digest, &bytes);
+                stage.written_bytes += bytes.len() as u64;
+                Ok(Vec::new())
+            }
+            ChannelAttachmentFrame::Finish {
+                resource_id,
+                total_bytes,
+                digest,
+            } => {
+                let key = (link_id, resource_id.clone());
+                let mut stage = self
+                    .channel_uploads
+                    .lock()
+                    .map_err(|_| ServerError::Message("Channel upload lock poisoned".into()))?
+                    .entries
+                    .remove(&key)
+                    .ok_or_else(|| {
+                        ServerError::Message(
+                            "Channel upload finish arrived without an active stage".into(),
+                        )
+                    })?;
+                let actual_digest: [u8; 32] = sha2::Digest::finalize(stage.digest.clone()).into();
+                if stage.identity_hash != peer.identity_hash
+                    || stage.expected_bytes != total_bytes
+                    || stage.written_bytes != total_bytes
+                    || actual_digest != digest
+                {
+                    let _ = std::fs::remove_file(stage.path);
+                    return Ok(vec![self.upload_reject_frame(
+                        0,
+                        None,
+                        "Channel upload digest or length mismatch",
+                        self.limits.upload_quota_bytes,
+                        stage.written_bytes,
+                    )]);
+                }
+                stage.file.flush()?;
+                stage.file.sync_all()?;
+                drop(stage.file);
+                self.commit_channel_upload_stage(
+                    peer,
+                    &resource_id,
+                    stage.path,
+                    total_bytes,
+                    room_media_policy_negotiated,
+                )
+            }
+            ChannelAttachmentFrame::Cancel { resource_id } => {
+                if let Some(stage) = self
+                    .channel_uploads
+                    .lock()
+                    .map_err(|_| ServerError::Message("Channel upload lock poisoned".into()))?
+                    .entries
+                    .remove(&(link_id, resource_id))
+                {
+                    let _ = std::fs::remove_file(stage.path);
+                }
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    pub fn discard_channel_uploads_for_link(&self, link_id: [u8; 16]) -> ServerResult<usize> {
+        Ok(self
+            .channel_uploads
+            .lock()
+            .map_err(|_| ServerError::Message("Channel upload lock poisoned".into()))?
+            .remove_link(link_id))
+    }
+
+    fn commit_channel_upload_stage(
+        &self,
+        peer: &ServerPeer,
+        resource_id: &str,
+        staged_path: PathBuf,
+        incoming_bytes: u64,
+        room_media_policy_negotiated: bool,
+    ) -> ServerResult<Vec<Frame>> {
+        let upload = match self
+            .pending_uploads
+            .lock()
+            .map_err(|_| ServerError::Message("pending upload lock poisoned".into()))?
+            .take_for_identity(resource_id, &peer.identity_hash, unix_seconds())
+        {
+            PendingUploadTake::Found(upload) => upload,
+            PendingUploadTake::NotFound | PendingUploadTake::IdentityMismatch => {
+                let _ = std::fs::remove_file(staged_path);
+                return Ok(vec![self.upload_reject_frame(
+                    0,
+                    None,
+                    "unknown, expired, or mismatched Channel upload",
+                    self.limits.upload_quota_bytes,
+                    incoming_bytes,
+                )]);
+            }
+        };
+        let reject = |frame: Frame| {
+            let _ = std::fs::remove_file(&staged_path);
+            Ok(vec![frame])
+        };
+        if upload.incoming_bytes != incoming_bytes {
+            return reject(self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "Channel upload size mismatch",
+                self.limits.upload_quota_bytes,
+                incoming_bytes,
+            ));
+        }
+        let Some(user) = self.ensure_allowed_peer(peer, 0, Some(upload.room_id))? else {
+            return reject(self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "user is banned",
+                self.limits.upload_quota_bytes,
+                incoming_bytes,
+            ));
+        };
+        if user.status_bits & STATUS_MUTED != 0
+            || !self.store.room_has_member(upload.room_id, user.user_id)?
+        {
+            return reject(self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "upload publisher is no longer allowed in the room",
+                self.limits.upload_quota_bytes,
+                incoming_bytes,
+            ));
+        }
+        if let Some(error) = self.reject_room_content_policy(
+            0,
+            upload.room_id,
+            user.role_bits,
+            "publishing uploads",
+        )? {
+            return reject(error);
+        }
+        if let Some(rejection) = self.reject_room_upload_policy(
+            0,
+            upload.room_id,
+            incoming_bytes,
+            room_media_policy_negotiated,
+        )? {
+            return reject(rejection);
+        }
+        let Some(cache_root) = self.limits.upload_cache_root.clone() else {
+            return reject(self.upload_reject_frame(
+                0,
+                Some(upload.room_id),
+                "upload cache is unavailable",
+                self.limits.upload_quota_bytes,
+                incoming_bytes,
+            ));
+        };
+        let policy = UploadPolicy {
+            cache_root,
+            quota_bytes: self.limits.upload_quota_bytes,
+        };
+        let identity_dir =
+            crate::upload::upload_identity_dir_for_root(&policy.cache_root, &peer.identity_hash);
+        let stored = commit_staged_upload_with_policy_indexed_and_commit(
+            &policy,
+            &peer.identity_hash,
+            &upload.filename,
+            &staged_path,
+            incoming_bytes,
+            |bytes| {
+                let indexed = self.store.plan_upload_from_index(
+                    upload.user_id,
+                    &identity_dir,
+                    bytes,
+                    policy.quota_bytes,
+                )?;
+                Ok(plan_upload_with_index(
+                    &policy,
+                    &peer.identity_hash,
+                    bytes,
+                    indexed,
+                ))
+            },
+            |pending| {
+                self.store
+                    .record_upload_file(crate::store::RecordUploadFile {
+                        resource_id,
+                        room_id: upload.room_id,
+                        actor_user_id: upload.user_id,
+                        filename: &upload.filename,
+                        content_type: upload.content_type.as_deref(),
+                        byte_len: pending.bytes,
+                        path: &pending.path,
+                    })
+            },
+        )?;
+        if self
+            .store
+            .remove_evicted_upload_records(upload.user_id, resource_id, &stored.evicted)
+            .is_err()
+        {
+            self.store.invalidate_upload_ledger(upload.user_id);
+        }
+        let event = self.store.append_event(
+            upload.room_id,
+            Some(upload.user_id),
+            ServerRoomEventKind::Upload {
+                resource_id: resource_id.to_owned(),
+                filename: upload.filename.clone(),
+                bytes: stored.bytes,
+            },
+        )?;
+        Ok(vec![
+            Frame::new(
+                ChatOp::UploadComplete,
+                0,
+                Some(upload.room_id),
+                FrameBody::Fields(vec![
+                    FrameValue::String(resource_id.to_owned()),
+                    FrameValue::String(upload.filename),
+                    FrameValue::U64(stored.bytes),
+                    FrameValue::U64(stored.evicted.len() as u64),
+                ]),
+            ),
+            Frame::new(
+                ChatOp::RoomEvent,
+                0,
+                Some(upload.room_id),
+                FrameBody::Fields(vec![event_to_value(&event)?]),
+            ),
+        ])
     }
 
     pub fn handle_upload_resource(

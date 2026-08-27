@@ -15,7 +15,7 @@ explicit unavailable lanes.
 | standalone omenchatd | `0.10.0-5` |
 | Reticulum/LXMF Rust train | exact official crates.io `0.10.0` |
 | OMENchat wire protocol | version `1` |
-| omenchat-protocol Rust API | `0.2.0` |
+| omenchat-protocol Rust API | `0.3.0` |
 | omenchatd SQLite schema | `14` |
 
 The root application and `src/server` remain independent Cargo roots with
@@ -45,7 +45,8 @@ rejected before dispatch.
   bounded attachments;
 - OMENchat rooms, durable mutations, replies/mentions, reactions, message
   revisions, pins, announcement rooms, slow mode, room media policy,
-  moderation audit, and negotiated nickname colours;
+  moderation audit, negotiated nickname colours, and negotiated Channel
+  attachment uploads with legacy Resource downgrade;
 - independent `omenchatd` service, TUI, administrative commands, uploads, and
   quiet NomadNet portal;
 - GUI and TUI products with isolated identities/storage and mock/offline
@@ -60,6 +61,9 @@ in [OMENchat Protocol](OMENCHAT_PROTOCOL.md).
 - Routed multi-hop Resource retransmission is not fully qualified on upstream
   Reticulum 0.10.0. Direct/local attachment paths are distinct from routed
   qualification, and OMEN never automatically replays an uncertain transfer.
+- The OMENchat-specific Channel path passes direct and three-node routed
+  process gates, but its injected-loss/reordering process lane remains pending.
+  It does not change generic Resource support claims.
 - The independent maximum-UDP Resource sentinel remains visible: upstream's
   fixed transmit buffer is smaller than the maximum serialized wire packet.
 - Stock upstream TCP does not enforce Python-compatible IFAC wire transforms.

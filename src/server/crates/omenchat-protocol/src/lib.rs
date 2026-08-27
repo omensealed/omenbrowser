@@ -1,12 +1,13 @@
 //! Shared OMENchat protocol v1 wire types and compatibility fixtures.
 //!
-//! Crate API version `0.2.0` adds typed, explicitly negotiated nickname-colour
-//! forms. It does not change [`PROTOCOL_VERSION`], [`PROTOCOL_NAME`], or any
-//! legacy frame/user-list shape.
+//! Crate API version `0.3.0` adds the negotiated Channel attachment vocabulary.
+//! It does not change [`PROTOCOL_VERSION`], [`PROTOCOL_NAME`], or any legacy
+//! frame/user-list shape.
 //!
 //! This crate deliberately contains no transport, runtime, storage, GUI, TUI,
 //! or server policy.
 
+mod channel_attachment;
 mod durable;
 mod message_revisions;
 mod moderation_audit;
@@ -42,7 +43,7 @@ pub const PROTOCOL_NAME: &str = "omenchat-v0.1";
 /// Product-feature-gated room policy and moderation capabilities are appended
 /// separately. Keeping this list in the shared wire crate lets both workspaces
 /// detect capability drift without duplicating string literals.
-pub const BASE_DURABLE_SESSION_CAPABILITIES: [&str; 7] = [
+pub const BASE_DURABLE_SESSION_CAPABILITIES: [&str; 8] = [
     DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY,
     REPLY_MENTIONS_CAPABILITY,
@@ -50,12 +51,13 @@ pub const BASE_DURABLE_SESSION_CAPABILITIES: [&str; 7] = [
     MESSAGE_REVISIONS_CAPABILITY,
     ROOM_PINS_CAPABILITY,
     NICKNAME_COLOURS_CAPABILITY,
+    CHANNEL_ATTACHMENT_CAPABILITY,
 ];
 
 /// Complete capability vocabulary implemented by the current protocol-v1
 /// client/server pair. Negotiation remains explicit; this is not an
 /// advertisement and does not activate a capability by itself.
-pub const KNOWN_SESSION_CAPABILITIES: [&str; 11] = [
+pub const KNOWN_SESSION_CAPABILITIES: [&str; 12] = [
     DURABLE_MUTATION_CAPABILITY,
     DURABLE_NOTICE_ACK_CAPABILITY,
     REPLY_MENTIONS_CAPABILITY,
@@ -67,6 +69,7 @@ pub const KNOWN_SESSION_CAPABILITIES: [&str; 11] = [
     ROOM_MEDIA_POLICY_CAPABILITY,
     MODERATION_AUDIT_CAPABILITY,
     NICKNAME_COLOURS_CAPABILITY,
+    CHANNEL_ATTACHMENT_CAPABILITY,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -449,3 +452,4 @@ mod tests {
             .all(|capability| unique.contains(capability)));
     }
 }
+pub use channel_attachment::*;

@@ -202,6 +202,112 @@ where
     )
 }
 
+pub fn create_channel_upload_stage(
+    policy: &UploadPolicy,
+    identity_hash: &[u8],
+) -> ServerResult<(PathBuf, File)> {
+    let identity_dir = upload_identity_dir_for_root(&policy.cache_root, identity_hash);
+    ensure_safe_identity_dir(&policy.cache_root, &identity_dir)?;
+    for _ in 0..32 {
+        let sequence = UPLOAD_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = identity_dir.join(format!(".omen-channel-{sequence:016x}.part"));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ServerError::Message(
+        "could not allocate a unique Channel upload staging file".into(),
+    ))
+}
+
+pub fn commit_staged_upload_with_policy_indexed_and_commit<F, P>(
+    policy: &UploadPolicy,
+    identity_hash: &[u8],
+    filename_hint: &str,
+    staged_path: &Path,
+    incoming_bytes: u64,
+    planner: P,
+    commit: F,
+) -> ServerResult<StoredUpload>
+where
+    F: FnOnce(&StoredUpload) -> ServerResult<()>,
+    P: FnOnce(u64) -> ServerResult<UploadQuotaDecision>,
+{
+    let identity_lock = identity_upload_lock(identity_hash);
+    let _guard = identity_lock
+        .lock()
+        .map_err(|_| ServerError::Message("upload identity lock poisoned".into()))?;
+    let plan = match planner(incoming_bytes)? {
+        UploadQuotaDecision::Accepted(plan) => plan,
+        UploadQuotaDecision::Disabled => {
+            return Err(ServerError::Message(
+                "uploads are disabled by server policy".into(),
+            ));
+        }
+        UploadQuotaDecision::TooLarge {
+            quota_bytes,
+            incoming_bytes,
+        } => {
+            return Err(ServerError::Message(format!(
+                "upload is too large for quota: {incoming_bytes} > {quota_bytes}"
+            )));
+        }
+    };
+    ensure_safe_identity_dir(&policy.cache_root, &plan.identity_dir)?;
+    if staged_path.parent() != Some(plan.identity_dir.as_path())
+        || std::fs::symlink_metadata(staged_path)?
+            .file_type()
+            .is_symlink()
+        || std::fs::metadata(staged_path)?.len() != incoming_bytes
+    {
+        let _ = std::fs::remove_file(staged_path);
+        return Err(ServerError::Message(
+            "Channel upload staging file failed ownership or length validation".into(),
+        ));
+    }
+    let path = next_upload_path(&plan.identity_dir, filename_hint);
+    if let Err(error) = std::fs::rename(staged_path, &path) {
+        let _ = std::fs::remove_file(staged_path);
+        return Err(error.into());
+    }
+    if let Err(error) = RealUploadFileOps.sync_dir(&plan.identity_dir) {
+        let _ = std::fs::remove_file(&path);
+        let _ = RealUploadFileOps.sync_dir(&plan.identity_dir);
+        return Err(error);
+    }
+    let pending = StoredUpload {
+        path: path.clone(),
+        bytes: incoming_bytes,
+        evicted: plan.evict.clone(),
+    };
+    if let Err(error) = commit(&pending) {
+        let _ = std::fs::remove_file(&path);
+        let _ = RealUploadFileOps.sync_dir(&plan.identity_dir);
+        return Err(error);
+    }
+    let mut evicted = Vec::new();
+    for old_path in plan.evict {
+        if old_path != path && std::fs::remove_file(&old_path).is_ok() {
+            evicted.push(old_path);
+        }
+    }
+    let _ = RealUploadFileOps.sync_dir(&plan.identity_dir);
+    Ok(StoredUpload {
+        path,
+        bytes: incoming_bytes,
+        evicted,
+    })
+}
+
 fn store_upload_with_policy_and_ops<F, O>(
     policy: &UploadPolicy,
     identity_hash: &[u8],

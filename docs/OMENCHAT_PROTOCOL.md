@@ -4,7 +4,7 @@ This document is the public compatibility contract between the OMENbrowser_rs
 client plugin and the standalone `omenchatd` server.
 
 The v0.10.0-1 Reticulum/LXMF migration does not change wire protocol 1,
-`omenchat-protocol 0.2.0`, SQLite schema 14, destination derivation, identity
+`omenchat-protocol 0.3.0`, SQLite schema 14, destination derivation, identity
 handling, or upload bounds. Adjacent v0.9.9-2 clients and servers passed live
 messages, mutations, history, direct Resources, durable local upload behavior,
 restart, and reconnect in both applicable directions. Resource transport
@@ -56,7 +56,7 @@ must pass the same shared fixture bytes. The crate contains no transport,
 runtime, storage, GUI, TUI, or server policy and remains part of the relocatable
 standalone omenchatd source tree.
 
-The local crate's API SemVer is `0.2.0`. That crate version is independent of
+The local crate's API SemVer is `0.3.0`. That crate version is independent of
 the unchanged wire protocol version `1`; it identifies the addition of strict
 RGB24 and negotiated nickname-colour types for the two independent Cargo roots.
 
@@ -506,6 +506,19 @@ Uploaded media is server-hosted under the server home. Clients cache media under
 their identity-specific browser storage. Media display follows OMENbrowser_rs
 privacy policy: Reticulum/NomadNet media is treated differently from clearweb
 HTTP/HTTPS media.
+
+Current peers may accept `omenchat-channel-attachments-v1` on an individual
+Link. Start, ordered data, finish, and cancel records use the public
+`omenchat-protocol` 0.3.0 Channel frame API and the live Channel MDU. The frame
+stream is additive beneath wire protocol 1. Peers lacking the capability use
+the unchanged Resource path. Dispatch is single-shot: a Channel timeout or
+disconnect never causes Resource fallback, automatic retry, or replay.
+
+The receiver keys private staging by exact Link and resource ID, bounds global
+and per-Link stages, verifies offset, declared length, SHA-256 digest, policy,
+and quota, then uses the same atomic storage/database commit as Resource
+uploads. Channel transport completion is not durable application commit; only
+the authenticated upload acknowledgement establishes the latter.
 
 The server validates the advertised resource length against the received
 bounded resource before storage. Storage commit ordering is an implementation

@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 expected="${OMEN_RELEASE_VERSION:-0.10.0-5}"
-expected_protocol="${OMENCHAT_PROTOCOL_CRATE_VERSION:-0.2.0}"
+expected_protocol="${OMENCHAT_PROTOCOL_CRATE_VERSION:-0.3.0}"
 expected_schema="${OMENCHATD_SCHEMA_VERSION:-14}"
 
 manifest_version() {

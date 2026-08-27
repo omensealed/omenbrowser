@@ -1,9 +1,7 @@
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-#[cfg(feature = "native-lxmf")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
 use std::sync::atomic::AtomicBool;
 #[cfg(all(feature = "native-lxmf-sdk", not(feature = "native-rns-net")))]
@@ -3746,6 +3744,169 @@ fn sdk_rpc_event_capability_record(
             RuntimeCapabilitySource::Configured,
             "SDK/RPC event stream is configured but not currently connected",
         ),
+    }
+}
+
+impl NativeNetworkRuntime {
+    async fn send_clean_omenchat_channel_reader<R>(
+        &self,
+        link_id: [u8; 16],
+        resource_id: String,
+        total_bytes: u64,
+        mut reader: R,
+    ) -> AppResult<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let entry = self
+            .clean_omenchat_links
+            .lock()
+            .expect("native clean OMENchat link lock")
+            .get(&link_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::Runtime(format!(
+                    "OMENchat clean link {} is not active",
+                    hex_encode(&link_id)
+                ))
+            })?;
+        let channel = entry.transport.channel(entry.link_id);
+        let channel_mdu = channel.mdu().await.map_err(|error| {
+            AppError::Runtime(format!("OMENchat Channel MDU unavailable: {error:?}"))
+        })?;
+        let data_header = omenchat_protocol::ChannelAttachmentFrame::data_header_len(&resource_id)
+            .map_err(|error| AppError::Runtime(error.to_string()))?;
+        let chunk_len = channel_mdu.saturating_sub(data_header).min(16 * 1024);
+        if chunk_len == 0 {
+            return Err(AppError::Runtime(
+                "OMENchat Channel MDU cannot carry attachment data".into(),
+            ));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        channel.open().await.map_err(|error| {
+            AppError::Runtime(format!("OMENchat Channel open failed: {error:?}"))
+        })?;
+        let start = omenchat_protocol::ChannelAttachmentFrame::Start {
+            resource_id: resource_id.clone(),
+            total_bytes,
+        }
+        .encode(channel_mdu)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+        wait_omenchat_channel_ready(&channel, deadline).await?;
+        channel
+            .send(omenchat_protocol::CHANNEL_ATTACHMENT_MESSAGE_TYPE, start)
+            .await
+            .map_err(|error| {
+                AppError::Runtime(format!("OMENchat Channel start dispatch failed: {error:?}"))
+            })?;
+
+        let mut offset = 0u64;
+        let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+        let mut chunk = vec![0u8; chunk_len];
+        loop {
+            let read = tokio::io::AsyncReadExt::read(&mut reader, &mut chunk)
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "OMENchat Channel read failed after dispatch: {error}"
+                    ))
+                })?;
+            if read == 0 {
+                break;
+            }
+            if offset.saturating_add(read as u64) > total_bytes {
+                return Err(AppError::Runtime(
+                    "OMENchat Channel source grew after dispatch; outcome is uncertain".into(),
+                ));
+            }
+            sha2::Digest::update(&mut digest, &chunk[..read]);
+            let frame = omenchat_protocol::ChannelAttachmentFrame::Data {
+                resource_id: resource_id.clone(),
+                offset,
+                bytes: chunk[..read].to_vec(),
+            }
+            .encode(channel_mdu)
+            .map_err(|error| AppError::Runtime(error.to_string()))?;
+            wait_omenchat_channel_ready(&channel, deadline).await?;
+            channel
+                .send(omenchat_protocol::CHANNEL_ATTACHMENT_MESSAGE_TYPE, frame)
+                .await
+                .map_err(|error| {
+                    AppError::Runtime(format!(
+                        "OMENchat Channel data dispatch failed at offset {offset}; outcome is uncertain: {error:?}"
+                    ))
+                })?;
+            offset += read as u64;
+        }
+        if offset != total_bytes {
+            return Err(AppError::Runtime(format!(
+                "OMENchat Channel source length changed after dispatch ({offset}/{total_bytes}); outcome is uncertain"
+            )));
+        }
+        let finish = omenchat_protocol::ChannelAttachmentFrame::Finish {
+            resource_id: resource_id.clone(),
+            total_bytes,
+            digest: sha2::Digest::finalize(digest).into(),
+        }
+        .encode(channel_mdu)
+        .map_err(|error| AppError::Runtime(error.to_string()))?;
+        wait_omenchat_channel_ready(&channel, deadline).await?;
+        let terminal_sequence = channel
+            .send(omenchat_protocol::CHANNEL_ATTACHMENT_MESSAGE_TYPE, finish)
+            .await
+            .map_err(|error| {
+                AppError::Runtime(format!(
+                    "OMENchat Channel finish dispatch failed; outcome is uncertain: {error:?}"
+                ))
+            })?;
+        loop {
+            match channel.message_state(terminal_sequence).await {
+                Ok(rns_transport::channel::MessageState::Delivered) => break,
+                Ok(rns_transport::channel::MessageState::Failed) => {
+                    return Err(AppError::Runtime(
+                        "OMENchat Channel terminal delivery failed; no automatic retry was attempted".into(),
+                    ));
+                }
+                Ok(_) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Ok(_) | Err(_) => {
+                    return Err(AppError::Runtime(
+                        "OMENchat Channel terminal delivery timed out; durable upload outcome is unknown".into(),
+                    ));
+                }
+            }
+        }
+        let _ = self.event_tx.send(RuntimeBusEvent::Debug(format!(
+            "native Reticulum 0.10.0 OMENchat Channel attachment delivered link_id={} resource_id={} bytes={} chunk_bytes={}",
+            hex_encode(&link_id), resource_id, total_bytes, chunk_len
+        )));
+        Ok(())
+    }
+}
+
+async fn wait_omenchat_channel_ready(
+    channel: &rns_transport::transport::TransportChannel,
+    deadline: tokio::time::Instant,
+) -> AppResult<()> {
+    loop {
+        match channel.is_ready_to_send().await {
+            Ok(true) => return Ok(()),
+            Ok(false) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok(false) => {
+                return Err(AppError::Runtime(
+                    "OMENchat Channel backpressure deadline exceeded; no fallback was dispatched"
+                        .into(),
+                ));
+            }
+            Err(error) => {
+                return Err(AppError::Runtime(format!(
+                    "OMENchat Channel link is unavailable: {error:?}"
+                )));
+            }
+        }
     }
 }
 
@@ -8959,6 +9120,40 @@ impl NetworkRuntime for NativeNetworkRuntime {
             }
             result.map(|_| ())
         }
+    }
+
+    async fn send_omenchat_channel_attachment(
+        &self,
+        link_id: [u8; 16],
+        resource_id: String,
+        payload: Vec<u8>,
+    ) -> AppResult<()> {
+        let total = payload.len() as u64;
+        let reader = std::io::Cursor::new(payload);
+        self.send_clean_omenchat_channel_reader(link_id, resource_id, total, reader)
+            .await
+    }
+
+    async fn send_omenchat_channel_file(
+        &self,
+        link_id: [u8; 16],
+        resource_id: String,
+        path: PathBuf,
+        expected_bytes: u64,
+    ) -> AppResult<()> {
+        let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
+            AppError::Runtime(format!("OMENchat Channel source metadata failed: {error}"))
+        })?;
+        if !metadata.is_file() || metadata.len() != expected_bytes {
+            return Err(AppError::Runtime(
+                "OMENchat Channel source changed before dispatch".into(),
+            ));
+        }
+        let reader = tokio::fs::File::open(&path).await.map_err(|error| {
+            AppError::Runtime(format!("OMENchat Channel source open failed: {error}"))
+        })?;
+        self.send_clean_omenchat_channel_reader(link_id, resource_id, expected_bytes, reader)
+            .await
     }
 
     async fn close_omenchat_link(&self, link_id: [u8; 16]) -> AppResult<bool> {

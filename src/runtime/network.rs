@@ -993,6 +993,31 @@ pub trait NetworkRuntime: Send + Sync {
         ))
     }
 
+    async fn send_omenchat_channel_attachment(
+        &self,
+        link_id: [u8; 16],
+        resource_id: String,
+        payload: Vec<u8>,
+    ) -> AppResult<()> {
+        let _ = (link_id, resource_id, payload);
+        Err(crate::error::AppError::Unsupported(
+            "runtime does not support OMENchat Channel attachments".into(),
+        ))
+    }
+
+    async fn send_omenchat_channel_file(
+        &self,
+        link_id: [u8; 16],
+        resource_id: String,
+        path: PathBuf,
+        expected_bytes: u64,
+    ) -> AppResult<()> {
+        let _ = (link_id, resource_id, path, expected_bytes);
+        Err(crate::error::AppError::Unsupported(
+            "runtime does not support OMENchat Channel file streaming".into(),
+        ))
+    }
+
     async fn close_omenchat_link(&self, link_id: [u8; 16]) -> AppResult<bool> {
         let _ = link_id;
         Err(crate::error::AppError::Unsupported(

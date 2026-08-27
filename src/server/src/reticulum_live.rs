@@ -1180,6 +1180,7 @@ fn event_link_id(event: &OmenchatLinkEvent) -> LinkId {
         OmenchatLinkEvent::LinkOpened { link_id, .. }
         | OmenchatLinkEvent::PeerIdentified { link_id, .. }
         | OmenchatLinkEvent::LinkData { link_id, .. }
+        | OmenchatLinkEvent::ChannelAttachmentData { link_id, .. }
         | OmenchatLinkEvent::ResourceReceived { link_id, .. }
         | OmenchatLinkEvent::ResourceTerminal { link_id, .. }
         | OmenchatLinkEvent::LinkClosed { link_id, .. } => *link_id,
@@ -1850,6 +1851,35 @@ fn spawn_link_event_bridge(
                 Ok(event) => match event.event {
                     LinkEvent::Activated => {
                         let link_id = address_hash_bytes(event.id);
+                        let channel_event_tx = event_tx.clone();
+                        let channel_link_id = link_id;
+                        if let Err(error) = transport
+                            .channel(event.id)
+                            .register_handler(
+                                omenchat_protocol::CHANNEL_ATTACHMENT_MESSAGE_TYPE,
+                                move |envelope| {
+                                    let bytes = envelope.payload.len();
+                                    channel_event_tx.try_send_payload(
+                                        channel_link_id,
+                                        bytes,
+                                        OmenchatLinkEvent::ChannelAttachmentData {
+                                            link_id: channel_link_id,
+                                            data: envelope.payload,
+                                        },
+                                    );
+                                    true
+                                },
+                            )
+                            .await
+                        {
+                            append_server_log_warning_path(
+                                &log_path,
+                                format!(
+                                    "reticulum-rs OMENchat Channel handler unavailable link={} error={error:?}",
+                                    hex_lower(&link_id)
+                                ),
+                            );
+                        }
                         append_server_log_path(
                             &log_path,
                             format!(
@@ -2852,6 +2882,11 @@ fn describe_live_event(event: &OmenchatLinkEvent) -> String {
             "reticulum-rs link data link={} context={} bytes={}",
             hex_lower(link_id),
             context,
+            data.len()
+        ),
+        OmenchatLinkEvent::ChannelAttachmentData { link_id, data } => format!(
+            "reticulum-rs Channel attachment data link={} bytes={}",
+            hex_lower(link_id),
             data.len()
         ),
         OmenchatLinkEvent::ResourceReceived {
