@@ -4,7 +4,10 @@ Status: Channel reliability candidate; final local and hosted qualification pend
 
 Baseline: `v0.10.0-4`, commit
 `33971dbdf20c9d962d4a03fe7d7547e092326d75`, clean `main` checkout.
-Source candidate commit: pending after Channel qualification.
+Channel implementation candidate commit:
+`8eb1153aeb45096ba54219a538fbacbb5d3af1bc`. The final evidence-only
+descendant is reported in the maintainer handoff because a tracked evidence
+file cannot contain its own commit hash.
 
 Upstream review date: 2026-08-27. Latest official LXMF-rs release remains
 `v0.10.0`, commit `5436ee715f94f81e18abb0808cfca52fcd7cc9bc`.

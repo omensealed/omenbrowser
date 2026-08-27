@@ -3,9 +3,11 @@
 Status: release candidate
 
 OMENbrowser_rs and standalone omenchatd are `0.10.0-5`. The exact official
-crates.io Reticulum/LXMF train remains `0.10.0`. OMENchat wire protocol `1`,
-`omenchat-protocol 0.3.0` adds the negotiated attachment frame API. SQLite
+crates.io Reticulum/LXMF train remains `0.10.0`. OMENchat wire protocol remains
+`1`. `omenchat-protocol 0.3.0` adds the negotiated attachment frame API. SQLite
 schema `14` and `omen-ifac-tcp 0.9.5-1` are unchanged.
+
+Channel implementation candidate: `8eb1153aeb45096ba54219a538fbacbb5d3af1bc`.
 
 ## Changes
 
