@@ -61,9 +61,9 @@ in [OMENchat Protocol](OMENCHAT_PROTOCOL.md).
 - Routed multi-hop Resource retransmission is not fully qualified on upstream
   Reticulum 0.10.0. Direct/local attachment paths are distinct from routed
   qualification, and OMEN never automatically replays an uncertain transfer.
-- The OMENchat-specific Channel path passes direct and three-node routed
-  process gates, but its injected-loss/reordering process lane remains pending.
-  It does not change generic Resource support claims.
+- The OMENchat-specific Channel path passes direct, three-node routed, and
+  bounded loss/reordering process gates. It does not change generic Resource
+  support claims.
 - The independent maximum-UDP Resource sentinel remains visible: upstream's
   fixed transmit buffer is smaller than the maximum serialized wire packet.
 - Stock upstream TCP does not enforce Python-compatible IFAC wire transforms.

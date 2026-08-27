@@ -1,6 +1,6 @@
 # v0.10.0-5 release evidence
 
-Status: Channel reliability candidate; final local and hosted qualification pending
+Status: local release qualification complete; hosted qualification pending
 
 Baseline: `v0.10.0-4`, commit
 `33971dbdf20c9d962d4a03fe7d7547e092326d75`, clean `main` checkout.
@@ -37,9 +37,10 @@ not dependencies. No newer official base was adopted.
   `three-node-routed` and primitive is `channel`.
 - Official Reticulum 0.10.0 Channel tests cover out-of-order buffering,
   duplicate/window rejection, retransmission, bounded windows, and retry
-  exhaustion. The OMEN three-node process lane did not inject packet loss or
-  reordering; that end-to-end impairment claim remains pending and is not
-  relabeled as pass.
+  exhaustion. `scripts/run-omenchat-current-upload.sh --impaired` also passed
+  through a bounded production-TCP HDLC proxy: three connections, 203 frames,
+  two dropped frames, two reordered frames, 128 KiB committed, and both-client
+  retrieval. Missing impairment counts are a hard failure, never a pass.
 - Adjacent v0.10.0-4 binary upload/download lanes pass in both directions
   against immutable commit `33971dbdf20c9d962d4a03fe7d7547e092326d75`.
   Non-negotiating peers selected the unchanged Resource path; both isolated

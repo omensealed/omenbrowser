@@ -1,6 +1,6 @@
 # OMENbrowser_rs v0.10.0-5 release notes
 
-Status: release candidate
+Status: final
 
 OMENbrowser_rs and standalone omenchatd are `0.10.0-5`. The exact official
 crates.io Reticulum/LXMF train remains `0.10.0`. OMENchat wire protocol remains
@@ -43,8 +43,8 @@ macOS maps to short `0.10.0` and build `1000.0.5`; Windows MSI maps to
 `0.10.0.5` and qualifies upgrade from `0.10.0-4`. Candidate SHA and final local,
 hosted, package, checksum, Python, mixed-release, platform, and unavailable-lane
 results are maintained in the release evidence. The negotiated direct and
-three-node routed Channel upload lanes pass locally, as do both immutable
-v0.10.0-4 Resource-downgrade directions. Injected impairment remains
-release-candidate work. Signing, notarization, public
+three-node routed and bounded loss/reordering Channel upload lanes pass locally,
+as do both immutable v0.10.0-4 Resource-downgrade directions. Signing,
+notarization, public
 announce traffic, display/PTY, and physical RNode lanes are unavailable unless
 the evidence records an exact candidate run.

@@ -253,6 +253,7 @@ bash scripts/smoke/04_omenchat_resource_transfer.sh
 bash scripts/run-omenchat-continuous-reconnect.sh
 bash scripts/run-omenchat-current-upload.sh
 bash scripts/run-omenchat-current-upload.sh --routed
+bash scripts/run-omenchat-current-upload.sh --impaired
 ```
 
 See [Testing](TESTING.md) for the full Cargo, interoperability, package, and

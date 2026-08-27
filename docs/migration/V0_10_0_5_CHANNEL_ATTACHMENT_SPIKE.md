@@ -1,6 +1,6 @@
 # v0.10.0-5 Channel attachment implementation
 
-Status: implemented; final proof gate in progress
+Status: implemented and qualified
 
 OMENchat v0.10.0-5 adds the negotiated `omenchat-channel-attachments-v1`
 capability using only the public Reticulum 0.10.0 `Transport::channel`,
@@ -30,9 +30,11 @@ fixture and reported `sender_upload_primitive=channel`.
 
 Official Reticulum 0.10.0 tests independently cover Channel out-of-order
 buffering, duplicate/window rejection, bounded flow control, retransmission,
-and retry exhaustion. OMEN's three-node run did not inject packet loss or
-reordering, so that narrower end-to-end impairment claim remains pending. The
-Immutable v0.10.0-4 binary lanes pass in both directions: current browser to old
+and retry exhaustion. OMEN's bounded production-interface impairment proxy
+dropped and reordered complete encrypted HDLC Reticulum frames in a true
+three-node topology. The 128 KiB upload passed with three connections, 203
+frames, two drops, two reorder events, and both-client retrieval. Immutable
+v0.10.0-4 binary lanes pass in both directions: current browser to old
 server and old browser to current server selected the legacy Resource path and
 completed multi-client upload/download without retry or fallback. This
 OMEN-specific path does not repair or promote generic NomadNet/LXMF Resource
