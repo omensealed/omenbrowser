@@ -13,5 +13,5 @@ Target: `v0.10.0-5`
 - [x] Quick, full, security, smoke, reconnect, direct/routed/impaired Channel upload, NomadNet, and package creation gates pass on the final candidate.
 - [x] Known-red routed Resource and maximum-UDP sentinels recorded separately.
 - [x] Adjacent v0.10.0-4 Channel-downgrade upload/download lanes pass in both directions against immutable commit 33971db.
-- [ ] Native/hosted package workflows and checksums recorded.
+- [x] Native/hosted CI, interoperability, package, ARM64 workflows, and artifact checksums recorded for exact candidate `8660c6f`.
 - [ ] Maintainer review authorizes tag, push, publication, or GitHub release.

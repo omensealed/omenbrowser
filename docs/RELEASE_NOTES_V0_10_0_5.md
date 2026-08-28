@@ -7,7 +7,8 @@ crates.io Reticulum/LXMF train remains `0.10.0`. OMENchat wire protocol remains
 `1`. `omenchat-protocol 0.3.0` adds the negotiated attachment frame API. SQLite
 schema `14` and `omen-ifac-tcp 0.9.5-1` are unchanged.
 
-Channel implementation candidate: `8eb1153aeb45096ba54219a538fbacbb5d3af1bc`.
+Channel implementation commit: `8eb1153aeb45096ba54219a538fbacbb5d3af1bc`.
+Hosted qualification candidate: `8660c6f42fd08206639a929007b692ca61f75afd`.
 
 ## Changes
 
@@ -44,7 +45,9 @@ macOS maps to short `0.10.0` and build `1000.0.5`; Windows MSI maps to
 hosted, package, checksum, Python, mixed-release, platform, and unavailable-lane
 results are maintained in the release evidence. The negotiated direct and
 three-node routed and bounded loss/reordering Channel upload lanes pass locally,
-as do both immutable v0.10.0-4 Resource-downgrade directions. Signing,
-notarization, public
-announce traffic, display/PTY, and physical RNode lanes are unavailable unless
-the evidence records an exact candidate run.
+as do both immutable v0.10.0-4 Resource-downgrade directions. Exact-candidate
+hosted CI, Python/mixed interoperability, Linux packaging, Windows
+portable/installer upgrade, macOS Intel/Apple Silicon packaging, and Linux
+ARM64 omenchatd lanes pass. Signing, notarization, graphical display,
+controlled public announce traffic, and physical RNode lanes remain
+unavailable; the local PTY lane passes.

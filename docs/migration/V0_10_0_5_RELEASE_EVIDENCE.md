@@ -1,11 +1,12 @@
 # v0.10.0-5 release evidence
 
-Status: local release qualification complete; hosted qualification pending
+Status: local and hosted release qualification complete; publication pending
 
 Baseline: `v0.10.0-4`, commit
 `33971dbdf20c9d962d4a03fe7d7547e092326d75`, clean `main` checkout.
-Channel implementation candidate commit:
-`8eb1153aeb45096ba54219a538fbacbb5d3af1bc`. The final evidence-only
+Channel implementation commit: `8eb1153aeb45096ba54219a538fbacbb5d3af1bc`.
+Exact hosted qualification candidate:
+`8660c6f42fd08206639a929007b692ca61f75afd`. The final evidence-only
 descendant is reported in the maintainer handoff because a tracked evidence
 file cannot contain its own commit hash.
 
@@ -75,7 +76,12 @@ not dependencies. No newer official base was adopted.
 - Adjacent history Resource: old client to current server passed. Current client
   to old server initially failed to decode the Resource event, then passed on an
   isolated rerun with exact history content. This timing-sensitive harness
-  result remains a hosted-repeat item, not a hidden pass.
+  result was repeated in hosted qualification. Two runs on `0d1f539` exposed
+  that asynchronous Resource completion and typed `history_prepended` decoding
+  can be drained in adjacent runtime-event envelopes. The assertion was fixed
+  to require both Resource receipt and typed history decoding in the same
+  isolated report without requiring one callback envelope. The unchanged
+  transport lane then passed on `8660c6f`.
 - Adjacent SQLite history reopening: pass in both read/write directions with
   room/server metadata, event order, and content preserved.
 - Passive announce observation: unavailable. Official 0.10.0 has no public
@@ -84,14 +90,40 @@ not dependencies. No newer official base was adopted.
 
 ## Package
 
-The final archive is generated only after this embedded evidence is finalized.
-Its timestamped filename and SHA-256 are recorded in the external `dist`
-checksum/manifest files and the maintainer handoff report, avoiding a
-self-referential checksum inside the archive itself.
+Exact-candidate hosted evidence on 2026-08-28:
 
-Hosted native Windows/macOS/ARM64, signing, notarization, physical RNode,
-public-network announce traffic, and adjacent upload/download/mutation and
-installer-upgrade breadth remain `unavailable` until an exact-candidate hosted
-run is linked. The local PTY
-lane passed; a graphical display lane was not claimed. No tag, push,
-publication, or GitHub release was performed.
+- CI run `33138391587`: pass.
+- Python interoperability run `33138399631`: pass. Pinned vectors,
+  proof/propagation/stamp/recovery, current-product OMENchat/NomadNet, current
+  Python drift reporting, maintained `v0.9.9-2`, and adjacent `v0.10.0-4`
+  directions completed.
+- Package run `33175917126`: pass. Native prerequisites passed on Windows
+  x86_64, macOS x86_64, and macOS aarch64. Linux release artifacts, Windows
+  portable/unsigned installer artifacts with the `0.10.0-4` MSI upgrade lane,
+  and both macOS package jobs passed. Publication was skipped as required.
+- Linux ARM64 headless run `33175916892`: pass for standalone omenchatd.
+
+Hosted artifact checksums from package run `33175917126`:
+
+```text
+0958a91b30161b02a7727398b503cb7fa210f743c7279050da190030941d03cf  OMENbrowser_rs-latest.tar.gz
+1d2111e9a5488d99c17bc89069a0990755edb3bf1b182bb8d1ca656daec455ba  omenbrowser-rs_0.10.0-5_amd64.deb
+e4863282b62215eddb0be0629c24630d19fd8d6a47d8bffc2799e0b2ca471455  OMENbrowser_rs-0.10.0-5-x86_64.AppImage
+2da7702774280f09f80f1620926bee70ec5113ca3dad2950c3026ea2becbf191  OMENbrowser_rs-0.10.0-5-windows-x86_64-portable.zip
+98984fe963ffa56a0298cd79f72e599d203abcb7b3e28d72d3068c4096a79632  OMENbrowser_rs-0.10.0-5-windows-x86_64-setup-unsigned.exe
+d4afa92b0d9fef396a075a70a674bf834f1aae7734d7cb8ba11e5cda702f85fb  OMENbrowser_rs-0.10.0-5-windows-x86_64-unsigned.msi
+f7afe90e98efa548b1490911e29d7d774651dbffc4288210e6154256810c33c8  omenchatd-0.10.0-5-windows-x86_64.zip
+62a05cb02fbbbd8d77bb7c3f220c348a368ec4cde8780b89546d3400b484b1f5  OMENbrowser_rs-0.10.0-5-macos-x86_64-unsigned.dmg
+d33330ecd5ab01182c3c81fb2bd7b1ca9cb84a16a7766067b02cf1737d010df4  omenchatd-0.10.0-5-macos-x86_64.tar.gz
+a55703f024c04678e69bdd84e558bd78a96950fd9c78fd88b14838fae222e983  OMENbrowser_rs-0.10.0-5-macos-aarch64-unsigned.dmg
+235b19cc11bdbd94a3b37f2804de9fbeab006beb43fe232ed5927a92fa7ddb6b  omenchatd-0.10.0-5-macos-aarch64.tar.gz
+```
+
+The final archive is generated after this embedded evidence is finalized. Its
+new checksum belongs in the external `dist` manifest and maintainer handoff,
+avoiding a self-referential checksum inside the archive.
+
+Signing, notarization, a graphical display, physical RNode hardware, and
+controlled public-network announce-heavy observation remain unavailable and
+are not counted as passes. The local PTY lane passed. No tag, publication, or
+GitHub release was performed.
