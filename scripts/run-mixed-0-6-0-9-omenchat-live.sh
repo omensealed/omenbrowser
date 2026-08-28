@@ -258,7 +258,9 @@ if history_resource:
                 collect_resource_events(child)
 
     collect_resource_events(history_report)
-    if not any(contains_event(event, "history_prepended") for event in resource_events):
+    if not resource_events:
+        raise RuntimeError("history Resource data was not observed")
+    if not contains_event(history_report, "history_prepended"):
         raise RuntimeError("history was not decoded from an OMENchat Resource event")
     if history_report.get("session", {}).get("event_count", 0) < 2:
         raise RuntimeError("mixed OMENchat history Resource session was incomplete")
